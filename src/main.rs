@@ -1,7 +1,10 @@
+#![deny(warnings)]
+
 mod agent;
 mod channel;
 mod cli;
 mod config;
+mod dispatch;
 mod error;
 mod gateway;
 mod memory;

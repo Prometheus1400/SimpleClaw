@@ -32,10 +32,6 @@ pub struct GlobalConfig {
 pub struct AgentConfig {
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default = "default_true")]
-    pub network_allow_all: bool,
-    #[serde(default = "default_true")]
-    pub read_allow_all: bool,
     #[serde(default)]
     pub sandbox: SandboxMode,
     #[serde(default)]
@@ -46,8 +42,6 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             model: None,
-            network_allow_all: true,
-            read_allow_all: true,
             sandbox: SandboxMode::default(),
             tools: ToolConfig::default(),
         }
@@ -404,11 +398,15 @@ pub struct RuntimeConfig {
     #[serde(default = "default_history_messages")]
     pub history_messages: u32,
     #[serde(default)]
+    pub memory_preinject: MemoryPreinjectConfig,
+    #[serde(default)]
     pub summon_mode: SummonMode,
     #[serde(default = "default_safe_error_reply")]
     pub safe_error_reply: String,
     #[serde(default)]
     pub log_level: LogLevel,
+    #[serde(default)]
+    pub owner_ids: Vec<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -416,9 +414,48 @@ impl Default for RuntimeConfig {
         Self {
             max_steps: default_max_steps(),
             history_messages: default_history_messages(),
+            memory_preinject: MemoryPreinjectConfig::default(),
             summon_mode: SummonMode::default(),
             safe_error_reply: default_safe_error_reply(),
             log_level: LogLevel::default(),
+            owner_ids: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryPreinjectConfig {
+    pub enabled: bool,
+    pub top_k: u32,
+    pub min_score: f32,
+    pub max_items_per_store: u32,
+    pub long_term_weight: f32,
+    pub max_chars: u32,
+}
+
+impl Default for MemoryPreinjectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_preinject_enabled(),
+            top_k: default_memory_preinject_top_k(),
+            min_score: default_memory_preinject_min_score(),
+            max_items_per_store: default_memory_preinject_max_items_per_store(),
+            long_term_weight: default_memory_preinject_long_term_weight(),
+            max_chars: default_memory_preinject_max_chars(),
+        }
+    }
+}
+
+impl MemoryPreinjectConfig {
+    pub fn normalized(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            top_k: self.top_k.clamp(1, 10),
+            min_score: self.min_score.clamp(0.0, 1.0),
+            max_items_per_store: self.max_items_per_store.clamp(1, 100),
+            long_term_weight: self.long_term_weight.clamp(0.0, 1.0),
+            max_chars: self.max_chars.clamp(200, 4000),
         }
     }
 }
@@ -427,7 +464,7 @@ impl Default for RuntimeConfig {
 #[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
     #[default]
-    Workspace,
+    Wasm,
     Off,
 }
 
@@ -534,6 +571,12 @@ impl ProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gemini => "gemini",
+        }
+    }
+
+    pub fn supports_native_tools(self) -> bool {
+        match self {
+            Self::Gemini => true,
         }
     }
 }
@@ -737,6 +780,24 @@ fn default_max_steps() -> u32 {
 fn default_history_messages() -> u32 {
     10
 }
+fn default_memory_preinject_enabled() -> bool {
+    true
+}
+fn default_memory_preinject_top_k() -> u32 {
+    3
+}
+fn default_memory_preinject_min_score() -> f32 {
+    0.72
+}
+fn default_memory_preinject_max_items_per_store() -> u32 {
+    20
+}
+fn default_memory_preinject_long_term_weight() -> f32 {
+    0.65
+}
+fn default_memory_preinject_max_chars() -> u32 {
+    1200
+}
 fn default_safe_error_reply() -> String {
     "I hit an internal error while processing that request.".to_owned()
 }
@@ -750,9 +811,6 @@ fn default_agents_list() -> Vec<AgentEntryConfig> {
         workspace: PathBuf::from("./workspace"),
     }]
 }
-fn default_true() -> bool {
-    true
-}
 fn default_gateway_channels() -> Vec<GatewayChannelKind> {
     vec![GatewayChannelKind::Discord]
 }
@@ -760,11 +818,14 @@ fn default_enabled_tools() -> Vec<String> {
     [
         "memory",
         "memorize",
+        "forget",
         "summon",
+        "task",
         "web_search",
         "clock",
         "web_fetch",
         "read",
+        "edit",
         "exec",
         "process",
     ]
@@ -804,7 +865,6 @@ mod tests {
             log_path: logs_dir.join("service.log"),
             pid_path: run_dir.join("service.pid"),
             base_dir,
-            db_dir,
             logs_dir,
             run_dir,
         }
@@ -915,6 +975,68 @@ mod tests {
         let runtime = RuntimeConfig::default();
         assert_eq!(runtime.history_messages, 10);
         assert_eq!(runtime.log_level, LogLevel::Info);
+        assert!(runtime.memory_preinject.enabled);
+        assert_eq!(runtime.memory_preinject.top_k, 3);
+        assert!((runtime.memory_preinject.min_score - 0.72).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn runtime_memory_preinject_accepts_overrides() {
+        let yaml = r#"
+memory_preinject:
+  enabled: false
+  top_k: 5
+  min_score: 0.8
+  max_items_per_store: 40
+  long_term_weight: 0.7
+  max_chars: 900
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml).expect("valid yaml");
+        assert!(!parsed.memory_preinject.enabled);
+        assert_eq!(parsed.memory_preinject.top_k, 5);
+        assert!((parsed.memory_preinject.min_score - 0.8).abs() < f32::EPSILON);
+        assert_eq!(parsed.memory_preinject.max_items_per_store, 40);
+        assert!((parsed.memory_preinject.long_term_weight - 0.7).abs() < f32::EPSILON);
+        assert_eq!(parsed.memory_preinject.max_chars, 900);
+    }
+
+    #[test]
+    fn runtime_memory_preinject_rejects_unknown_fields() {
+        let yaml = r#"
+memory_preinject:
+  enabled: true
+  bogus: 1
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn runtime_memory_preinject_rejects_legacy_short_term_weight() {
+        let yaml = r#"
+memory_preinject:
+  short_term_weight: 0.3
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn runtime_memory_preinject_normalized_clamps_values() {
+        let config = MemoryPreinjectConfig {
+            enabled: true,
+            top_k: 999,
+            min_score: 5.0,
+            max_items_per_store: 0,
+            long_term_weight: -4.0,
+            max_chars: 32,
+        };
+        let normalized = config.normalized();
+        assert_eq!(normalized.top_k, 10);
+        assert!((normalized.min_score - 1.0).abs() < f32::EPSILON);
+        assert_eq!(normalized.max_items_per_store, 1);
+        assert!((normalized.long_term_weight - 0.0).abs() < f32::EPSILON);
+        assert_eq!(normalized.max_chars, 200);
     }
 
     #[test]
@@ -988,11 +1110,14 @@ channels:
             vec![
                 "memory".to_owned(),
                 "memorize".to_owned(),
+                "forget".to_owned(),
                 "summon".to_owned(),
+                "task".to_owned(),
                 "web_search".to_owned(),
                 "clock".to_owned(),
                 "web_fetch".to_owned(),
                 "read".to_owned(),
+                "edit".to_owned(),
                 "exec".to_owned(),
                 "process".to_owned()
             ]
@@ -1025,9 +1150,19 @@ tools:
     #[test]
     fn agent_config_defaults_exec_policy() {
         let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
-        assert!(parsed.network_allow_all);
-        assert!(parsed.read_allow_all);
-        assert_eq!(parsed.sandbox, SandboxMode::Workspace);
+        assert_eq!(parsed.sandbox, SandboxMode::Wasm);
+    }
+
+    #[test]
+    fn agent_config_rejects_legacy_network_allow_all_field() {
+        let parsed = serde_yaml::from_str::<AgentConfig>("network_allow_all: false\n");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn agent_config_rejects_legacy_read_allow_all_field() {
+        let parsed = serde_yaml::from_str::<AgentConfig>("read_allow_all: false\n");
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -1039,6 +1174,27 @@ sandbox: off
         )
         .expect("valid yaml");
         assert_eq!(parsed.sandbox, SandboxMode::Off);
+    }
+
+    #[test]
+    fn agent_config_sandbox_accepts_wasm() {
+        let parsed: AgentConfig = serde_yaml::from_str(
+            r#"
+sandbox: wasm
+"#,
+        )
+        .expect("valid yaml");
+        assert_eq!(parsed.sandbox, SandboxMode::Wasm);
+    }
+
+    #[test]
+    fn agent_config_sandbox_rejects_workspace() {
+        let parsed = serde_yaml::from_str::<AgentConfig>(
+            r#"
+sandbox: workspace
+"#,
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]

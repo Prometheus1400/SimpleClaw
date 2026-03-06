@@ -9,7 +9,6 @@ pub struct AppPaths {
     pub base_dir: PathBuf,
     pub config_path: PathBuf,
     pub secrets_path: PathBuf,
-    pub db_dir: PathBuf,
     pub db_path: PathBuf,
     pub long_term_db_path: PathBuf,
     pub fastembed_cache_dir: PathBuf,
@@ -39,7 +38,6 @@ impl AppPaths {
             log_path: logs_dir.join("service.log"),
             pid_path: run_dir.join("service.pid"),
             base_dir,
-            db_dir,
             logs_dir,
             run_dir,
         })
@@ -87,10 +85,12 @@ mod tests {
             paths.secrets_path.file_name().and_then(|s| s.to_str()),
             Some("secrets.yaml")
         );
-        assert_eq!(
-            paths.db_dir.file_name().and_then(|s| s.to_str()),
-            Some("db")
-        );
+        let db_dir_name = paths
+            .db_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str());
+        assert_eq!(db_dir_name, Some("db"));
         assert_eq!(
             paths.logs_dir.file_name().and_then(|s| s.to_str()),
             Some("logs")

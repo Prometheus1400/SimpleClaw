@@ -1,4 +1,5 @@
 pub mod builtin;
+pub mod sandbox;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -29,15 +30,31 @@ pub trait SummonService: Send + Sync {
     ) -> Result<String, FrameworkError>;
 }
 
+#[async_trait]
+pub trait TaskService: Send + Sync {
+    async fn run_task(&self, prompt: &str, session_id: &str) -> Result<String, FrameworkError>;
+}
+
 #[derive(Clone)]
 pub struct ToolCtx {
     pub memory: MemoryStore,
-    pub network_allow_all: bool,
-    pub read_allow_all: bool,
     pub sandbox: SandboxMode,
     pub workspace_root: PathBuf,
+    pub user_id: String,
+    pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
     pub summon_service: Option<Arc<dyn SummonService>>,
+    pub task_service: Option<Arc<dyn TaskService>>,
+}
+
+impl ToolCtx {
+    pub fn owner_allowed(user_id: &str, owner_ids: &[String]) -> bool {
+        !owner_ids.is_empty() && owner_ids.iter().any(|owner_id| owner_id == user_id)
+    }
+
+    pub fn is_owner(&self) -> bool {
+        Self::owner_allowed(&self.user_id, &self.owner_ids)
+    }
 }
 
 #[async_trait]
@@ -450,5 +467,22 @@ mod tests {
         let definitions = active.definitions();
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].description, "fake-b");
+    }
+
+    #[test]
+    fn tool_ctx_owner_allowed_when_owner_ids_empty_is_false() {
+        assert!(!ToolCtx::owner_allowed("user-1", &[]));
+    }
+
+    #[test]
+    fn tool_ctx_owner_allowed_when_user_matches() {
+        let owner_ids = vec!["owner-1".to_owned(), "owner-2".to_owned()];
+        assert!(ToolCtx::owner_allowed("owner-2", &owner_ids));
+    }
+
+    #[test]
+    fn tool_ctx_owner_allowed_when_user_missing() {
+        let owner_ids = vec!["owner-1".to_owned(), "owner-2".to_owned()];
+        assert!(!ToolCtx::owner_allowed("user-3", &owner_ids));
     }
 }

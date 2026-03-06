@@ -23,3 +23,7 @@ rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "http", "rustls_backend"] }
 fastembed = "5"
 sqlite-vec = "0.1"
+regex = "1"
+wasmtime = "21"
+wasmtime-wasi = "21"
+cap-std = "3"
