@@ -28,8 +28,33 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
     let loaded = LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load global/workspace configuration")?;
 
+    let workspace_exists = loaded.workspace.is_dir();
+    info!(
+        workspace_raw = %loaded.workspace_raw.display(),
+        workspace_resolved = %loaded.workspace.display(),
+        workspace_exists,
+        "workspace path resolved"
+    );
+
+    let prompt_layers = PromptAssembler::inspect_workspace(&loaded.workspace)
+        .wrap_err("failed to inspect workspace prompt layers")?;
+    for layer in &prompt_layers {
+        info!(
+            layer = layer.title,
+            file = layer.file,
+            path = %layer.path.display(),
+            exists = layer.exists,
+            bytes = layer.bytes,
+            "prompt layer status"
+        );
+    }
+
     let system_prompt = PromptAssembler::from_workspace(&loaded.workspace)
         .wrap_err("failed to assemble layered system prompt")?;
+    info!(
+        prompt_chars = system_prompt.chars().count(),
+        "layered system prompt assembled"
+    );
 
     let memory = MemoryStore::new(
         &paths.db_path,

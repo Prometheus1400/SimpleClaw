@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +50,7 @@ impl Default for AgentConfig {
 pub struct LoadedConfig {
     pub global: GlobalConfig,
     pub agent: AgentConfig,
+    pub workspace_raw: PathBuf,
     pub workspace: PathBuf,
 }
 
@@ -67,9 +69,11 @@ impl LoadedConfig {
         global.database.path = paths.db_path;
         global.database.long_term_path = paths.long_term_db_path;
 
-        let workspace = workspace_override
+        let workspace_raw = workspace_override
             .map(PathBuf::from)
             .unwrap_or_else(|| global.runtime.default_agent_workspace.clone());
+        normalize_runtime_workspace_paths(&mut global.runtime);
+        let workspace = normalize_workspace_path(&workspace_raw);
         let agent_path = workspace.join("agent.yaml");
         let agent = if agent_path.exists() {
             let content = fs::read_to_string(agent_path)?;
@@ -81,6 +85,7 @@ impl LoadedConfig {
         Ok(Self {
             global,
             agent,
+            workspace_raw,
             workspace,
         })
     }
@@ -92,6 +97,132 @@ impl GlobalConfig {
         self.provider.resolve_secrets(&resolver)?;
         self.discord.resolve_secrets(&resolver)?;
         Ok(())
+    }
+}
+
+fn normalize_runtime_workspace_paths(runtime: &mut RuntimeConfig) {
+    runtime.default_agent_workspace = normalize_workspace_path(&runtime.default_agent_workspace);
+    runtime.summon_agents = runtime
+        .summon_agents
+        .iter()
+        .map(|(name, workspace)| (name.clone(), normalize_workspace_path(workspace)))
+        .collect();
+}
+
+fn normalize_workspace_path(path: &Path) -> PathBuf {
+    let expanded = expand_env_vars(&path.to_string_lossy());
+    expand_home_dir(&expanded).unwrap_or_else(|| PathBuf::from(expanded))
+}
+
+fn expand_home_dir(value: &str) -> Option<PathBuf> {
+    if !value.starts_with('~') {
+        return None;
+    }
+    if value.len() > 1 {
+        let separator = value.as_bytes()[1];
+        if separator != b'/' && separator != b'\\' {
+            return None;
+        }
+    }
+
+    let home = home_dir()?;
+    if value == "~" {
+        return Some(home);
+    }
+
+    let mut full = home;
+    let remainder = &value[2..];
+    if !remainder.is_empty() {
+        full.push(remainder);
+    }
+    Some(full)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn expand_env_vars(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut output = String::with_capacity(input.len());
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if chars[i] != '$' {
+            output.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= chars.len() {
+            output.push('$');
+            i += 1;
+            continue;
+        }
+
+        if chars[i + 1] == '{' {
+            let mut end = i + 2;
+            while end < chars.len() && chars[end] != '}' {
+                end += 1;
+            }
+            if end < chars.len() {
+                let key: String = chars[i + 2..end].iter().collect();
+                if is_valid_env_key(&key) {
+                    if let Ok(value) = env::var(&key) {
+                        output.push_str(&value);
+                    } else {
+                        output.push_str(&format!("${{{key}}}"));
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+            output.push('$');
+            i += 1;
+            continue;
+        }
+
+        let mut end = i + 1;
+        while end < chars.len() && is_env_key_char(chars[end], end == i + 1) {
+            end += 1;
+        }
+        if end == i + 1 {
+            output.push('$');
+            i += 1;
+            continue;
+        }
+
+        let key: String = chars[i + 1..end].iter().collect();
+        if let Ok(value) = env::var(&key) {
+            output.push_str(&value);
+        } else {
+            output.push('$');
+            output.push_str(&key);
+        }
+        i = end;
+    }
+
+    output
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    let mut chars = key.chars();
+    if !is_env_key_char(chars.next().unwrap_or('_'), true) {
+        return false;
+    }
+    chars.all(|ch| is_env_key_char(ch, false))
+}
+
+fn is_env_key_char(ch: char, first: bool) -> bool {
+    if first {
+        ch == '_' || ch.is_ascii_alphabetic()
+    } else {
+        ch == '_' || ch.is_ascii_alphanumeric()
     }
 }
 
@@ -469,6 +600,7 @@ fn default_embedding_model() -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
@@ -747,5 +879,64 @@ tools:
             .expect("missing optional secret fields should not fail config load");
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn normalize_workspace_path_expands_home_prefix() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+        let normalized = normalize_workspace_path(Path::new("~/workspace"));
+        assert_eq!(normalized, home.join("workspace"));
+    }
+
+    #[test]
+    fn normalize_workspace_path_expands_dollar_env_syntax() {
+        let key = "SIMPLECLAW_TEST_WORKSPACE_ROOT";
+        unsafe {
+            std::env::set_var(key, "/tmp/simpleclaw-workspace-root");
+        }
+        let normalized = normalize_workspace_path(Path::new("${SIMPLECLAW_TEST_WORKSPACE_ROOT}/a"));
+        assert_eq!(
+            normalized,
+            PathBuf::from("/tmp/simpleclaw-workspace-root/a")
+        );
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn normalize_runtime_workspace_paths_updates_summon_targets() {
+        let key = "SIMPLECLAW_TEST_SUMMON_ROOT";
+        unsafe {
+            std::env::set_var(key, "/tmp/simpleclaw-summon-root");
+        }
+        let mut runtime = RuntimeConfig {
+            default_agent_workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/default"),
+            summon_agents: HashMap::from([(
+                "researcher".to_owned(),
+                PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/research"),
+            )]),
+            ..RuntimeConfig::default()
+        };
+
+        normalize_runtime_workspace_paths(&mut runtime);
+
+        assert_eq!(
+            runtime.default_agent_workspace,
+            PathBuf::from("/tmp/simpleclaw-summon-root/default")
+        );
+        assert_eq!(
+            runtime
+                .summon_agents
+                .get("researcher")
+                .expect("summon target should exist"),
+            &PathBuf::from("/tmp/simpleclaw-summon-root/research")
+        );
+
+        unsafe {
+            std::env::remove_var(key);
+        }
     }
 }

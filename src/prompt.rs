@@ -1,37 +1,83 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::FrameworkError;
 
 pub struct PromptAssembler;
 
+#[derive(Debug, Clone)]
+pub struct PromptLayerInfo {
+    pub title: &'static str,
+    pub file: &'static str,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub bytes: u64,
+}
+
 impl PromptAssembler {
+    pub fn inspect_workspace(workspace: &Path) -> Result<Vec<PromptLayerInfo>, FrameworkError> {
+        prompt_layers()
+            .iter()
+            .map(|(title, file)| {
+                let path = workspace.join(file);
+                if !path.exists() {
+                    return Ok(PromptLayerInfo {
+                        title,
+                        file,
+                        path,
+                        exists: false,
+                        bytes: 0,
+                    });
+                }
+
+                let bytes = fs::metadata(&path)?.len();
+                Ok(PromptLayerInfo {
+                    title,
+                    file,
+                    path,
+                    exists: true,
+                    bytes,
+                })
+            })
+            .collect()
+    }
+
     pub fn from_workspace(workspace: &Path) -> Result<String, FrameworkError> {
         let mut sections = Vec::new();
-        append_layer(&mut sections, workspace, "IDENTITY", "IDENTITY.md")?;
-        append_layer(&mut sections, workspace, "AGENT", "AGENT.md")?;
-        append_layer(&mut sections, workspace, "USER", "USER.md")?;
-        append_layer(&mut sections, workspace, "MEMORY", "MEMORY.md")?;
-        append_layer(&mut sections, workspace, "SOUL", "SOUL.md")?;
+        for layer in Self::inspect_workspace(workspace)? {
+            append_layer(
+                &mut sections,
+                &layer.path,
+                layer.title,
+                layer.exists,
+                layer.bytes,
+            )?;
+        }
         Ok(sections.join("\n\n"))
     }
 }
 
-fn read_layer(workspace: &Path, file: &str) -> Result<String, FrameworkError> {
-    let path = workspace.join(file);
-    if path.exists() {
-        return fs::read_to_string(path).map_err(FrameworkError::from);
-    }
-    Ok(String::new())
+fn prompt_layers() -> [(&'static str, &'static str); 5] {
+    [
+        ("IDENTITY", "IDENTITY.md"),
+        ("AGENT", "AGENT.md"),
+        ("USER", "USER.md"),
+        ("MEMORY", "MEMORY.md"),
+        ("SOUL", "SOUL.md"),
+    ]
 }
 
 fn append_layer(
     sections: &mut Vec<String>,
-    workspace: &Path,
+    path: &Path,
     title: &str,
-    file: &str,
+    exists: bool,
+    bytes: u64,
 ) -> Result<(), FrameworkError> {
-    let content = read_layer(workspace, file)?;
+    if !exists || bytes == 0 {
+        return Ok(());
+    }
+    let content = fs::read_to_string(path)?;
     if content.trim().is_empty() {
         return Ok(());
     }
@@ -59,6 +105,39 @@ mod tests {
         assert!(!prompt.contains("# IDENTITY"));
         assert!(!prompt.contains("# USER"));
         assert!(!prompt.contains("# MEMORY"));
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn inspect_workspace_reports_presence_and_sizes() {
+        let workspace = unique_temp_workspace("prompt_inspect");
+        fs::create_dir_all(&workspace).expect("temp workspace");
+        fs::write(workspace.join("IDENTITY.md"), "identity\n").expect("write IDENTITY");
+        fs::write(workspace.join("SOUL.md"), "").expect("write empty SOUL");
+
+        let layers = PromptAssembler::inspect_workspace(&workspace).expect("inspect workspace");
+
+        let identity = layers
+            .iter()
+            .find(|layer| layer.file == "IDENTITY.md")
+            .expect("identity layer");
+        assert!(identity.exists);
+        assert!(identity.bytes > 0);
+
+        let soul = layers
+            .iter()
+            .find(|layer| layer.file == "SOUL.md")
+            .expect("soul layer");
+        assert!(soul.exists);
+        assert_eq!(soul.bytes, 0);
+
+        let memory = layers
+            .iter()
+            .find(|layer| layer.file == "MEMORY.md")
+            .expect("memory layer");
+        assert!(!memory.exists);
+        assert_eq!(memory.bytes, 0);
 
         let _ = fs::remove_dir_all(&workspace);
     }
