@@ -19,12 +19,55 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    pub tool_results: Vec<ToolResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub args_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    #[serde(default)]
+    pub call_id: Option<String>,
+    pub name: String,
+    pub response: Value,
+}
+
+impl Message {
+    pub fn text(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+        }
+    }
+
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls,
+            tool_results: Vec::new(),
+        }
+    }
+
+    pub fn tool_results(tool_results: Vec<ToolResult>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            tool_results,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +125,65 @@ impl GeminiProvider {
     }
 }
 
+fn build_gemini_contents(history: &[Message]) -> Vec<Value> {
+    history
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                Role::Assistant => "model",
+                _ => "user",
+            };
+
+            let parts = if !message.tool_calls.is_empty() {
+                message
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        let args = serde_json::from_str::<Value>(&call.args_json)
+                            .unwrap_or_else(|_| json!({}));
+                        let mut function_call = json!({
+                            "name": call.name,
+                            "args": args,
+                        });
+                        if let Some(id) = &call.id {
+                            function_call["id"] = json!(id);
+                        }
+                        json!({ "functionCall": function_call })
+                    })
+                    .collect::<Vec<_>>()
+            } else if !message.tool_results.is_empty() {
+                message
+                    .tool_results
+                    .iter()
+                    .map(|result| {
+                        let mut function_response = json!({
+                            "name": result.name,
+                            "response": result.response,
+                        });
+                        if let Some(call_id) = &result.call_id {
+                            function_response["id"] = json!(call_id);
+                        }
+                        json!({ "functionResponse": function_response })
+                    })
+                    .collect::<Vec<_>>()
+            } else if message.content.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![json!({ "text": message.content })]
+            };
+
+            if parts.is_empty() {
+                return None;
+            }
+
+            Some(json!({
+                "role": role,
+                "parts": parts
+            }))
+        })
+        .collect()
+}
+
 #[async_trait]
 impl Provider for GeminiProvider {
     async fn generate(
@@ -106,19 +208,7 @@ impl Provider for GeminiProvider {
             })
             .collect();
 
-        let contents: Vec<Value> = history
-            .iter()
-            .map(|message| {
-                let role = match message.role {
-                    Role::Assistant => "model",
-                    _ => "user",
-                };
-                json!({
-                    "role": role,
-                    "parts": [{ "text": message.content }]
-                })
-            })
-            .collect();
+        let contents = build_gemini_contents(history);
 
         let body = json!({
             "system_instruction": {
@@ -173,6 +263,11 @@ impl Provider for GeminiProvider {
                     if name.is_empty() {
                         continue;
                     }
+                    let id = function_call
+                        .get("id")
+                        .or_else(|| function_call.get("callId"))
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned);
 
                     let args = function_call
                         .get("args")
@@ -180,6 +275,7 @@ impl Provider for GeminiProvider {
                         .unwrap_or_else(|| json!({}));
 
                     tool_calls.push(ToolCall {
+                        id,
                         name,
                         args_json: args.to_string(),
                     });
@@ -191,5 +287,60 @@ impl Provider for GeminiProvider {
             output_text,
             tool_calls,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Message, Role, ToolCall, ToolResult, build_gemini_contents};
+
+    #[test]
+    fn encodes_assistant_function_call_part() {
+        let history = vec![Message::assistant_tool_calls(vec![ToolCall {
+            id: Some("call-1".to_owned()),
+            name: "memorize".to_owned(),
+            args_json: r#"{"fact":"x"}"#.to_owned(),
+        }])];
+        let contents = build_gemini_contents(&history);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "model");
+        assert_eq!(contents[0]["parts"][0]["functionCall"]["name"], "memorize");
+        assert_eq!(contents[0]["parts"][0]["functionCall"]["id"], "call-1");
+        assert_eq!(
+            contents[0]["parts"][0]["functionCall"]["args"],
+            json!({"fact":"x"})
+        );
+    }
+
+    #[test]
+    fn encodes_tool_function_response_part() {
+        let history = vec![Message::tool_results(vec![ToolResult {
+            call_id: Some("call-1".to_owned()),
+            name: "memorize".to_owned(),
+            response: json!({"status":"ok","content":"memorized"}),
+        }])];
+        let contents = build_gemini_contents(&history);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(
+            contents[0]["parts"][0]["functionResponse"]["name"],
+            "memorize"
+        );
+        assert_eq!(contents[0]["parts"][0]["functionResponse"]["id"], "call-1");
+        assert_eq!(
+            contents[0]["parts"][0]["functionResponse"]["response"],
+            json!({"status":"ok","content":"memorized"})
+        );
+    }
+
+    #[test]
+    fn preserves_plain_text_messages() {
+        let history = vec![Message::text(Role::User, "hello")];
+        let contents = build_gemini_contents(&history);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"][0]["text"], "hello");
     }
 }

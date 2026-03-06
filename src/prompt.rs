@@ -8,6 +8,7 @@ pub struct PromptAssembler;
 #[derive(Debug, Clone)]
 pub struct PromptLayerInfo {
     pub title: &'static str,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub file: &'static str,
     pub path: PathBuf,
     pub exists: bool,

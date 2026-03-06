@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
+use chrono::Duration;
 use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
 use fastembed::{InitOptions, TextEmbedding};
 use rusqlite::params;
@@ -19,6 +20,8 @@ pub struct MemoryStore {
     ingest_tx: mpsc::Sender<IngestItem>,
 }
 
+const MEMORIZE_DEDUPE_WINDOW_SECS: i64 = 300;
+
 #[derive(Debug)]
 struct IngestItem {
     session_id: String,
@@ -29,21 +32,23 @@ struct IngestItem {
 pub struct StoredMessage {
     pub role: String,
     pub content: String,
+    pub username: Option<String>,
 }
 
 impl MemoryStore {
     pub async fn new(
-        path: &Path,
+        short_term_path: &Path,
+        long_term_path: &Path,
         db_config: &DatabaseConfig,
         _embedding_config: &EmbeddingConfig,
     ) -> Result<Self, FrameworkError> {
         register_sqlite_vec()?;
 
-        let cfg = PoolConfig::new(path);
+        let cfg = PoolConfig::new(short_term_path);
         let pool = cfg
             .create_pool(Runtime::Tokio1)
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
-        let long_term_cfg = PoolConfig::new(&db_config.long_term_path);
+        let long_term_cfg = PoolConfig::new(long_term_path);
         let long_term_pool = long_term_cfg
             .create_pool(Runtime::Tokio1)
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
@@ -91,6 +96,7 @@ impl MemoryStore {
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    username TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -196,12 +202,17 @@ impl MemoryStore {
         session_id: &str,
         role: &str,
         content: &str,
+        username: Option<&str>,
     ) -> Result<(), FrameworkError> {
         let now = chrono::Utc::now().to_rfc3339();
         let session_for_sessions = session_id.to_owned();
         let session_for_messages = session_id.to_owned();
         let role = role.to_owned();
         let content_owned = content.to_owned();
+        let username_owned = username
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
         let now_for_session = now.clone();
         let now_for_message = now;
 
@@ -216,8 +227,14 @@ impl MemoryStore {
                 params![session_for_sessions, now_for_session],
             )?;
             conn.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![session_for_messages, role, content_owned, now_for_message],
+                "INSERT INTO messages (session_id, role, content, username, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    session_for_messages,
+                    role,
+                    content_owned,
+                    username_owned,
+                    now_for_message
+                ],
             )?;
             Ok::<(), rusqlite::Error>(())
         })
@@ -342,7 +359,7 @@ impl MemoryStore {
         let mut rows = conn
             .interact(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT role, content FROM messages
+                    "SELECT role, content, username FROM messages
                      WHERE session_id = ?1 AND (role = 'user' OR role = 'assistant')
                      ORDER BY id DESC
                      LIMIT ?2",
@@ -351,6 +368,7 @@ impl MemoryStore {
                     Ok::<StoredMessage, rusqlite::Error>(StoredMessage {
                         role: row.get(0)?,
                         content: row.get(1)?,
+                        username: row.get(2)?,
                     })
                 })?;
 
@@ -372,7 +390,7 @@ impl MemoryStore {
         content: &str,
         kind: &str,
         importance: u8,
-    ) -> Result<(), FrameworkError> {
+    ) -> Result<bool, FrameworkError> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
             return Err(FrameworkError::Tool(
@@ -381,9 +399,9 @@ impl MemoryStore {
         }
 
         let importance = importance.clamp(1, 5) as i64;
-        let embedding = embed_text(&self.embedder, trimmed).await?;
-        let blob = encode_f32_blob(&embedding);
-        let now = chrono::Utc::now().to_rfc3339();
+        let now_dt = chrono::Utc::now();
+        let dedupe_cutoff = (now_dt - Duration::seconds(MEMORIZE_DEDUPE_WINDOW_SECS)).to_rfc3339();
+        let now = now_dt.to_rfc3339();
         let session = session_id.to_owned();
         let fact = trimmed.to_owned();
         let kind = {
@@ -394,12 +412,34 @@ impl MemoryStore {
                 trimmed_kind.to_owned()
             }
         };
+        let session_for_check = session.clone();
+        let fact_for_check = fact.clone();
+        let kind_for_check = kind.clone();
 
         let conn = self
             .long_term_pool
             .get()
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
+        let already_exists = conn
+            .interact(move |conn| {
+                has_recent_long_term_fact(
+                    conn,
+                    &session_for_check,
+                    &kind_for_check,
+                    &fact_for_check,
+                    &dedupe_cutoff,
+                )
+            })
+            .await
+            .map_err(|e| FrameworkError::Config(e.to_string()))??;
+        if already_exists {
+            return Ok(false);
+        }
+
+        let embedding = embed_text(&self.embedder, trimmed).await?;
+        let blob = encode_f32_blob(&embedding);
+
         conn.interact(move |conn| {
             conn.execute(
                 "INSERT INTO ltm_facts (source_session_id, content, kind, importance, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -410,8 +450,28 @@ impl MemoryStore {
         .await
         .map_err(|e| FrameworkError::Config(e.to_string()))??;
 
-        Ok(())
+        Ok(true)
     }
+}
+
+fn has_recent_long_term_fact(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    kind: &str,
+    content: &str,
+    dedupe_cutoff: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT 1
+         FROM ltm_facts
+         WHERE source_session_id = ?1
+           AND kind = ?2
+           AND content = ?3
+           AND created_at >= ?4
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![session_id, kind, content, dedupe_cutoff])?;
+    Ok(rows.next()?.is_some())
 }
 
 fn register_sqlite_vec() -> Result<(), FrameworkError> {
@@ -487,5 +547,62 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         0.0
     } else {
         dot / denom
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::has_recent_long_term_fact;
+
+    #[test]
+    fn long_term_duplicate_check_matches_recent_identical_fact() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ltm_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                importance INTEGER NOT NULL,
+                embedding BLOB,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("ltm_facts table should be created");
+
+        conn.execute(
+            "INSERT INTO ltm_facts (source_session_id, content, kind, importance, embedding, created_at) VALUES (?1, ?2, ?3, 3, NULL, ?4)",
+            rusqlite::params![
+                "chan:design",
+                "The squire loves bananas.",
+                "general",
+                "2026-03-06T19:11:44.000000+00:00"
+            ],
+        )
+        .expect("insert should succeed");
+
+        let matched = has_recent_long_term_fact(
+            &conn,
+            "chan:design",
+            "general",
+            "The squire loves bananas.",
+            "2026-03-06T19:11:40.000000+00:00",
+        )
+        .expect("query should succeed");
+        assert!(matched);
+
+        let too_old = has_recent_long_term_fact(
+            &conn,
+            "chan:design",
+            "general",
+            "The squire loves bananas.",
+            "2026-03-06T19:11:45.000000+00:00",
+        )
+        .expect("query should succeed");
+        assert!(!too_old);
     }
 }

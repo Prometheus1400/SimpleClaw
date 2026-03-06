@@ -50,11 +50,6 @@ impl AppPaths {
         Ok(())
     }
 
-    pub fn ensure_db_dir(&self) -> Result<(), FrameworkError> {
-        fs::create_dir_all(&self.db_dir)?;
-        Ok(())
-    }
-
     pub fn ensure_runtime_dirs(&self) -> Result<(), FrameworkError> {
         fs::create_dir_all(&self.logs_dir)?;
         fs::create_dir_all(&self.run_dir)?;

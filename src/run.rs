@@ -1,88 +1,119 @@
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use color_eyre::eyre::WrapErr;
+use rusqlite::{Connection, OpenFlags, params};
+use serde::Serialize;
 use tracing::info;
 
-use crate::agent::AgentRuntime;
+use crate::agent::{
+    AgentRuntime, load_agent_config_for_workspace, load_system_prompt_for_workspace,
+};
 use crate::channel::{Channel, DiscordChannel, LoggingChannel};
-use crate::cli::Cli;
-use crate::config::{ChannelKind, LoadedConfig, ProviderKind};
+use crate::cli::{Cli, MemoryMode};
+use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, ProviderKind};
 use crate::gateway::Gateway;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::prompt::PromptAssembler;
 use crate::provider::GeminiProvider;
 
 pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
-    let paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
-    paths
-        .ensure_db_dir()
-        .wrap_err("failed to create database directory")?;
-
     let loaded = LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load global/workspace configuration")?;
 
-    let workspace_exists = loaded.workspace.is_dir();
-    info!(
-        workspace_raw = %loaded.workspace_raw.display(),
-        workspace_resolved = %loaded.workspace.display(),
-        workspace_exists,
-        "workspace path resolved"
-    );
-
-    let prompt_layers = PromptAssembler::inspect_workspace(&loaded.workspace)
-        .wrap_err("failed to inspect workspace prompt layers")?;
-    for layer in &prompt_layers {
-        info!(
-            layer = layer.title,
-            file = layer.file,
-            path = %layer.path.display(),
-            exists = layer.exists,
-            bytes = layer.bytes,
-            "prompt layer status"
-        );
-    }
-
-    let system_prompt = PromptAssembler::from_workspace(&loaded.workspace)
-        .wrap_err("failed to assemble layered system prompt")?;
-    info!(
-        prompt_chars = system_prompt.chars().count(),
-        "layered system prompt assembled"
-    );
-
-    let memory = MemoryStore::new(
-        &paths.db_path,
-        &loaded.global.database,
-        &loaded.global.embedding,
-    )
-    .await
-    .wrap_err("failed to initialize sqlite memory store")?;
-
-    let channel: Arc<dyn Channel> = match loaded.agent.routing.channel {
-        ChannelKind::Discord => Arc::new(
-            DiscordChannel::from_config(&loaded.global.discord)
-                .await
-                .wrap_err("failed to initialize discord channel")?,
-        ),
-        ChannelKind::Logging => Arc::new(LoggingChannel::default()),
-    };
     let provider: Arc<dyn crate::provider::Provider> = match loaded.global.provider.kind {
         ProviderKind::Gemini => {
             Arc::new(GeminiProvider::from_config(loaded.global.provider.clone()))
         }
     };
-    let workspace_display = loaded.workspace.display().to_string();
+    let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
+    for agent in &loaded.global.agents.list {
+        let (memory_dir, short_term_path, long_term_path) =
+            agent_workspace_memory_paths(&agent.workspace);
+        fs::create_dir_all(&memory_dir).wrap_err_with(|| {
+            format!(
+                "failed to create memory directory for agent '{}': {}",
+                agent.id,
+                memory_dir.display()
+            )
+        })?;
+        let memory = MemoryStore::new(
+            &short_term_path,
+            &long_term_path,
+            &loaded.global.database,
+            &loaded.global.embedding,
+        )
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "failed to initialize sqlite memory store for agent '{}'",
+                agent.id
+            )
+        })?;
+        memory_by_agent.insert(agent.id.clone(), memory);
+    }
 
-    let runtime = AgentRuntime::new(loaded, provider, memory, system_prompt, cli.max_steps);
-    let gateway = Gateway::new(Arc::clone(&channel));
+    let summon_agents: HashMap<String, std::path::PathBuf> = loaded
+        .global
+        .agents
+        .list
+        .iter()
+        .map(|agent| (agent.id.clone(), agent.workspace.clone()))
+        .collect();
+    let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
+    for agent in &loaded.global.agents.list {
+        let memory = memory_by_agent.get(&agent.id).cloned().ok_or_else(|| {
+            color_eyre::eyre::eyre!("missing memory store for configured agent '{}'", agent.id)
+        })?;
+        let system_prompt =
+            load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
+                format!(
+                    "failed to assemble layered system prompt for agent '{}'",
+                    agent.id
+                )
+            })?;
+        let agent_config = load_agent_config_for_workspace(&agent.workspace)
+            .wrap_err_with(|| format!("failed to load agent.yaml for agent '{}'", agent.id))?;
+        runtimes.insert(
+            agent.id.clone(),
+            AgentRuntime::new(
+                loaded.global.runtime.clone(),
+                agent_config,
+                Arc::clone(&provider),
+                memory,
+                summon_agents.clone(),
+                memory_by_agent.clone(),
+                agent.workspace.clone(),
+                system_prompt,
+                cli.max_steps,
+            ),
+        );
+    }
 
-    info!(workspace = %workspace_display, "runtime initialized");
+    let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+    for kind in &loaded.global.gateway.channels {
+        let channel: Arc<dyn Channel> = match kind {
+            GatewayChannelKind::Discord => Arc::new(
+                DiscordChannel::from_config(&loaded.global.discord)
+                    .await
+                    .wrap_err("failed to initialize discord channel")?,
+            ),
+            GatewayChannelKind::Logging => {
+                Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
+            }
+        };
+        channels.insert(*kind, channel);
+    }
+    let gateway = Gateway::new(channels);
+
+    let safe_error_reply = loaded.global.runtime.safe_error_reply.clone();
+    info!(agent_count = runtimes.len(), "runtime initialized");
     loop {
         let inbound = match gateway.next_message().await {
             Ok(msg) => msg,
@@ -91,49 +122,63 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 continue;
             }
         };
+        let memory_session_id = format!("{}:{}", inbound.channel_id, inbound.target_agent_id);
+        let Some(runtime) = runtimes.get(&inbound.target_agent_id) else {
+            tracing::error!(
+                target_agent_id = %inbound.target_agent_id,
+                channel_id = %inbound.channel_id,
+                "dropping message due to unknown routed agent"
+            );
+            if inbound.invoke
+                && let Err(err) = gateway
+                    .send_message(
+                        &inbound,
+                        "I couldn't route that message due to a configuration error.",
+                    )
+                    .await
+            {
+                tracing::error!(error = %err, "failed to send unknown-agent route reply");
+            }
+            continue;
+        };
 
         if !inbound.invoke {
             tracing::debug!(
-                session_id = %inbound.session_id,
+                session_id = %memory_session_id,
                 channel_id = %inbound.channel_id,
                 guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
                 user_id = %inbound.user_id,
                 "recording passive channel context message"
             );
-            if let Err(err) = runtime.record_context(&inbound).await {
+            if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
                 tracing::error!(error = %err, "failed to persist passive context message");
             }
             continue;
         }
 
-        if let Err(err) = channel.broadcast_typing(&inbound.session_id).await {
+        if let Err(err) = gateway.broadcast_typing(&inbound).await {
             tracing::warn!(error = %err, "failed to broadcast typing");
         }
         tracing::debug!(
-            session_id = %inbound.session_id,
+            session_id = %memory_session_id,
             channel_id = %inbound.channel_id,
             guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
             is_dm = inbound.is_dm,
             user_id = %inbound.user_id,
             mentioned_bot = inbound.mentioned_bot,
+            target_agent_id = %inbound.target_agent_id,
             "dispatching inbound message to agent"
         );
 
-        match runtime.run(&inbound).await {
+        match runtime.run(&inbound, &memory_session_id).await {
             Ok(reply) => {
-                if let Err(err) = channel.send_message(&inbound.session_id, &reply).await {
+                if let Err(err) = gateway.send_message(&inbound, &reply).await {
                     tracing::error!(error = %err, "failed to send channel response");
                 }
             }
             Err(err) => {
                 tracing::error!(error = %err, "agent execution failed");
-                if let Err(send_err) = channel
-                    .send_message(
-                        &inbound.session_id,
-                        &runtime.config().global.runtime.safe_error_reply,
-                    )
-                    .await
-                {
+                if let Err(send_err) = gateway.send_message(&inbound, &safe_error_reply).await {
                     tracing::error!(error = %send_err, "failed to send safe error reply");
                 }
             }
@@ -288,8 +333,178 @@ pub fn show_status(cli: &Cli) -> color_eyre::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct AgentMemoryResponse {
+    agent: String,
+    memory: String,
+    limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    short: Option<Vec<ShortMemoryRow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    long: Option<Vec<LongMemoryRow>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ShortMemoryRow {
+    id: i64,
+    session_id: String,
+    role: String,
+    content: String,
+    username: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LongMemoryRow {
+    id: i64,
+    source_session_id: String,
+    content: String,
+    kind: String,
+    importance: i64,
+    created_at: String,
+}
+
+pub async fn show_agent_memory(
+    cli: &Cli,
+    agent_id: &str,
+    memory: MemoryMode,
+    limit: usize,
+) -> color_eyre::Result<()> {
+    let loaded = LoadedConfig::load(cli.workspace.as_deref())
+        .wrap_err("failed to load configuration for agent memory command")?;
+    let agent = resolve_agent(&loaded.global.agents.list, agent_id)?;
+    let (_memory_dir, short_term_path, long_term_path) =
+        agent_workspace_memory_paths(&agent.workspace);
+
+    let short = if matches!(memory, MemoryMode::Short | MemoryMode::Both) {
+        Some(query_short_memory(&short_term_path, limit)?)
+    } else {
+        None
+    };
+    let long = if matches!(memory, MemoryMode::Long | MemoryMode::Both) {
+        Some(query_long_memory(&long_term_path, limit)?)
+    } else {
+        None
+    };
+
+    let response = AgentMemoryResponse {
+        agent: agent_id.to_owned(),
+        memory: memory_mode_name(memory).to_owned(),
+        limit,
+        short,
+        long,
+    };
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn memory_mode_name(memory: MemoryMode) -> &'static str {
+    match memory {
+        MemoryMode::Short => "short",
+        MemoryMode::Long => "long",
+        MemoryMode::Both => "both",
+    }
+}
+
+fn resolve_agent<'a>(
+    agents: &'a [AgentEntryConfig],
+    agent_id: &str,
+) -> color_eyre::Result<&'a AgentEntryConfig> {
+    agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| {
+            let available = agents
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            color_eyre::eyre::eyre!("unknown agent id '{agent_id}'. configured agents: {available}")
+        })
+}
+
+fn open_readonly_connection(path: &Path) -> color_eyre::Result<Connection> {
+    if !path.exists() {
+        return Err(color_eyre::eyre::eyre!(
+            "memory database does not exist: {}",
+            path.display()
+        ));
+    }
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .wrap_err_with(|| format!("failed to open database read-only: {}", path.display()))
+}
+
+fn query_short_memory(path: &Path, limit: usize) -> color_eyre::Result<Vec<ShortMemoryRow>> {
+    let conn = open_readonly_connection(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, role, content, username, created_at
+             FROM messages
+             ORDER BY id DESC
+             LIMIT ?1",
+        )
+        .wrap_err_with(|| format!("failed to prepare short-term query for {}", path.display()))?;
+
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            Ok::<ShortMemoryRow, rusqlite::Error>(ShortMemoryRow {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get(3)?,
+                username: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .wrap_err_with(|| format!("failed to query messages table in {}", path.display()))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn query_long_memory(path: &Path, limit: usize) -> color_eyre::Result<Vec<LongMemoryRow>> {
+    let conn = open_readonly_connection(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, source_session_id, content, kind, importance, created_at
+             FROM ltm_facts
+             ORDER BY id DESC
+             LIMIT ?1",
+        )
+        .wrap_err_with(|| format!("failed to prepare long-term query for {}", path.display()))?;
+
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            Ok::<LongMemoryRow, rusqlite::Error>(LongMemoryRow {
+                id: row.get(0)?,
+                source_session_id: row.get(1)?,
+                content: row.get(2)?,
+                kind: row.get(3)?,
+                importance: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .wrap_err_with(|| format!("failed to query ltm_facts table in {}", path.display()))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 fn state_paths(_cli: &Cli) -> color_eyre::Result<AppPaths> {
     AppPaths::resolve().map_err(Into::into)
+}
+
+fn agent_workspace_memory_paths(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let memory_dir = workspace.join(".simpleclaw").join("memory");
+    let short_term_path = memory_dir.join("lraf.db");
+    let long_term_path = memory_dir.join("lraf_long_term.db");
+    (memory_dir, short_term_path, long_term_path)
 }
 
 fn read_pid(path: &Path) -> color_eyre::Result<Option<u32>> {
@@ -370,4 +585,101 @@ fn force_kill_process(pid: u32) -> std::io::Result<()> {
         .args(["/F", "/PID", &pid.to_string()])
         .status()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rusqlite::Connection;
+
+    use super::{query_long_memory, query_short_memory};
+
+    fn temp_db_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        std::env::temp_dir().join(format!("simpleclaw_{prefix}_{nanos}.db"))
+    }
+
+    fn with_temp_db<F>(path: &Path, setup: F)
+    where
+        F: FnOnce(&Connection),
+    {
+        let conn = Connection::open(path).expect("should create temporary sqlite db");
+        setup(&conn);
+        drop(conn);
+    }
+
+    #[test]
+    fn short_memory_returns_newest_first_with_limit() {
+        let path = temp_db_path("short");
+        with_temp_db(&path, |conn| {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    username TEXT,
+                    created_at TEXT NOT NULL
+                );
+                "#,
+            )
+            .expect("messages table should be created");
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, username, created_at) VALUES (?1, 'user', ?2, 'kaleb', ?3)",
+                    rusqlite::params!["chan:agent", format!("msg-{i}"), format!("2026-03-06T00:00:0{i}Z")],
+                )
+                .expect("message insert should succeed");
+            }
+        });
+
+        let rows = query_short_memory(&path, 2).expect("short query should succeed");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content, "msg-2");
+        assert_eq!(rows[1].content, "msg-1");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn long_memory_returns_newest_first_with_limit() {
+        let path = temp_db_path("long");
+        with_temp_db(&path, |conn| {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE ltm_facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_session_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    importance INTEGER NOT NULL,
+                    embedding BLOB,
+                    created_at TEXT NOT NULL
+                );
+                "#,
+            )
+            .expect("ltm_facts table should be created");
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO ltm_facts (source_session_id, content, kind, importance, embedding, created_at) VALUES (?1, ?2, 'general', 3, NULL, ?3)",
+                    rusqlite::params!["chan:agent", format!("fact-{i}"), format!("2026-03-06T00:00:0{i}Z")],
+                )
+                .expect("ltm_facts insert should succeed");
+            }
+        });
+
+        let rows = query_long_memory(&path, 2).expect("long query should succeed");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content, "fact-2");
+        assert_eq!(rows[1].content, "fact-1");
+
+        let _ = fs::remove_file(&path);
+    }
 }
