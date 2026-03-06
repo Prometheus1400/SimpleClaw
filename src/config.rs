@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,30 +18,38 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub gateway: GatewayConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
+    #[serde(default)]
     pub discord: DiscordConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
-    #[serde(default = "default_agent_name")]
-    pub name: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default = "default_true")]
+    pub network_allow_all: bool,
+    #[serde(default = "default_true")]
+    pub read_allow_all: bool,
+    #[serde(default)]
+    pub sandbox: SandboxMode,
     #[serde(default)]
     pub tools: ToolConfig,
-    #[serde(default)]
-    pub routing: RoutingConfig,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            name: default_agent_name(),
             model: None,
+            network_allow_all: true,
+            read_allow_all: true,
+            sandbox: SandboxMode::default(),
             tools: ToolConfig::default(),
-            routing: RoutingConfig::default(),
         }
     }
 }
@@ -49,9 +57,6 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadedConfig {
     pub global: GlobalConfig,
-    pub agent: AgentConfig,
-    pub workspace_raw: PathBuf,
-    pub workspace: PathBuf,
 }
 
 impl LoadedConfig {
@@ -68,26 +73,28 @@ impl LoadedConfig {
         global.resolve_secrets(&paths)?;
         global.database.path = paths.db_path;
         global.database.long_term_path = paths.long_term_db_path;
+        normalize_agents_workspace_paths(&mut global.agents);
+        if let Some(workspace_override) = workspace_override {
+            let workspace = normalize_workspace_path(workspace_override);
+            let default_id = global.agents.default.clone();
+            let default_agent = global
+                .agents
+                .list
+                .iter_mut()
+                .find(|agent| agent.id == default_id)
+                .ok_or_else(|| {
+                    FrameworkError::Config(format!(
+                        "agents.default '{}' does not match any agents.list id",
+                        default_id
+                    ))
+                })?;
+            default_agent.workspace = workspace;
+        }
+        validate_agents_config(&global.agents)?;
+        validate_gateway_config(&global.gateway)?;
+        validate_discord_inbound_config(&global.discord.inbound)?;
 
-        let workspace_raw = workspace_override
-            .map(PathBuf::from)
-            .unwrap_or_else(|| global.runtime.default_agent_workspace.clone());
-        normalize_runtime_workspace_paths(&mut global.runtime);
-        let workspace = normalize_workspace_path(&workspace_raw);
-        let agent_path = workspace.join("agent.yaml");
-        let agent = if agent_path.exists() {
-            let content = fs::read_to_string(agent_path)?;
-            serde_yaml::from_str::<AgentConfig>(&content)?
-        } else {
-            AgentConfig::default()
-        };
-
-        Ok(Self {
-            global,
-            agent,
-            workspace_raw,
-            workspace,
-        })
+        Ok(Self { global })
     }
 }
 
@@ -100,13 +107,115 @@ impl GlobalConfig {
     }
 }
 
-fn normalize_runtime_workspace_paths(runtime: &mut RuntimeConfig) {
-    runtime.default_agent_workspace = normalize_workspace_path(&runtime.default_agent_workspace);
-    runtime.summon_agents = runtime
-        .summon_agents
+fn normalize_agents_workspace_paths(agents: &mut AgentsConfig) {
+    agents.list = agents
+        .list
         .iter()
-        .map(|(name, workspace)| (name.clone(), normalize_workspace_path(workspace)))
+        .map(|agent| AgentEntryConfig {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            workspace: normalize_workspace_path(&agent.workspace),
+        })
         .collect();
+}
+
+fn validate_agents_config(agents: &AgentsConfig) -> Result<(), FrameworkError> {
+    if agents.list.is_empty() {
+        return Err(FrameworkError::Config(
+            "agents.list must include at least one agent".to_owned(),
+        ));
+    }
+
+    let mut ids = HashSet::new();
+    for agent in &agents.list {
+        if agent.id.trim().is_empty() {
+            return Err(FrameworkError::Config(
+                "agents.list entries must have a non-empty id".to_owned(),
+            ));
+        }
+        if agent.name.trim().is_empty() {
+            return Err(FrameworkError::Config(
+                "agents.list entries must have a non-empty name".to_owned(),
+            ));
+        }
+        if !ids.insert(agent.id.clone()) {
+            return Err(FrameworkError::Config(format!(
+                "agents.list contains duplicate id: {}",
+                agent.id
+            )));
+        }
+    }
+
+    if !ids.contains(&agents.default) {
+        return Err(FrameworkError::Config(format!(
+            "agents.default '{}' does not match any agents.list id",
+            agents.default
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_gateway_config(gateway: &GatewayConfig) -> Result<(), FrameworkError> {
+    if gateway.channels.is_empty() {
+        return Err(FrameworkError::Config(
+            "gateway.channels must include at least one channel".to_owned(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for channel in &gateway.channels {
+        if !seen.insert(*channel) {
+            return Err(FrameworkError::Config(format!(
+                "gateway.channels contains duplicate entry: {}",
+                channel.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_discord_inbound_config(inbound: &DiscordInboundConfig) -> Result<(), FrameworkError> {
+    if inbound
+        .defaults
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .map(|value| value.is_empty())
+        .unwrap_or(true)
+    {
+        return Err(FrameworkError::Config(
+            "discord.inbound.defaults.agent is required and must be non-empty".to_owned(),
+        ));
+    }
+    validate_optional_policy_agent("discord.inbound.defaults", &inbound.defaults)?;
+    validate_optional_policy_agent("discord.inbound.dm", &inbound.dm)?;
+    for (server_id, server) in &inbound.servers {
+        validate_optional_policy_agent(
+            &format!("discord.inbound.servers.{server_id}"),
+            &server.policy,
+        )?;
+        for (channel_id, policy) in &server.channels {
+            validate_optional_policy_agent(
+                &format!("discord.inbound.servers.{server_id}.channels.{channel_id}"),
+                policy,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_policy_agent(
+    path: &str,
+    policy: &DiscordInboundPolicyConfig,
+) -> Result<(), FrameworkError> {
+    if let Some(agent) = policy.agent.as_deref()
+        && agent.trim().is_empty()
+    {
+        return Err(FrameworkError::Config(format!(
+            "{path}.agent must be non-empty when provided"
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_workspace_path(path: &Path) -> PathBuf {
@@ -288,6 +397,7 @@ impl ProviderConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
@@ -295,16 +405,10 @@ pub struct RuntimeConfig {
     pub history_messages: u32,
     #[serde(default)]
     pub summon_mode: SummonMode,
-    #[serde(default = "default_true")]
-    pub network_allow_all: bool,
-    #[serde(default = "default_true")]
-    pub read_allow_all: bool,
     #[serde(default = "default_safe_error_reply")]
     pub safe_error_reply: String,
-    #[serde(default = "default_agent_workspace")]
-    pub default_agent_workspace: PathBuf,
     #[serde(default)]
-    pub summon_agents: HashMap<String, PathBuf>,
+    pub log_level: LogLevel,
 }
 
 impl Default for RuntimeConfig {
@@ -313,11 +417,95 @@ impl Default for RuntimeConfig {
             max_steps: default_max_steps(),
             history_messages: default_history_messages(),
             summon_mode: SummonMode::default(),
-            network_allow_all: true,
-            read_allow_all: true,
             safe_error_reply: default_safe_error_reply(),
-            default_agent_workspace: default_agent_workspace(),
-            summon_agents: HashMap::new(),
+            log_level: LogLevel::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    #[default]
+    Workspace,
+    Off,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GatewayConfig {
+    pub channels: Vec<GatewayChannelKind>,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            channels: default_gateway_channels(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfig {
+    #[serde(default = "default_agent_id")]
+    pub default: String,
+    #[serde(default = "default_agents_list")]
+    pub list: Vec<AgentEntryConfig>,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            default: default_agent_id(),
+            list: default_agents_list(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEntryConfig {
+    pub id: String,
+    pub name: String,
+    pub workspace: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayChannelKind {
+    Discord,
+    Logging,
+}
+
+impl GatewayChannelKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discord => "discord",
+            Self::Logging => "logging",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
         }
     }
 }
@@ -382,7 +570,7 @@ impl DiscordConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordInboundConfig {
     #[serde(default)]
     pub defaults: DiscordInboundPolicyConfig,
@@ -390,6 +578,19 @@ pub struct DiscordInboundConfig {
     pub servers: HashMap<String, DiscordServerInboundConfig>,
     #[serde(default)]
     pub dm: DiscordInboundPolicyConfig,
+}
+
+impl Default for DiscordInboundConfig {
+    fn default() -> Self {
+        Self {
+            defaults: DiscordInboundPolicyConfig {
+                agent: Some(default_agent_id()),
+                ..DiscordInboundPolicyConfig::default()
+            },
+            servers: HashMap::new(),
+            dm: DiscordInboundPolicyConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -403,6 +604,8 @@ pub struct DiscordServerInboundConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscordInboundPolicyConfig {
     #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
     pub allow_from: Option<Vec<String>>,
     #[serde(default)]
     pub require_mentions: Option<bool>,
@@ -410,6 +613,7 @@ pub struct DiscordInboundPolicyConfig {
 
 #[derive(Debug, Clone)]
 pub struct DiscordInboundPolicy {
+    pub agent: String,
     pub allow_from: Option<Vec<String>>,
     pub require_mentions: bool,
 }
@@ -441,6 +645,9 @@ impl DiscordInboundConfig {
 
 impl DiscordInboundPolicyConfig {
     fn apply_override(&mut self, lower: &DiscordInboundPolicyConfig) {
+        if let Some(agent) = lower.agent.as_deref() {
+            self.agent = Some(agent.to_owned());
+        }
         if let Some(allow_from) = &lower.allow_from {
             self.allow_from = Some(allow_from.clone());
         }
@@ -451,6 +658,7 @@ impl DiscordInboundPolicyConfig {
 
     fn finalize(self, is_dm: bool) -> DiscordInboundPolicy {
         DiscordInboundPolicy {
+            agent: self.agent.unwrap_or_default(),
             allow_from: self.allow_from,
             require_mentions: if is_dm {
                 false
@@ -485,70 +693,19 @@ impl Default for EmbeddingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolConfig {
-    #[serde(default = "default_true")]
-    pub memory: bool,
-    #[serde(default = "default_true")]
-    pub memorize: bool,
-    #[serde(default = "default_true")]
-    pub summon: bool,
-    #[serde(default = "default_true")]
-    pub search: bool,
-    #[serde(default = "default_true")]
-    pub clock: bool,
-    #[serde(default = "default_true")]
-    pub fetch: bool,
-    #[serde(default = "default_true")]
-    pub read: bool,
-    #[serde(default = "default_true")]
-    pub exec: bool,
+    pub enabled_tools: Vec<String>,
 }
 
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
-            memory: true,
-            memorize: true,
-            summon: true,
-            search: true,
-            clock: true,
-            fetch: true,
-            read: true,
-            exec: true,
+            enabled_tools: default_enabled_tools(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutingConfig {
-    #[serde(default = "default_channel")]
-    pub channel: ChannelKind,
-}
-
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        Self {
-            channel: default_channel(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelKind {
-    Discord,
-    Logging,
-}
-
-impl Default for ChannelKind {
-    fn default() -> Self {
-        Self::Discord
-    }
-}
-
-fn default_agent_name() -> String {
-    "default-agent".to_owned()
-}
 fn default_db_path() -> PathBuf {
     AppPaths::resolve()
         .map(|paths| paths.db_path)
@@ -583,14 +740,37 @@ fn default_history_messages() -> u32 {
 fn default_safe_error_reply() -> String {
     "I hit an internal error while processing that request.".to_owned()
 }
-fn default_agent_workspace() -> PathBuf {
-    PathBuf::from("./workspace")
+fn default_agent_id() -> String {
+    "default".to_owned()
+}
+fn default_agents_list() -> Vec<AgentEntryConfig> {
+    vec![AgentEntryConfig {
+        id: default_agent_id(),
+        name: "Default".to_owned(),
+        workspace: PathBuf::from("./workspace"),
+    }]
 }
 fn default_true() -> bool {
     true
 }
-fn default_channel() -> ChannelKind {
-    ChannelKind::Discord
+fn default_gateway_channels() -> Vec<GatewayChannelKind> {
+    vec![GatewayChannelKind::Discord]
+}
+fn default_enabled_tools() -> Vec<String> {
+    [
+        "memory",
+        "memorize",
+        "summon",
+        "web_search",
+        "clock",
+        "web_fetch",
+        "read",
+        "exec",
+        "process",
+    ]
+    .iter()
+    .map(|name| (*name).to_owned())
+    .collect()
 }
 fn default_embedding_model() -> String {
     "all-MiniLM-L6-v2".to_owned()
@@ -634,6 +814,7 @@ mod tests {
     fn channel_policy_overrides_server_and_global() {
         let mut inbound = DiscordInboundConfig {
             defaults: DiscordInboundPolicyConfig {
+                agent: Some("default".to_owned()),
                 allow_from: Some(vec!["1".to_owned()]),
                 require_mentions: Some(true),
             },
@@ -644,12 +825,14 @@ mod tests {
             "100".to_owned(),
             DiscordServerInboundConfig {
                 policy: DiscordInboundPolicyConfig {
+                    agent: Some("server".to_owned()),
                     allow_from: Some(vec!["2".to_owned()]),
                     require_mentions: None,
                 },
                 channels: HashMap::from([(
                     "200".to_owned(),
                     DiscordInboundPolicyConfig {
+                        agent: Some("channel".to_owned()),
                         allow_from: Some(vec!["3".to_owned()]),
                         require_mentions: Some(false),
                     },
@@ -665,10 +848,12 @@ mod tests {
     #[test]
     fn server_policy_applies_when_channel_missing() {
         let mut inbound = DiscordInboundConfig::default();
+        inbound.defaults.agent = Some("default".to_owned());
         inbound.servers.insert(
             "100".to_owned(),
             DiscordServerInboundConfig {
                 policy: DiscordInboundPolicyConfig {
+                    agent: Some("server".to_owned()),
                     allow_from: Some(vec!["42".to_owned()]),
                     require_mentions: Some(true),
                 },
@@ -685,6 +870,7 @@ mod tests {
     fn global_defaults_apply_when_no_server_or_channel_match() {
         let inbound = DiscordInboundConfig {
             defaults: DiscordInboundPolicyConfig {
+                agent: Some("default".to_owned()),
                 allow_from: Some(vec!["9".to_owned()]),
                 require_mentions: Some(true),
             },
@@ -700,10 +886,12 @@ mod tests {
     fn dm_scope_overrides_defaults_and_forces_mentions_off() {
         let inbound = DiscordInboundConfig {
             defaults: DiscordInboundPolicyConfig {
+                agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
             dm: DiscordInboundPolicyConfig {
+                agent: Some("dm".to_owned()),
                 allow_from: Some(vec!["11".to_owned()]),
                 require_mentions: Some(true),
             },
@@ -726,6 +914,25 @@ mod tests {
     fn runtime_defaults_history_window() {
         let runtime = RuntimeConfig::default();
         assert_eq!(runtime.history_messages, 10);
+        assert_eq!(runtime.log_level, LogLevel::Info);
+    }
+
+    #[test]
+    fn runtime_log_level_accepts_debug() {
+        let yaml = r#"
+log_level: debug
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml).expect("valid yaml");
+        assert_eq!(parsed.log_level, LogLevel::Debug);
+    }
+
+    #[test]
+    fn runtime_log_level_rejects_unknown_value() {
+        let yaml = r#"
+log_level: verbose
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -764,42 +971,93 @@ token_env: DISCORD_TOKEN
     }
 
     #[test]
-    fn rejects_unknown_channel_kind() {
+    fn rejects_unknown_gateway_channel_kind() {
         let yaml = r#"
-channel: not_a_channel
+channels:
+  - not_a_channel
 "#;
-        let parsed = serde_yaml::from_str::<RoutingConfig>(yaml);
+        let parsed = serde_yaml::from_str::<GatewayConfig>(yaml);
         assert!(parsed.is_err());
     }
 
     #[test]
-    fn tool_config_missing_keys_default_to_enabled() {
-        let parsed: ToolConfig = serde_yaml::from_str("memory: false\n").expect("valid yaml");
-        assert!(!parsed.memory);
-        assert!(parsed.memorize);
-        assert!(parsed.summon);
-        assert!(parsed.search);
-        assert!(parsed.clock);
-        assert!(parsed.fetch);
-        assert!(parsed.read);
-        assert!(parsed.exec);
+    fn tool_config_defaults_to_all_builtin_tools() {
+        let parsed: ToolConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
+        assert_eq!(
+            parsed.enabled_tools,
+            vec![
+                "memory".to_owned(),
+                "memorize".to_owned(),
+                "summon".to_owned(),
+                "web_search".to_owned(),
+                "clock".to_owned(),
+                "web_fetch".to_owned(),
+                "read".to_owned(),
+                "exec".to_owned(),
+                "process".to_owned()
+            ]
+        );
     }
 
     #[test]
-    fn agent_config_supports_memorize_and_exec_flags() {
+    fn tool_config_rejects_legacy_boolean_fields() {
+        let parsed = serde_yaml::from_str::<ToolConfig>("memory: false\n");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn agent_config_supports_enabled_tools_allowlist() {
         let parsed: AgentConfig = serde_yaml::from_str(
             r#"
-name: custom
 tools:
-  memorize: false
-  exec: false
+  enabled_tools:
+    - memory
+    - summon
 "#,
         )
         .expect("valid yaml");
-        assert_eq!(parsed.name, "custom");
-        assert!(!parsed.tools.memorize);
-        assert!(!parsed.tools.exec);
-        assert!(parsed.tools.memory);
+        assert_eq!(
+            parsed.tools.enabled_tools,
+            vec!["memory".to_owned(), "summon".to_owned()]
+        );
+    }
+
+    #[test]
+    fn agent_config_defaults_exec_policy() {
+        let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
+        assert!(parsed.network_allow_all);
+        assert!(parsed.read_allow_all);
+        assert_eq!(parsed.sandbox, SandboxMode::Workspace);
+    }
+
+    #[test]
+    fn agent_config_sandbox_accepts_off() {
+        let parsed: AgentConfig = serde_yaml::from_str(
+            r#"
+sandbox: off
+"#,
+        )
+        .expect("valid yaml");
+        assert_eq!(parsed.sandbox, SandboxMode::Off);
+    }
+
+    #[test]
+    fn agent_config_rejects_legacy_name_field() {
+        let yaml = r#"
+name: legacy
+"#;
+        let parsed = serde_yaml::from_str::<AgentConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn agent_config_rejects_legacy_routing_field() {
+        let yaml = r#"
+routing:
+  channel: discord
+"#;
+        let parsed = serde_yaml::from_str::<AgentConfig>(yaml);
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -907,36 +1165,108 @@ tools:
     }
 
     #[test]
-    fn normalize_runtime_workspace_paths_updates_summon_targets() {
+    fn normalize_agents_workspace_paths_updates_entries() {
         let key = "SIMPLECLAW_TEST_SUMMON_ROOT";
         unsafe {
             std::env::set_var(key, "/tmp/simpleclaw-summon-root");
         }
-        let mut runtime = RuntimeConfig {
-            default_agent_workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/default"),
-            summon_agents: HashMap::from([(
-                "researcher".to_owned(),
-                PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/research"),
-            )]),
-            ..RuntimeConfig::default()
+        let mut agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![
+                AgentEntryConfig {
+                    id: "default".to_owned(),
+                    name: "Default".to_owned(),
+                    workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/default"),
+                },
+                AgentEntryConfig {
+                    id: "researcher".to_owned(),
+                    name: "Researcher".to_owned(),
+                    workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/research"),
+                },
+            ],
         };
 
-        normalize_runtime_workspace_paths(&mut runtime);
+        normalize_agents_workspace_paths(&mut agents);
 
         assert_eq!(
-            runtime.default_agent_workspace,
+            agents
+                .list
+                .iter()
+                .find(|agent| agent.id == "default")
+                .expect("default target should exist")
+                .workspace,
             PathBuf::from("/tmp/simpleclaw-summon-root/default")
         );
         assert_eq!(
-            runtime
-                .summon_agents
-                .get("researcher")
+            agents
+                .list
+                .iter()
+                .find(|agent| agent.id == "researcher")
                 .expect("summon target should exist"),
-            &PathBuf::from("/tmp/simpleclaw-summon-root/research")
+            &AgentEntryConfig {
+                id: "researcher".to_owned(),
+                name: "Researcher".to_owned(),
+                workspace: PathBuf::from("/tmp/simpleclaw-summon-root/research")
+            }
         );
 
         unsafe {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn validate_agents_config_rejects_duplicate_ids() {
+        let agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![
+                AgentEntryConfig {
+                    id: "default".to_owned(),
+                    name: "Default".to_owned(),
+                    workspace: PathBuf::from("./workspace"),
+                },
+                AgentEntryConfig {
+                    id: "default".to_owned(),
+                    name: "Duplicate".to_owned(),
+                    workspace: PathBuf::from("./other"),
+                },
+            ],
+        };
+        assert!(validate_agents_config(&agents).is_err());
+    }
+
+    #[test]
+    fn validate_agents_config_rejects_missing_default_id() {
+        let agents = AgentsConfig {
+            default: "missing".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+            }],
+        };
+        assert!(validate_agents_config(&agents).is_err());
+    }
+
+    #[test]
+    fn runtime_config_rejects_legacy_workspace_fields() {
+        let yaml = r#"
+default_agent_workspace: ./workspace
+summon_agents:
+  researcher: ./agents/researcher
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn runtime_config_rejects_exec_policy_fields_moved_to_agent_config() {
+        let yaml = r#"
+network_allow_all: false
+read_allow_all: false
+sandbox: off
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
     }
 }

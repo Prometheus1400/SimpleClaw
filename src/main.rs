@@ -16,8 +16,9 @@ mod tools;
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
 
-use crate::cli::{Cli, Command, ListAction, SystemAction};
-use crate::config::ProviderKind;
+use crate::cli::{AgentAction, Cli, Command, ListAction, SystemAction};
+use crate::config::{GlobalConfig, LogLevel, ProviderKind};
+use crate::paths::AppPaths;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -49,6 +50,14 @@ async fn main() -> color_eyre::Result<()> {
         Some(Command::Models {
             action: ListAction::List,
         }) => list_models(&cli)?,
+        Some(Command::Agent {
+            action:
+                AgentAction::Memory {
+                    agent,
+                    memory,
+                    limit,
+                },
+        }) => run::show_agent_memory(&cli, agent, *memory, *limit).await?,
         None => run::run_service(&cli).await?,
     }
     Ok(())
@@ -107,7 +116,74 @@ fn known_models_for(provider: ProviderKind) -> &'static [&'static str] {
 }
 
 fn init_tracing() {
+    use std::str::FromStr;
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    use tracing_subscriber::filter::{Directive, LevelFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let configured = load_configured_log_level();
+        let app_level = LevelFilter::from_str(configured.as_str()).unwrap_or(LevelFilter::INFO);
+        let dep_level = if configured == LogLevel::Trace {
+            LevelFilter::TRACE
+        } else {
+            LevelFilter::WARN
+        };
+
+        let mut filter = EnvFilter::default()
+            .add_directive(LevelFilter::INFO.into())
+            .add_directive(
+                Directive::from_str(&format!("{}={app_level}", env!("CARGO_CRATE_NAME")))
+                    .expect("crate directive should be valid"),
+            );
+
+        for target in [
+            "serenity",
+            "reqwest",
+            "hyper",
+            "hyper_util",
+            "h2",
+            "tokio_tungstenite",
+            "tungstenite",
+            "rustls",
+        ] {
+            filter = filter.add_directive(
+                Directive::from_str(&format!("{target}={dep_level}"))
+                    .expect("dependency directive should be valid"),
+            );
+        }
+
+        filter
+    });
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+fn load_configured_log_level() -> LogLevel {
+    let Ok(paths) = AppPaths::resolve() else {
+        return LogLevel::default();
+    };
+    if !paths.config_path.exists() {
+        return LogLevel::default();
+    }
+
+    let content = match std::fs::read_to_string(&paths.config_path) {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to read {} for runtime.log_level: {err}",
+                paths.config_path.display()
+            );
+            return LogLevel::default();
+        }
+    };
+
+    match serde_yaml::from_str::<GlobalConfig>(&content) {
+        Ok(global) => global.runtime.log_level,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to parse {} for runtime.log_level: {err}",
+                paths.config_path.display()
+            );
+            LogLevel::default()
+        }
+    }
 }
