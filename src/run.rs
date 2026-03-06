@@ -83,9 +83,11 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         runtimes.insert(
             agent.id.clone(),
             AgentRuntime::new(
+                agent.id.clone(),
                 loaded.global.runtime.clone(),
                 agent_config,
                 Arc::clone(&provider),
+                loaded.global.provider.kind,
                 memory,
                 summon_agents.clone(),
                 memory_by_agent.clone(),

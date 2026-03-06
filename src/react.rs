@@ -1,29 +1,44 @@
+use crate::dispatch::{DispatchAction, ToolDispatcher};
 use crate::error::FrameworkError;
-use crate::provider::{Message, Provider, Role, ToolResult};
+use crate::provider::{Message, Provider, Role};
 use crate::tools::{ActiveTools, ToolCtx};
-use serde_json::json;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
-const TOOL_ARG_PREVIEW_CHARS: usize = 240;
-const TOOL_OBSERVATION_PREVIEW_CHARS: usize = 320;
-const FINAL_OUTPUT_PREVIEW_CHARS: usize = 200;
+const FINAL_OUTPUT_PREVIEW_CHARS: usize = 120;
 const REDACTED: &str = "***REDACTED***";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_loop(
     provider: &dyn Provider,
+    dispatcher: &dyn ToolDispatcher,
     tool_ctx: &ToolCtx,
     active_tools: &ActiveTools,
     system_prompt: &str,
+    agent_id: &str,
     session_id: &str,
     mut history: Vec<Message>,
     max_steps: u32,
 ) -> Result<String, FrameworkError> {
-    let tools = active_tools.definitions();
+    let definitions = active_tools.definitions();
     let tool_names = active_tools.names();
     let run_started = Instant::now();
 
+    let extra_instructions = dispatcher.prompt_instructions(&definitions);
+    let effective_system_prompt = if extra_instructions.is_empty() {
+        system_prompt.to_owned()
+    } else {
+        format!("{system_prompt}{extra_instructions}")
+    };
+
+    let tool_specs = if dispatcher.should_send_tool_specs() {
+        definitions
+    } else {
+        vec![]
+    };
+
     info!(
+        agent_id = %agent_id,
         session_id = %session_id,
         max_steps,
         history_len = history.len(),
@@ -35,15 +50,20 @@ pub async fn run_loop(
         let step = step_idx + 1;
         let provider_started = Instant::now();
         debug!(
+            agent_id = %agent_id,
             session_id = %session_id,
             step,
             history_len = history.len(),
             "requesting provider turn"
         );
-        let response = match provider.generate(system_prompt, &history, &tools).await {
+        let response = match provider
+            .generate(&effective_system_prompt, &history, &tool_specs)
+            .await
+        {
             Ok(response) => response,
             Err(err) => {
                 error!(
+                    agent_id = %agent_id,
                     session_id = %session_id,
                     step,
                     elapsed_ms = provider_started.elapsed().as_millis() as u64,
@@ -54,6 +74,7 @@ pub async fn run_loop(
             }
         };
         debug!(
+            agent_id = %agent_id,
             session_id = %session_id,
             step,
             elapsed_ms = provider_started.elapsed().as_millis() as u64,
@@ -62,86 +83,42 @@ pub async fn run_loop(
             "provider turn completed"
         );
 
-        if !response.tool_calls.is_empty() {
-            let mut tool_results = Vec::new();
-            for (call_idx, call) in response.tool_calls.iter().enumerate() {
-                let args_preview = sanitize_log_preview(&call.args_json, TOOL_ARG_PREVIEW_CHARS);
-                let tool_started = Instant::now();
-                debug!(
+        match dispatcher.parse_response(&response) {
+            DispatchAction::ToolCalls(calls) => {
+                let results = dispatcher
+                    .execute_tool_calls(&calls, active_tools, tool_ctx, session_id)
+                    .await;
+                let messages = dispatcher.format_for_history(&calls, &results);
+                history.extend(messages);
+                continue;
+            }
+            DispatchAction::FinalResponse(text) => {
+                let output_preview = sanitize_log_preview(&text, FINAL_OUTPUT_PREVIEW_CHARS);
+                history.push(Message::text(Role::Assistant, text.clone()));
+                info!(
+                    agent_id = %agent_id,
                     session_id = %session_id,
                     step,
-                    call_index = call_idx + 1,
-                    tool = %call.name,
-                    args = %args_preview,
-                    "tool call started"
+                    elapsed_ms = run_started.elapsed().as_millis() as u64,
+                    output_preview = %output_preview,
+                    "agent react loop completed"
                 );
-
-                let (observation, status) = match active_tools.get(call.name.as_str()) {
-                    Some(tool) => match tool.execute(tool_ctx, &call.args_json, session_id).await {
-                        Ok(ok) => (ok, "ok"),
-                        Err(err) => (format!("tool_error: {err}"), "tool_error"),
-                    },
-                    None => (
-                        format!("tool_error: unknown tool: {}", call.name),
-                        "unknown",
-                    ),
-                };
-                let observation_preview =
-                    sanitize_log_preview(&observation, TOOL_OBSERVATION_PREVIEW_CHARS);
-                let elapsed_ms = tool_started.elapsed().as_millis() as u64;
-
-                if status == "ok" {
-                    debug!(
-                        session_id = %session_id,
-                        step,
-                        call_index = call_idx + 1,
-                        tool = %call.name,
-                        elapsed_ms,
-                        status,
-                        observation = %observation_preview,
-                        "tool call completed"
-                    );
-                } else {
-                    warn!(
-                        session_id = %session_id,
-                        step,
-                        call_index = call_idx + 1,
-                        tool = %call.name,
-                        elapsed_ms,
-                        status,
-                        observation = %observation_preview,
-                        "tool call completed with issue"
-                    );
-                }
-                tool_results.push(ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    response: json!({
-                        "status": status,
-                        "content": observation,
-                    }),
-                });
+                return Ok(text);
             }
-            history.push(Message::assistant_tool_calls(response.tool_calls));
-            history.push(Message::tool_results(tool_results));
-            continue;
-        }
-
-        if let Some(text) = response.output_text {
-            let output_preview = sanitize_log_preview(&text, FINAL_OUTPUT_PREVIEW_CHARS);
-            history.push(Message::text(Role::Assistant, text.clone()));
-            info!(
-                session_id = %session_id,
-                step,
-                elapsed_ms = run_started.elapsed().as_millis() as u64,
-                output_preview = %output_preview,
-                "agent react loop completed"
-            );
-            return Ok(text);
+            DispatchAction::Empty => {
+                warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    step,
+                    "provider returned empty response"
+                );
+                continue;
+            }
         }
     }
 
     warn!(
+        agent_id = %agent_id,
         session_id = %session_id,
         max_steps,
         elapsed_ms = run_started.elapsed().as_millis() as u64,
@@ -151,7 +128,10 @@ pub async fn run_loop(
 }
 
 pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
-    truncate_for_log(&redact_sensitive_values(text), max_chars)
+    truncate_for_log(
+        &normalize_for_log_line(&redact_sensitive_values(text)),
+        max_chars,
+    )
 }
 
 fn truncate_for_log(text: &str, max_chars: usize) -> String {
@@ -160,6 +140,10 @@ fn truncate_for_log(text: &str, max_chars: usize) -> String {
     }
     let clipped = text.chars().take(max_chars).collect::<String>();
     format!("{clipped}...[truncated]")
+}
+
+fn normalize_for_log_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn redact_sensitive_values(text: &str) -> String {
@@ -390,5 +374,11 @@ mod tests {
     fn sanitize_log_preview_truncates_long_output() {
         let preview = sanitize_log_preview("abcdefghijklmnopqrstuvwxyz", 10);
         assert_eq!(preview, "abcdefghij...[truncated]");
+    }
+
+    #[test]
+    fn sanitize_log_preview_flattens_newlines() {
+        let preview = sanitize_log_preview("first line\nsecond\tline\r\nthird", 512);
+        assert_eq!(preview, "first line second line third");
     }
 }

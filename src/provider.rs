@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::config::ProviderConfig;
 use crate::error::FrameworkError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     System,

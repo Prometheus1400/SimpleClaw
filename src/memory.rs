@@ -7,8 +7,9 @@ use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
 use fastembed::{InitOptions, TextEmbedding};
 use rusqlite::params;
 use tokio::sync::{Mutex, mpsc};
+use tracing::trace;
 
-use crate::config::{DatabaseConfig, EmbeddingConfig};
+use crate::config::{DatabaseConfig, EmbeddingConfig, MemoryPreinjectConfig};
 use crate::error::FrameworkError;
 use crate::paths::AppPaths;
 
@@ -33,6 +34,39 @@ pub struct StoredMessage {
     pub role: String,
     pub content: String,
     pub username: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LongTermForgetMatch {
+    pub id: i64,
+    pub content: String,
+    pub kind: String,
+    pub importance: i64,
+    pub similarity: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct LongTermForgetResult {
+    pub matches: Vec<LongTermForgetMatch>,
+    pub deleted_count: usize,
+    pub similarity_threshold: f32,
+    pub max_matches: usize,
+    pub kind_filter: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryHitStore {
+    LongTerm,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryPreinjectHit {
+    pub store: MemoryHitStore,
+    pub content: String,
+    pub kind: Option<String>,
+    pub importance: Option<i64>,
+    pub raw_similarity: f32,
+    pub final_score: f32,
 }
 
 impl MemoryStore {
@@ -258,45 +292,60 @@ impl MemoryStore {
         query: &str,
         top_k: usize,
     ) -> Result<Vec<String>, FrameworkError> {
-        let query_embedding = embed_text(&self.embedder, query).await?;
-        let session = session_id.to_owned();
-
-        let short_term_conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FrameworkError::Config(e.to_string()))?;
-        let short_term_rows = short_term_conn
-            .interact(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT content, embedding FROM vec_memory WHERE session_id = ?1 AND embedding IS NOT NULL",
-                )?;
-                let mut out = Vec::new();
-                let mapped = stmt.query_map(params![session], |row| {
-                    let content: String = row.get(0)?;
-                    let blob: Vec<u8> = row.get(1)?;
-                    Ok::<(String, Vec<u8>), rusqlite::Error>((content, blob))
-                })?;
-                for row in mapped {
-                    out.push(row?);
-                }
-                Ok::<Vec<(String, Vec<u8>)>, rusqlite::Error>(out)
+        let top_k = top_k.max(1);
+        let top_k_u32 = match u32::try_from(top_k) {
+            Ok(value) => value,
+            Err(_) => u32::MAX,
+        };
+        let config = MemoryPreinjectConfig {
+            enabled: true,
+            top_k: top_k_u32,
+            min_score: 0.0,
+            max_items_per_store: 20,
+            long_term_weight: 1.0,
+            max_chars: 4000,
+        };
+        let hits = self
+            .query_preinject_hits(session_id, query, &config)
+            .await?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| match hit.store {
+                MemoryHitStore::LongTerm => format!(
+                    "[long-term/{}] {}",
+                    hit.kind.as_deref().unwrap_or("general"),
+                    hit.content
+                ),
             })
-            .await
-            .map_err(|e| FrameworkError::Config(e.to_string()))??;
+            .collect())
+    }
 
+    pub async fn query_preinject_hits(
+        &self,
+        session_id: &str,
+        query: &str,
+        config: &MemoryPreinjectConfig,
+    ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError> {
+        let config = config.normalized();
+        let query_embedding = embed_text(&self.embedder, query).await?;
+        let _ = session_id;
+
+        let long_limit = config.max_items_per_store as i64;
         let long_term_conn = self
             .long_term_pool
             .get()
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
         let long_term_rows = long_term_conn
-            .interact(|conn| {
+            .interact(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT content, embedding, kind, importance FROM ltm_facts WHERE embedding IS NOT NULL",
+                    "SELECT content, embedding, kind, importance
+                     FROM ltm_facts
+                     WHERE embedding IS NOT NULL
+                     ORDER BY id DESC
+                     LIMIT ?1",
                 )?;
-                let mut out = Vec::new();
-                let mapped = stmt.query_map([], |row| {
+                let mapped = stmt.query_map(params![long_limit], |row| {
                     let content: String = row.get(0)?;
                     let blob: Vec<u8> = row.get(1)?;
                     let kind: String = row.get(2)?;
@@ -305,6 +354,7 @@ impl MemoryStore {
                         content, blob, kind, importance,
                     ))
                 })?;
+                let mut out = Vec::new();
                 for row in mapped {
                     out.push(row?);
                 }
@@ -313,32 +363,140 @@ impl MemoryStore {
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))??;
 
-        let mut scored: Vec<(f32, String)> = Vec::new();
-        for (content, blob) in short_term_rows {
-            let emb = decode_f32_blob(&blob);
-            if emb.is_empty() {
-                continue;
-            }
-            let score = cosine_similarity(&query_embedding, &emb);
-            scored.push((score, format!("[short-term] {content}")));
-        }
-
+        let mut candidates = Vec::new();
         for (content, blob, kind, importance) in long_term_rows {
             let emb = decode_f32_blob(&blob);
             if emb.is_empty() {
                 continue;
             }
-            let score = cosine_similarity(&query_embedding, &emb);
-            let weighted = score + ((importance as f32).clamp(1.0, 5.0) - 1.0) * 0.02;
-            scored.push((weighted, format!("[long-term/{kind}] {content}")));
+            let similarity = cosine_similarity(&query_embedding, &emb);
+            let with_importance = similarity + ((importance as f32).clamp(1.0, 5.0) - 1.0) * 0.02;
+            candidates.push(MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content,
+                kind: Some(kind),
+                importance: Some(importance),
+                raw_similarity: similarity,
+                final_score: with_importance * config.long_term_weight,
+            });
         }
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        Ok(scored
-            .into_iter()
-            .take(top_k)
-            .map(|(_, text)| text)
-            .collect())
+        Ok(rank_preinject_hits(candidates, &config))
+    }
+
+    pub async fn semantic_forget_long_term(
+        &self,
+        query: &str,
+        similarity_threshold: f32,
+        max_matches: usize,
+        kind_filter: Option<&str>,
+        commit: bool,
+    ) -> Result<LongTermForgetResult, FrameworkError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(FrameworkError::Tool(
+                "forget requires non-empty query".to_owned(),
+            ));
+        }
+
+        let threshold = similarity_threshold.clamp(0.0, 1.0);
+        let max_matches = max_matches.clamp(1, 50);
+        let query_embedding = embed_text(&self.embedder, trimmed).await?;
+        let normalized_kind = kind_filter
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        let conn = self
+            .long_term_pool
+            .get()
+            .await
+            .map_err(|e| FrameworkError::Config(e.to_string()))?;
+        let rows = if let Some(kind) = normalized_kind.clone() {
+            conn.interact(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, content, embedding, kind, importance
+                     FROM ltm_facts
+                     WHERE embedding IS NOT NULL AND kind = ?1",
+                )?;
+                let mut out = Vec::new();
+                let mapped = stmt.query_map(params![kind], |row| {
+                    let id: i64 = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    let blob: Vec<u8> = row.get(2)?;
+                    let kind: String = row.get(3)?;
+                    let importance: i64 = row.get(4)?;
+                    Ok::<LongTermEmbeddedRow, rusqlite::Error>(LongTermEmbeddedRow {
+                        id,
+                        content,
+                        embedding: blob,
+                        kind,
+                        importance,
+                    })
+                })?;
+                for row in mapped {
+                    out.push(row?);
+                }
+                Ok::<Vec<LongTermEmbeddedRow>, rusqlite::Error>(out)
+            })
+            .await
+            .map_err(|e| FrameworkError::Config(e.to_string()))??
+        } else {
+            conn.interact(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, content, embedding, kind, importance
+                     FROM ltm_facts
+                     WHERE embedding IS NOT NULL",
+                )?;
+                let mut out = Vec::new();
+                let mapped = stmt.query_map([], |row| {
+                    let id: i64 = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    let blob: Vec<u8> = row.get(2)?;
+                    let kind: String = row.get(3)?;
+                    let importance: i64 = row.get(4)?;
+                    Ok::<LongTermEmbeddedRow, rusqlite::Error>(LongTermEmbeddedRow {
+                        id,
+                        content,
+                        embedding: blob,
+                        kind,
+                        importance,
+                    })
+                })?;
+                for row in mapped {
+                    out.push(row?);
+                }
+                Ok::<Vec<LongTermEmbeddedRow>, rusqlite::Error>(out)
+            })
+            .await
+            .map_err(|e| FrameworkError::Config(e.to_string()))??
+        };
+
+        let matches = select_forget_matches(rows, &query_embedding, threshold, max_matches);
+        let mut deleted_count = 0usize;
+        if commit && !matches.is_empty() {
+            let ids = matches.iter().map(|item| item.id).collect::<Vec<_>>();
+            deleted_count = conn
+                .interact(move |conn| {
+                    let tx = conn.transaction()?;
+                    let mut count = 0usize;
+                    for id in ids {
+                        count += tx.execute("DELETE FROM ltm_facts WHERE id = ?1", params![id])?;
+                    }
+                    tx.commit()?;
+                    Ok::<usize, rusqlite::Error>(count)
+                })
+                .await
+                .map_err(|e| FrameworkError::Config(e.to_string()))??;
+        }
+
+        Ok(LongTermForgetResult {
+            matches,
+            deleted_count,
+            similarity_threshold: threshold,
+            max_matches,
+            kind_filter: normalized_kind,
+        })
     }
 
     pub async fn recent_messages(
@@ -412,7 +570,6 @@ impl MemoryStore {
                 trimmed_kind.to_owned()
             }
         };
-        let session_for_check = session.clone();
         let fact_for_check = fact.clone();
         let kind_for_check = kind.clone();
 
@@ -423,13 +580,7 @@ impl MemoryStore {
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
         let already_exists = conn
             .interact(move |conn| {
-                has_recent_long_term_fact(
-                    conn,
-                    &session_for_check,
-                    &kind_for_check,
-                    &fact_for_check,
-                    &dedupe_cutoff,
-                )
+                has_recent_long_term_fact(conn, &kind_for_check, &fact_for_check, &dedupe_cutoff)
             })
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))??;
@@ -456,7 +607,6 @@ impl MemoryStore {
 
 fn has_recent_long_term_fact(
     conn: &rusqlite::Connection,
-    session_id: &str,
     kind: &str,
     content: &str,
     dedupe_cutoff: &str,
@@ -464,13 +614,12 @@ fn has_recent_long_term_fact(
     let mut stmt = conn.prepare(
         "SELECT 1
          FROM ltm_facts
-         WHERE source_session_id = ?1
-           AND kind = ?2
-           AND content = ?3
-           AND created_at >= ?4
+         WHERE kind = ?1
+           AND content = ?2
+           AND created_at >= ?3
          LIMIT 1",
     )?;
-    let mut rows = stmt.query(params![session_id, kind, content, dedupe_cutoff])?;
+    let mut rows = stmt.query(params![kind, content, dedupe_cutoff])?;
     Ok(rows.next()?.is_some())
 }
 
@@ -550,11 +699,134 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+#[derive(Debug)]
+struct LongTermEmbeddedRow {
+    id: i64,
+    content: String,
+    embedding: Vec<u8>,
+    kind: String,
+    importance: i64,
+}
+
+fn rank_preinject_hits(
+    mut candidates: Vec<MemoryPreinjectHit>,
+    config: &MemoryPreinjectConfig,
+) -> Vec<MemoryPreinjectHit> {
+    let normalized = config.normalized();
+    candidates.sort_by(|a, b| {
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(Ordering::Equal)
+    });
+
+    let mut dedupe = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in candidates {
+        if item.raw_similarity < normalized.min_score {
+            trace!(
+                store = %memory_store_name(item.store),
+                final_score = item.final_score,
+                raw_similarity = item.raw_similarity,
+                min_score = normalized.min_score,
+                "long-term memory pre-injection candidate filtered by raw_similarity min_score"
+            );
+            continue;
+        }
+        let key = normalize_memory_key(&item.content);
+        if key.is_empty() {
+            trace!(
+                store = %memory_store_name(item.store),
+                final_score = item.final_score,
+                "long-term memory pre-injection candidate filtered by empty content"
+            );
+            continue;
+        }
+        if !dedupe.insert(key) {
+            trace!(
+                store = %memory_store_name(item.store),
+                final_score = item.final_score,
+                raw_similarity = item.raw_similarity,
+                "long-term memory pre-injection candidate filtered by dedupe"
+            );
+            continue;
+        }
+        trace!(
+            store = %memory_store_name(item.store),
+            final_score = item.final_score,
+            raw_similarity = item.raw_similarity,
+            "long-term memory pre-injection candidate selected"
+        );
+        out.push(item);
+        if out.len() >= normalized.top_k as usize {
+            trace!(
+                top_k = normalized.top_k,
+                "long-term memory pre-injection reached top_k"
+            );
+            break;
+        }
+    }
+    out
+}
+
+fn memory_store_name(store: MemoryHitStore) -> &'static str {
+    match store {
+        MemoryHitStore::LongTerm => "long-term",
+    }
+}
+
+fn normalize_memory_key(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn select_forget_matches(
+    rows: Vec<LongTermEmbeddedRow>,
+    query_embedding: &[f32],
+    similarity_threshold: f32,
+    max_matches: usize,
+) -> Vec<LongTermForgetMatch> {
+    let mut matches = rows
+        .into_iter()
+        .filter_map(|row| {
+            let emb = decode_f32_blob(&row.embedding);
+            if emb.is_empty() {
+                return None;
+            }
+            let similarity = cosine_similarity(query_embedding, &emb);
+            if similarity < similarity_threshold {
+                return None;
+            }
+            Some(LongTermForgetMatch {
+                id: row.id,
+                content: row.content,
+                kind: row.kind,
+                importance: row.importance,
+                similarity,
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(Ordering::Equal)
+    });
+    matches.truncate(max_matches);
+    matches
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
 
-    use super::has_recent_long_term_fact;
+    use crate::config::MemoryPreinjectConfig;
+
+    use super::{
+        MemoryHitStore, MemoryPreinjectHit, encode_f32_blob, has_recent_long_term_fact,
+        rank_preinject_hits, select_forget_matches,
+    };
 
     #[test]
     fn long_term_duplicate_check_matches_recent_identical_fact() {
@@ -587,7 +859,6 @@ mod tests {
 
         let matched = has_recent_long_term_fact(
             &conn,
-            "chan:design",
             "general",
             "The squire loves bananas.",
             "2026-03-06T19:11:40.000000+00:00",
@@ -597,12 +868,131 @@ mod tests {
 
         let too_old = has_recent_long_term_fact(
             &conn,
-            "chan:design",
             "general",
             "The squire loves bananas.",
             "2026-03-06T19:11:45.000000+00:00",
         )
         .expect("query should succeed");
         assert!(!too_old);
+    }
+
+    #[test]
+    fn select_forget_matches_applies_threshold_and_cap() {
+        let rows = vec![
+            super::LongTermEmbeddedRow {
+                id: 1,
+                content: "A".to_owned(),
+                embedding: encode_f32_blob(&[1.0, 0.0]),
+                kind: "general".to_owned(),
+                importance: 3,
+            },
+            super::LongTermEmbeddedRow {
+                id: 2,
+                content: "B".to_owned(),
+                embedding: encode_f32_blob(&[0.9, 0.1]),
+                kind: "general".to_owned(),
+                importance: 3,
+            },
+            super::LongTermEmbeddedRow {
+                id: 3,
+                content: "C".to_owned(),
+                embedding: encode_f32_blob(&[0.0, 1.0]),
+                kind: "general".to_owned(),
+                importance: 3,
+            },
+        ];
+
+        let matches = select_forget_matches(rows, &[1.0, 0.0], 0.85, 2);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].id, 1);
+        assert_eq!(matches[1].id, 2);
+    }
+
+    #[test]
+    fn rank_preinject_hits_applies_threshold_dedupe_and_limit() {
+        let config = MemoryPreinjectConfig {
+            enabled: true,
+            top_k: 2,
+            min_score: 0.75,
+            max_items_per_store: 20,
+            long_term_weight: 0.65,
+            max_chars: 1200,
+        };
+        let hits = vec![
+            MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Prefers short answers".to_owned(),
+                kind: Some("prefs".to_owned()),
+                importance: Some(5),
+                raw_similarity: 0.94,
+                final_score: 0.86,
+            },
+            MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Working in Rust project".to_owned(),
+                kind: Some("context".to_owned()),
+                importance: Some(3),
+                raw_similarity: 0.89,
+                final_score: 0.81,
+            },
+            MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Low confidence".to_owned(),
+                kind: Some("context".to_owned()),
+                importance: Some(1),
+                raw_similarity: 0.5,
+                final_score: 0.3,
+            },
+        ];
+
+        let ranked = rank_preinject_hits(hits, &config);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].content, "Prefers short answers");
+        assert_eq!(ranked[1].content, "Working in Rust project");
+        assert!(ranked.iter().all(|hit| hit.raw_similarity >= 0.75));
+    }
+
+    #[test]
+    fn rank_preinject_hits_filters_on_raw_similarity_not_final_score() {
+        let config = MemoryPreinjectConfig {
+            enabled: true,
+            top_k: 2,
+            min_score: 0.72,
+            max_items_per_store: 20,
+            long_term_weight: 0.65,
+            max_chars: 1200,
+        };
+        let hits = vec![
+            MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content: "High weighted, low raw".to_owned(),
+                kind: Some("prefs".to_owned()),
+                importance: Some(5),
+                raw_similarity: 0.70,
+                final_score: 0.95,
+            },
+            MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Passes raw threshold".to_owned(),
+                kind: Some("context".to_owned()),
+                importance: Some(5),
+                raw_similarity: 0.90,
+                final_score: 0.60,
+            },
+            MemoryPreinjectHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Also passes raw threshold".to_owned(),
+                kind: Some("context".to_owned()),
+                importance: Some(3),
+                raw_similarity: 0.88,
+                final_score: 0.58,
+            },
+        ];
+
+        let ranked = rank_preinject_hits(hits, &config);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].content, "Passes raw threshold");
+        assert_eq!(ranked[1].content, "Also passes raw threshold");
+        assert!(ranked.iter().all(|hit| hit.raw_similarity >= 0.72));
     }
 }

@@ -131,7 +131,6 @@ mod tests {
             log_path: logs_dir.join("service.log"),
             pid_path: run_dir.join("service.pid"),
             base_dir,
-            db_dir,
             logs_dir,
             run_dir,
         }
