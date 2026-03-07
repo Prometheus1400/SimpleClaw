@@ -18,6 +18,9 @@ mod tools;
 
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
+use std::str::FromStr;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{Directive, LevelFilter};
 
 use crate::cli::{AgentAction, Cli, Command, ListAction, SystemAction};
 use crate::config::{GlobalConfig, LogLevel, ProviderKind};
@@ -26,9 +29,9 @@ use crate::paths::AppPaths;
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    init_tracing();
-
     let cli = Cli::parse();
+    init_tracing(&cli)?;
+
     match &cli.command {
         Some(Command::System {
             action: SystemAction::Run,
@@ -118,11 +121,7 @@ fn known_models_for(provider: ProviderKind) -> &'static [&'static str] {
     }
 }
 
-fn init_tracing() {
-    use std::str::FromStr;
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::filter::{Directive, LevelFilter};
-
+fn init_tracing(cli: &Cli) -> color_eyre::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         let configured = load_configured_log_level();
         let app_level = LevelFilter::from_str(configured.as_str()).unwrap_or(LevelFilter::INFO);
@@ -157,7 +156,30 @@ fn init_tracing() {
 
         filter
     });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    let log_to_file = matches!(
+        cli.command,
+        Some(Command::System {
+            action: SystemAction::Run
+        }) | None
+    );
+    if log_to_file {
+        let paths = AppPaths::resolve().wrap_err("failed to resolve runtime paths for logging")?;
+        paths
+            .ensure_runtime_dirs()
+            .wrap_err("failed to create runtime directories for logging")?;
+        let writer = crate::run::RotatingLogWriter::new(
+            paths.log_path.clone(),
+            crate::run::RETAIN_DAILY_LOG_FILES,
+        )?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(move || writer.clone())
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+    Ok(())
 }
 
 fn load_configured_log_level() -> LogLevel {

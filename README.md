@@ -1,7 +1,7 @@
 # SimpleClaw
 
-SimpleClaw is a Rust project with sandboxed WASM guest artifacts used for tool execution.
-The repository is organized as a Cargo workspace, with the main app at the root and wasm guest crates under `guests/`.
+SimpleClaw is a Rust project with sandboxed WASM tool artifacts used for tool execution.
+The repository is organized as a Cargo workspace, with the main app at the root and wasm tool crates under `sandbox/`.
 
 ## Common Commands
 
@@ -15,16 +15,10 @@ The repository is organized as a Cargo workspace, with the main app at the root 
 
 WASM guest artifacts live in `assets/wasm`.
 
-Build and stage wasm artifacts into `assets/wasm`:
+Build wasm artifacts from the root workspace manifest:
 
 ```bash
-./scripts/build-wasm-guests.sh
-```
-
-Or build wasm guests from the root workspace manifest directly:
-
-```bash
-cargo build --package read_guest --package edit_guest --target wasm32-wasip1 --release
+cargo build --package read_tool --package edit_tool --target wasm32-wasip1 --release
 ```
 
 ## Install
@@ -33,6 +27,12 @@ Install locally (default prefix `~/.cargo`):
 
 ```bash
 ./scripts/install.sh
+```
+
+Install debug artifacts (faster for local development):
+
+```bash
+./scripts/install.sh --debug
 ```
 
 Or call the script directly with an override:

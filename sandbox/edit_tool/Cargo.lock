@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "edit_guest"
+name = "edit_tool"
 version = "0.1.0"
 dependencies = [
  "serde",
