@@ -18,10 +18,11 @@ use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
 use crate::providers::{Message, Provider, ProviderResponse, ToolDefinition};
-use crate::run::{
+use crate::run::composition::{
     ChannelFactory, MemoryFactory, ProviderFactory, ProviderHandle, RuntimeDependencies,
-    assemble_runtime_state, handle_inbound_once,
+    assemble_runtime_state,
 };
+use crate::run::handle_inbound_once;
 
 /// Configuration for a single end-to-end roundtrip test run.
 #[derive(Debug, Clone)]
