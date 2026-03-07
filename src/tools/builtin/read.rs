@@ -41,7 +41,7 @@ impl Tool for ReadTool {
             let guest_path = host_path_to_workspace_guest_path(&path, &ctx.workspace_root)?;
             let output = run_wasm_guest(
                 &ctx.workspace_root,
-                "read_guest.wasm",
+                "read_tool.wasm",
                 &[guest_path],
                 &[],
                 Duration::from_secs(10),
@@ -49,7 +49,7 @@ impl Tool for ReadTool {
             .await?;
             if output.exit_code != 0 {
                 return Err(FrameworkError::Tool(format!(
-                    "read guest failed: exit_code={} stderr={}",
+                    "read tool failed: exit_code={} stderr={}",
                     output.exit_code,
                     output.stderr.trim()
                 )));

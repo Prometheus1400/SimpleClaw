@@ -56,7 +56,7 @@ impl Tool for EditTool {
         if ctx.sandbox == SandboxMode::On {
             let output = run_wasm_guest(
                 &ctx.workspace_root,
-                "edit_guest.wasm",
+                "edit_tool.wasm",
                 &[],
                 args_json.as_bytes(),
                 Duration::from_secs(15),
@@ -64,7 +64,7 @@ impl Tool for EditTool {
             .await?;
             if output.exit_code != 0 {
                 return Err(FrameworkError::Tool(format!(
-                    "edit guest failed: exit_code={} stderr={}",
+                    "edit tool failed: exit_code={} stderr={}",
                     output.exit_code,
                     output.stderr.trim()
                 )));

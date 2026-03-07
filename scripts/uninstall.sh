@@ -56,7 +56,7 @@ else
 fi
 
 if [[ -d "${WASM_DIR}" ]]; then
-  rm -f "${WASM_DIR}/read_guest.wasm" "${WASM_DIR}/edit_guest.wasm" "${WASM_DIR}/SHA256SUMS"
+  rm -f "${WASM_DIR}/read_tool.wasm" "${WASM_DIR}/edit_tool.wasm" "${WASM_DIR}/SHA256SUMS"
   rmdir "${WASM_DIR}" 2>/dev/null || true
   parent_dir="$(dirname "${WASM_DIR}")"
   rmdir "${parent_dir}" 2>/dev/null || true
