@@ -12,7 +12,8 @@ use crate::tools::{ActiveTools, ToolCtx};
 
 const TOOL_ARG_PREVIEW_CHARS: usize = 160;
 const TOOL_OBSERVATION_PREVIEW_CHARS: usize = 220;
-const OWNER_RESTRICTED_TOOLS: &[&str] = &["exec", "process", "forget", "summon", "edit"];
+const OWNER_RESTRICTED_TOOLS: &[&str] =
+    &["exec", "process", "forget", "summon", "edit", "memorize"];
 
 pub struct ParsedToolCall {
     pub name: String,
@@ -638,6 +639,13 @@ mod tests {
     fn edit_tool_is_owner_restricted() {
         let owner_ids = vec!["owner-1".to_owned()];
         let result = enforce_tool_authorization_for_identity("edit", "u1", &owner_ids);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn memorize_tool_is_owner_restricted() {
+        let owner_ids = vec!["owner-1".to_owned()];
+        let result = enforce_tool_authorization_for_identity("memorize", "u1", &owner_ids);
         assert!(result.is_err());
     }
 
