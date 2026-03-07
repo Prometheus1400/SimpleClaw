@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod sandbox;
+pub mod skill;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -60,9 +61,9 @@ impl ToolCtx {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    fn input_schema_json(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn input_schema_json(&self) -> &str;
 
     async fn execute(
         &self,
@@ -318,9 +319,12 @@ impl ProcessManager {
             .arg("/bin/sh")
             .arg("--workdir")
             .arg("/workspace")
-            .arg("--mount").arg(&ws_mount)
-            .arg("--mount").arg(&stdout_mount)
-            .arg("--mount").arg(&stderr_mount)
+            .arg("--mount")
+            .arg(&ws_mount)
+            .arg("--mount")
+            .arg(&stdout_mount)
+            .arg("--mount")
+            .arg(&stderr_mount)
             .arg("--memory")
             .arg(format!("{}m", cfg.memory_mb.max(64)))
             .arg("--cpus")
@@ -330,12 +334,9 @@ impl ProcessManager {
         if !cfg.network_enabled {
             runner.arg("--network").arg("none");
         }
-        runner
-            .arg(&cfg.image)
-            .arg("-lc")
-            .arg(format!(
-                "cd /workspace && {{ {command} ; }} > /tmp/_sc_stdout.log 2> /tmp/_sc_stderr.log"
-            ));
+        runner.arg(&cfg.image).arg("-lc").arg(format!(
+            "cd /workspace && {{ {command} ; }} > /tmp/_sc_stdout.log 2> /tmp/_sc_stderr.log"
+        ));
 
         let output = runner
             .output()
@@ -344,7 +345,8 @@ impl ProcessManager {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(FrameworkError::Tool(format!(
-                "podman run -d failed: {}", stderr.trim()
+                "podman run -d failed: {}",
+                stderr.trim()
             )));
         }
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -565,9 +567,7 @@ impl ProcessEntry {
                     .arg(container_id.as_str())
                     .output()
                     .await
-                    .map_err(|e| {
-                        FrameworkError::Tool(format!("failed to stop container: {e}"))
-                    })?;
+                    .map_err(|e| FrameworkError::Tool(format!("failed to stop container: {e}")))?;
                 if !output.status.success() {
                     tracing::warn!(
                         stderr = %String::from_utf8_lossy(&output.stderr),

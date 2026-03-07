@@ -8,7 +8,9 @@ use crate::config::{ExecContainerConfig, SandboxMode};
 use crate::error::FrameworkError;
 use crate::tools::{ProcessStatus, Tool, ToolCtx, wait_for_completion};
 
-use super::common::{command_output_to_json, exec_shell_command, parse_exec_args, snapshot_to_json};
+use super::common::{
+    command_output_to_json, exec_shell_command, parse_exec_args, snapshot_to_json,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecTool {
@@ -65,7 +67,12 @@ impl Tool for ExecTool {
         }
 
         let result = if ctx.sandbox == SandboxMode::On {
-            exec_with_podman(args.command.trim(), &ctx.workspace_root, &ctx.exec_container).await?
+            exec_with_podman(
+                args.command.trim(),
+                &ctx.workspace_root,
+                &ctx.exec_container,
+            )
+            .await?
         } else {
             exec_shell_command(args.command.trim(), None).await?
         };
@@ -131,10 +138,13 @@ async fn exec_with_podman(
 }
 
 pub(crate) async fn ensure_podman_available() -> Result<(), FrameworkError> {
-    let output = timeout(Duration::from_secs(8), Command::new("podman").arg("--version").output())
-        .await
-        .map_err(|_| FrameworkError::Tool("podman check timed out".to_owned()))?
-        .map_err(|e| FrameworkError::Tool(format!("podman is required but not available: {e}")))?;
+    let output = timeout(
+        Duration::from_secs(8),
+        Command::new("podman").arg("--version").output(),
+    )
+    .await
+    .map_err(|_| FrameworkError::Tool("podman check timed out".to_owned()))?
+    .map_err(|e| FrameworkError::Tool(format!("podman is required but not available: {e}")))?;
     if !output.status.success() {
         return Err(FrameworkError::Tool(format!(
             "podman --version failed: {}",
@@ -160,9 +170,9 @@ pub(crate) async fn ensure_sandbox_image(cfg: &ExecContainerConfig) -> Result<()
         .join("sandbox")
         .join("podman")
         .join("Containerfile");
-    let context_dir = containerfile.parent().ok_or_else(|| {
-        FrameworkError::Tool("invalid sandbox containerfile path".to_owned())
-    })?;
+    let context_dir = containerfile
+        .parent()
+        .ok_or_else(|| FrameworkError::Tool("invalid sandbox containerfile path".to_owned()))?;
     if !containerfile.is_file() {
         return Err(FrameworkError::Tool(format!(
             "missing podman sandbox Containerfile: {}",

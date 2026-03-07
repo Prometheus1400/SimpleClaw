@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,13 +7,14 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{AgentConfig, ProviderKind, RuntimeConfig};
+use crate::config::{AgentConfig, ProviderKind, RuntimeConfig, ToolConfig};
 use crate::dispatch::{NativeDispatcher, ToolDispatcher, XmlDispatcher};
 use crate::error::FrameworkError;
 use crate::memory::{MemoryHitStore, MemoryPreinjectHit, MemoryStore};
 use crate::prompt::PromptAssembler;
 use crate::provider::{Message, Provider, Role};
 use crate::react;
+use crate::tools::skill::{SkillToolLoadStats, load_skill_tools};
 use crate::tools::{
     ProcessManager, SummonService, TaskService, ToolCtx, ToolRegistry, default_registry,
 };
@@ -26,10 +27,12 @@ pub struct AgentRuntime {
     dispatcher: Arc<dyn ToolDispatcher>,
     memory: MemoryStore,
     tool_registry: Arc<ToolRegistry>,
+    skill_tool_names: Vec<String>,
     process_manager: Arc<ProcessManager>,
     summon_agents: HashMap<String, PathBuf>,
     summon_memories: HashMap<String, MemoryStore>,
     workspace_root: PathBuf,
+    app_base_dir: PathBuf,
     system_prompt: String,
     max_steps: u32,
 }
@@ -46,7 +49,10 @@ impl AgentRuntime {
         summon_agents: HashMap<String, PathBuf>,
         summon_memories: HashMap<String, MemoryStore>,
         workspace_root: PathBuf,
+        app_base_dir: PathBuf,
         system_prompt: String,
+        tool_registry: Arc<ToolRegistry>,
+        skill_tool_names: Vec<String>,
         max_steps: u32,
     ) -> Self {
         let dispatcher: Arc<dyn ToolDispatcher> = if provider_kind.supports_native_tools() {
@@ -61,11 +67,13 @@ impl AgentRuntime {
             provider,
             dispatcher,
             memory,
-            tool_registry: Arc::new(default_registry()),
+            tool_registry,
+            skill_tool_names,
             process_manager: Arc::new(ProcessManager::new()),
             summon_agents,
             summon_memories,
             workspace_root,
+            app_base_dir,
             system_prompt,
             max_steps,
         }
@@ -110,15 +118,15 @@ impl AgentRuntime {
         let summon_service: Arc<dyn SummonService> = Arc::new(RuntimeSummonService {
             provider: Arc::clone(&self.provider),
             dispatcher: Arc::clone(&self.dispatcher),
-            tool_registry: Arc::clone(&self.tool_registry),
             process_manager: Arc::clone(&self.process_manager),
             summon_agents: self.summon_agents.clone(),
             summon_memories: self.summon_memories.clone(),
+            app_base_dir: self.app_base_dir.clone(),
             max_steps: self.max_steps.min(self.runtime_config.max_steps),
         });
-        let active_tools = self
-            .tool_registry
-            .resolve_active(&self.agent_config.tools)?;
+        let effective_tools =
+            with_auto_enabled_skill_tools(&self.agent_config.tools, &self.skill_tool_names);
+        let active_tools = self.tool_registry.resolve_active(&effective_tools)?;
         let worker_enabled_tools = active_tools
             .names()
             .into_iter()
@@ -359,10 +367,10 @@ fn inject_caller_context(base: &str, user_id: &str, username: &str) -> String {
 struct RuntimeSummonService {
     provider: Arc<dyn Provider>,
     dispatcher: Arc<dyn ToolDispatcher>,
-    tool_registry: Arc<ToolRegistry>,
     process_manager: Arc<ProcessManager>,
     summon_agents: HashMap<String, PathBuf>,
     summon_memories: HashMap<String, MemoryStore>,
+    app_base_dir: PathBuf,
     max_steps: u32,
 }
 
@@ -398,11 +406,21 @@ impl SummonService for RuntimeSummonService {
             ))
         })?;
 
-        let system_prompt = PromptAssembler::from_workspace(workspace)?;
         let target_agent_config = load_agent_config(workspace)?;
-        let active_tools = self
+        let system_prompt = load_system_prompt_for_workspace(workspace)?;
+        let target_tooling = build_tool_registry_for_agent(
+            target_agent,
+            &target_agent_config,
+            workspace,
+            &self.app_base_dir,
+        )?;
+        let effective_target_tools = with_auto_enabled_skill_tools(
+            &target_agent_config.tools,
+            &target_tooling.skill_tool_names,
+        );
+        let active_tools = target_tooling
             .tool_registry
-            .resolve_active(&target_agent_config.tools)?;
+            .resolve_active(&effective_target_tools)?;
         let handoff = if summary.trim().is_empty() {
             format!(
                 "You were summoned as agent `{target_agent}`. Continue from session context and produce a final answer."
@@ -497,6 +515,51 @@ pub(crate) fn load_agent_config_for_workspace(
 
 pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<String, FrameworkError> {
     PromptAssembler::from_workspace(workspace)
+}
+
+pub(crate) struct AgentTooling {
+    pub tool_registry: Arc<ToolRegistry>,
+    pub skill_tool_names: Vec<String>,
+    pub skill_stats: SkillToolLoadStats,
+}
+
+pub(crate) fn build_tool_registry_for_agent(
+    agent_id: &str,
+    agent_config: &AgentConfig,
+    agent_workspace: &Path,
+    app_base_dir: &Path,
+) -> Result<AgentTooling, FrameworkError> {
+    let mut registry = default_registry();
+    let loaded_skills = load_skill_tools(
+        agent_id,
+        &agent_config.skills,
+        agent_workspace,
+        app_base_dir,
+    )?;
+    for skill_tool in loaded_skills.tools {
+        registry.register(skill_tool);
+    }
+
+    Ok(AgentTooling {
+        tool_registry: Arc::new(registry),
+        skill_tool_names: loaded_skills.tool_names,
+        skill_stats: loaded_skills.stats,
+    })
+}
+
+fn with_auto_enabled_skill_tools(
+    base_tools: &ToolConfig,
+    skill_tool_names: &[String],
+) -> ToolConfig {
+    let mut enabled_tools = base_tools.enabled_tools.clone();
+    let mut seen = enabled_tools.iter().cloned().collect::<HashSet<String>>();
+    for name in skill_tool_names {
+        if seen.insert(name.clone()) {
+            enabled_tools.push(name.clone());
+        }
+    }
+
+    ToolConfig { enabled_tools }
 }
 
 #[cfg(test)]

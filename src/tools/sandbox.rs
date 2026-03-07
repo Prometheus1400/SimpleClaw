@@ -175,7 +175,10 @@ fn resolve_guest_artifact_path(
                     .join(artifact_name)
             })
     });
-    let workspace_candidate = workspace_root.join("assets").join("wasm").join(artifact_name);
+    let workspace_candidate = workspace_root
+        .join("assets")
+        .join("wasm")
+        .join(artifact_name);
     let manifest_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join("wasm")

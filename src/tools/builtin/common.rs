@@ -282,10 +282,7 @@ fn truncate_for_tool_output(text: &str, max_chars: usize) -> String {
     let head_budget = max_chars / 5; // ~20%
     let tail_budget = max_chars - head_budget; // ~80%
     let head: String = text.chars().take(head_budget).collect();
-    let tail: String = text
-        .chars()
-        .skip(total - tail_budget)
-        .collect();
+    let tail: String = text.chars().skip(total - tail_budget).collect();
     let truncated = total - head_budget - tail_budget;
     format!("{head}\n...[{truncated} chars truncated]...\n{tail}")
 }
