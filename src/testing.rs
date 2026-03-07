@@ -163,6 +163,7 @@ pub async fn run_single_gateway_roundtrip(
         .wrap_err("failed to assemble runtime state for integration harness")?;
 
     let inbound = InboundMessage {
+        trace_id: crate::telemetry::next_trace_id(),
         source_channel: GatewayChannelKind::Discord,
         target_agent_id: config.agent_id.clone(),
         session_key: format!("agent:{}:discord:{}", config.agent_id, config.channel_id),

@@ -84,6 +84,17 @@ impl AgentRuntime {
         }
     }
 
+    #[tracing::instrument(
+        name = "agent.run",
+        skip(self),
+        fields(
+            trace_id = %inbound.trace_id,
+            session_id = %memory_session_id,
+            channel_id = %inbound.channel_id,
+            agent_id = %self.agent_id,
+            user_id = %inbound.user_id
+        )
+    )]
     pub async fn run(
         &self,
         inbound: &crate::channels::InboundMessage,
@@ -91,12 +102,9 @@ impl AgentRuntime {
     ) -> Result<String, FrameworkError> {
         let execution_started = Instant::now();
         info!(
-            agent_id = %self.agent_id,
-            session_id = %memory_session_id,
-            channel_id = %inbound.channel_id,
-            user_id = %inbound.user_id,
+            status = "started",
             max_steps = self.max_steps.min(self.runtime_config.max_steps),
-            "agent execution started"
+            "agent execution"
         );
         let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);
         self.memory
@@ -114,10 +122,9 @@ impl AgentRuntime {
         let system_prompt =
             inject_caller_context(&system_prompt, &inbound.user_id, &inbound.username);
         debug!(
-            agent_id = %self.agent_id,
-            session_id = %memory_session_id,
+            status = "history_loaded",
             history_len = history.len(),
-            "loaded seeded history"
+            "agent context"
         );
 
         let summon_service: Arc<dyn SummonService> = Arc::new(RuntimeSummonService {
@@ -165,6 +172,7 @@ impl AgentRuntime {
             task_service: Some(task_service),
             completion_tx: self.completion_tx.clone(),
             completion_route: Some(CompletionRoute {
+                trace_id: inbound.trace_id.clone(),
                 source_channel: inbound.source_channel,
                 target_agent_id: self.agent_id.clone(),
                 session_key: inbound.session_key.clone(),
@@ -190,11 +198,11 @@ impl AgentRuntime {
             Ok(reply) => reply,
             Err(err) => {
                 error!(
-                    agent_id = %self.agent_id,
-                    session_id = %memory_session_id,
+                    status = "failed",
+                    error_kind = "react_loop",
                     elapsed_ms = execution_started.elapsed().as_millis() as u64,
                     error = %err,
-                    "agent execution failed"
+                    "agent execution"
                 );
                 return Err(err);
             }
@@ -204,11 +212,10 @@ impl AgentRuntime {
             .append_message(memory_session_id, "assistant", &reply, None)
             .await?;
         info!(
-            agent_id = %self.agent_id,
-            session_id = %memory_session_id,
+            status = "completed",
             elapsed_ms = execution_started.elapsed().as_millis() as u64,
             output_preview = %react::sanitize_log_preview(&reply, 120),
-            "agent execution completed"
+            "agent execution"
         );
         Ok(reply)
     }
@@ -277,10 +284,10 @@ impl AgentRuntime {
             Ok(items) => items,
             Err(err) => {
                 warn!(
-                    agent_id = %self.agent_id,
-                    session_id = %session_id,
+                    status = "failed",
+                    error_kind = "memory_preinject_query",
                     error = %err,
-                    "long-term memory pre-injection query failed; continuing without injected memory"
+                    "memory preinject query"
                 );
                 return self.system_prompt.clone();
             }
@@ -288,35 +295,33 @@ impl AgentRuntime {
 
         if hits.is_empty() {
             debug!(
-                agent_id = %self.agent_id,
-                session_id = %session_id,
+                status = "completed",
                 query_preview = %react::sanitize_log_preview(trimmed_query, 120),
                 min_score = config.min_score,
                 top_k = config.top_k,
-                "long-term memory pre-injection selected no hits"
+                selected_hits = 0usize,
+                "memory preinject"
             );
             return self.system_prompt.clone();
         }
 
         debug!(
-            agent_id = %self.agent_id,
-            session_id = %session_id,
+            status = "completed",
             query_preview = %react::sanitize_log_preview(trimmed_query, 120),
             selected_hits = hits.len(),
             min_score = config.min_score,
             top_k = config.top_k,
             max_chars = config.max_chars,
-            "long-term memory pre-injection selected hits"
+            "memory preinject"
         );
         for hit in &hits {
             debug!(
-                agent_id = %self.agent_id,
-                session_id = %session_id,
+                status = "selected_hit",
                 label = %memory_hit_label(hit),
                 score = hit.final_score,
                 raw_similarity = hit.raw_similarity,
                 content_preview = %react::sanitize_log_preview(hit.content.trim(), 160),
-                "long-term memory pre-injection hit"
+                "memory preinject"
             );
         }
 

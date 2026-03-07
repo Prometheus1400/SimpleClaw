@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, sleep};
+use tracing::{Instrument, info_span};
 
 use crate::channels::{Channel, InboundMessage};
 use crate::config::{GatewayChannelKind, InboundConfig};
@@ -30,35 +31,56 @@ impl Gateway {
             let channel = Arc::clone(channel);
             let inbound_tx = inbound_tx.clone();
             let inbound_policy = inbound_policy.clone();
-            tokio::spawn(async move {
-                loop {
-                    match channel.listen().await {
-                        Ok(inbound) => {
-                            let Some(inbound) =
-                                router::route_inbound(kind, inbound, &inbound_policy)
-                            else {
-                                continue;
-                            };
-                            if let Err(err) = inbound_tx.send(inbound).await {
-                                tracing::warn!(
+            let listener_span = info_span!("gateway.listen", source_channel = kind.as_str());
+            tokio::spawn(
+                async move {
+                    loop {
+                        match channel.listen().await {
+                            Ok(inbound) => {
+                                let Some(inbound) =
+                                    router::route_inbound(kind, inbound, &inbound_policy)
+                                else {
+                                    tracing::debug!(
+                                        status = "dropped",
+                                        reason = "policy_denied",
+                                        "inbound rejected by policy"
+                                    );
+                                    continue;
+                                };
+                                tracing::debug!(
+                                    status = "routed",
+                                    trace_id = %inbound.trace_id,
+                                    session_id = %inbound.session_key,
+                                    agent_id = %inbound.target_agent_id,
+                                    "inbound routed"
+                                );
+                                if let Err(err) = inbound_tx.send(inbound).await {
+                                    tracing::warn!(
+                                        status = "dropped",
+                                        error_kind = "queue_closed",
+                                        error = %err,
+                                        channel = kind.as_str(),
+                                        "inbound queue closed"
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    status = "retrying",
+                                    error_kind = "channel_listen",
                                     error = %err,
                                     channel = kind.as_str(),
-                                    "dropping inbound message; gateway queue closed"
+                                    backoff_ms = 1_000u64,
+                                    "channel listener failed"
                                 );
-                                break;
+                                sleep(Duration::from_secs(1)).await;
                             }
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                error = %err,
-                                channel = kind.as_str(),
-                                "channel listener failed; retrying"
-                            );
-                            sleep(Duration::from_secs(1)).await;
                         }
                     }
                 }
-            });
+                .instrument(listener_span),
+            );
         }
 
         Self {

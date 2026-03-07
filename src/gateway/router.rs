@@ -17,6 +17,7 @@ pub(super) fn route_inbound(
     let target_agent_id = decision.target_agent_id.clone();
 
     Some(InboundMessage {
+        trace_id: crate::telemetry::next_trace_id(),
         source_channel: kind,
         target_agent_id: target_agent_id.clone(),
         session_key: build_session_key(&target_agent_id, inbound.is_dm, kind, &inbound.channel_id),

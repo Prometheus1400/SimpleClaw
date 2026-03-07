@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use tracing::{Instrument, debug, info_span};
 
 use tokio::sync::mpsc;
 
@@ -41,6 +42,7 @@ pub trait TaskService: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct CompletionRoute {
+    pub trace_id: String,
     pub source_channel: GatewayChannelKind,
     pub target_agent_id: String,
     pub session_key: String,
@@ -270,6 +272,13 @@ impl ProcessManager {
         sessions.insert(session_id.clone(), entry);
         Self::auto_evict(&mut sessions);
         drop(sessions);
+        debug!(
+            status = "started",
+            process_backend = "host",
+            proc_session_id = %session_id,
+            command_preview = %crate::telemetry::sanitize_preview(command, 120),
+            "process session"
+        );
         Ok(session_id)
     }
 
@@ -391,6 +400,13 @@ impl ProcessManager {
         sessions.insert(session_id.clone(), entry);
         Self::auto_evict(&mut sessions);
         drop(sessions);
+        debug!(
+            status = "started",
+            process_backend = "podman",
+            proc_session_id = %session_id,
+            command_preview = %crate::telemetry::sanitize_preview(command, 120),
+            "process session"
+        );
         Ok(session_id)
     }
 
@@ -454,44 +470,64 @@ impl ProcessManager {
         route: CompletionRoute,
     ) {
         let pm = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_millis(500)).await;
-                let snapshot = match pm.update(&session_id).await {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                if snapshot.status == ProcessStatus::Running {
-                    continue;
-                }
-                let exit_code = snapshot.exit_code.unwrap_or(-1);
-                let content = format!(
-                    "[background process completed] session_id={} exit_code={} command={}",
-                    session_id, exit_code, snapshot.command
-                );
-                let msg = InboundMessage {
-                    source_channel: route.source_channel,
-                    target_agent_id: route.target_agent_id,
-                    session_key: route.session_key,
-                    channel_id: route.channel_id,
-                    guild_id: route.guild_id,
-                    is_dm: route.is_dm,
-                    user_id: "system".to_owned(),
-                    username: "system".to_owned(),
-                    mentioned_bot: false,
-                    invoke: true,
-                    content,
-                };
-                if let Err(err) = completion_tx.send(msg).await {
-                    tracing::warn!(
-                        error = %err,
-                        proc_session_id = %session_id,
-                        "failed to send background process completion message"
+        let trace_id = route.trace_id.clone();
+        let span = info_span!(
+            "process.completion_watcher",
+            trace_id = %trace_id,
+            session_id = %route.session_key,
+            proc_session_id = %session_id
+        );
+        tokio::spawn(
+            async move {
+                loop {
+                    sleep(Duration::from_millis(500)).await;
+                    let snapshot = match pm.update(&session_id).await {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    if snapshot.status == ProcessStatus::Running {
+                        continue;
+                    }
+                    let exit_code = snapshot.exit_code.unwrap_or(-1);
+                    let content = format!(
+                        "[background process completed] session_id={} exit_code={} command={}",
+                        session_id, exit_code, snapshot.command
                     );
+                    let msg = InboundMessage {
+                        trace_id: route.trace_id.clone(),
+                        source_channel: route.source_channel,
+                        target_agent_id: route.target_agent_id,
+                        session_key: route.session_key,
+                        channel_id: route.channel_id,
+                        guild_id: route.guild_id,
+                        is_dm: route.is_dm,
+                        user_id: "system".to_owned(),
+                        username: "system".to_owned(),
+                        mentioned_bot: false,
+                        invoke: true,
+                        content,
+                    };
+                    if let Err(err) = completion_tx.send(msg).await {
+                        tracing::warn!(
+                            status = "failed",
+                            error_kind = "completion_send",
+                            error = %err,
+                            proc_session_id = %session_id,
+                            "failed to send background process completion message"
+                        );
+                    } else {
+                        debug!(
+                            status = "completed",
+                            proc_session_id = %session_id,
+                            exit_code,
+                            "process completion watcher"
+                        );
+                    }
+                    break;
                 }
-                break;
             }
-        });
+            .instrument(span),
+        );
     }
 
     pub async fn forget(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
@@ -567,7 +603,7 @@ impl ProcessEntry {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::warn!(error = %e, "poll_completion: try_wait failed");
+                        tracing::warn!(status = "failed", error_kind = "poll_try_wait", error = %e, "process poll");
                         self.status = ProcessStatus::Completed;
                         self.finished_at = Some(Utc::now());
                     }
@@ -595,14 +631,16 @@ impl ProcessEntry {
                     }
                     Ok(out) => {
                         tracing::warn!(
+                            status = "failed",
+                            error_kind = "podman_inspect",
                             stderr = %String::from_utf8_lossy(&out.stderr),
-                            "poll_completion: podman inspect failed"
+                            "process poll"
                         );
                         self.status = ProcessStatus::Completed;
                         self.finished_at = Some(Utc::now());
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "poll_completion: podman inspect failed");
+                        tracing::warn!(status = "failed", error_kind = "podman_inspect", error = %e, "process poll");
                         self.status = ProcessStatus::Completed;
                         self.finished_at = Some(Utc::now());
                     }
@@ -635,8 +673,10 @@ impl ProcessEntry {
                     .map_err(|e| FrameworkError::Tool(format!("failed to stop container: {e}")))?;
                 if !output.status.success() {
                     tracing::warn!(
+                        status = "failed",
+                        error_kind = "podman_stop",
                         stderr = %String::from_utf8_lossy(&output.stderr),
-                        "kill: podman stop failed"
+                        "process kill"
                     );
                 }
             }

@@ -13,6 +13,7 @@ pub struct ChannelInbound {
 
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
+    pub trace_id: String,
     pub source_channel: GatewayChannelKind,
     pub target_agent_id: String,
     pub session_key: String,

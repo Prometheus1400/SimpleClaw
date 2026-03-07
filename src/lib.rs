@@ -16,6 +16,7 @@ mod provider;
 mod react;
 mod run;
 mod secrets;
+mod telemetry;
 /// Public test harness helpers for black-box integration tests.
 pub mod testing;
 mod tools;

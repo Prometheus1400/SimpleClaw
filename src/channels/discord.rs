@@ -7,6 +7,7 @@ use serenity::model::id::ChannelId;
 use serenity::prelude::*;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Duration, sleep};
+use tracing::{Instrument, info_span};
 
 use crate::channels::{Channel, ChannelInbound};
 use crate::config::DiscordConfig;
@@ -46,14 +47,16 @@ impl DiscordChannel {
 
         let http = Arc::new(Http::new(&token));
 
+        let discord_span = info_span!("channel.discord");
         tokio::spawn(async move {
             loop {
                 if let Err(err) = client.start_autosharded().await {
-                    tracing::error!(error = %err, "discord gateway exited; retrying");
+                    tracing::error!(status = "retrying", error_kind = "gateway_exit", error = %err, backoff_ms = 5_000u64, "discord gateway exited");
                     sleep(Duration::from_secs(5)).await;
                 }
             }
-        });
+        }
+        .instrument(discord_span));
 
         Ok(Self {
             http,
@@ -97,8 +100,17 @@ impl EventHandler for DiscordHandler {
             content: msg.content,
         };
 
+        tracing::debug!(
+            status = "received",
+            channel_id = %inbound.channel_id,
+            user_id = %inbound.user_id,
+            is_dm = inbound.is_dm,
+            mentioned_bot = inbound.mentioned_bot,
+            content_preview = %crate::telemetry::sanitize_preview(&inbound.content, 96),
+            "discord inbound received"
+        );
         if let Err(err) = self.inbound_tx.send(inbound).await {
-            tracing::warn!(error = %err, "dropping inbound discord message; queue closed");
+            tracing::warn!(status = "dropped", error_kind = "queue_closed", error = %err, "discord inbound queue closed");
         }
     }
 }
@@ -107,10 +119,17 @@ impl EventHandler for DiscordHandler {
 impl Channel for DiscordChannel {
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
+        tracing::debug!(
+            status = "sending",
+            channel_id = %channel_id.get(),
+            content_preview = %crate::telemetry::sanitize_preview(content, 96),
+            "discord send"
+        );
         channel_id
             .say(&self.http, content)
             .await
             .map_err(|e| FrameworkError::Config(format!("discord send failed: {e}")))?;
+        tracing::debug!(status = "completed", channel_id = %channel_id.get(), "discord send");
         Ok(())
     }
 

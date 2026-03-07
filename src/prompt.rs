@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 use crate::error::FrameworkError;
 
@@ -17,9 +18,9 @@ pub struct PromptLayerInfo {
 
 impl PromptAssembler {
     pub fn inspect_workspace(workspace: &Path) -> Result<Vec<PromptLayerInfo>, FrameworkError> {
-        prompt_layers()
+        let layers: Vec<PromptLayerInfo> = prompt_layers()
             .iter()
-            .map(|(title, file)| {
+            .map(|(title, file)| -> Result<PromptLayerInfo, FrameworkError> {
                 let path = workspace.join(file);
                 if !path.exists() {
                     return Ok(PromptLayerInfo {
@@ -40,10 +41,19 @@ impl PromptAssembler {
                     bytes,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, FrameworkError>>()?;
+        debug!(
+            status = "completed",
+            workspace = %workspace.display(),
+            layer_count = layers.len(),
+            present_layers = layers.iter().filter(|layer| layer.exists && layer.bytes > 0).count(),
+            "prompt inspect"
+        );
+        Ok(layers)
     }
 
     pub fn from_workspace(workspace: &Path) -> Result<String, FrameworkError> {
+        let started = std::time::Instant::now();
         let mut sections = Vec::new();
         for layer in Self::inspect_workspace(workspace)? {
             append_layer(
@@ -54,7 +64,16 @@ impl PromptAssembler {
                 layer.bytes,
             )?;
         }
-        Ok(sections.join("\n\n"))
+        let assembled = sections.join("\n\n");
+        debug!(
+            status = "completed",
+            workspace = %workspace.display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            section_count = sections.len(),
+            prompt_chars = assembled.chars().count(),
+            "prompt assemble"
+        );
+        Ok(assembled)
     }
 }
 
