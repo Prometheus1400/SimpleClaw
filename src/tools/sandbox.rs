@@ -164,13 +164,29 @@ fn resolve_guest_artifact_path(
     let env_candidate = env::var_os("SIMPLECLAW_WASM_ASSETS_DIR")
         .map(PathBuf::from)
         .map(|root| root.join(artifact_name));
+    let exe_candidate = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent()
+            .and_then(|bin_dir| bin_dir.parent())
+            .map(|prefix| {
+                prefix
+                    .join("share")
+                    .join("simpleclaw")
+                    .join("wasm")
+                    .join(artifact_name)
+            })
+    });
     let workspace_candidate = workspace_root.join("assets").join("wasm").join(artifact_name);
     let manifest_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join("wasm")
         .join(artifact_name);
 
-    let candidates = [env_candidate, Some(workspace_candidate), Some(manifest_candidate)];
+    let candidates = [
+        env_candidate,
+        exe_candidate,
+        Some(workspace_candidate),
+        Some(manifest_candidate),
+    ];
     for candidate in candidates.into_iter().flatten() {
         if candidate.is_file() {
             return Ok(candidate);

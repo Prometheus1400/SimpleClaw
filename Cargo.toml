@@ -3,6 +3,13 @@ name = "simpleclaw"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+  "guests/read_guest",
+  "guests/edit_guest",
+]
+default-members = ["."]
+
 [dependencies]
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }

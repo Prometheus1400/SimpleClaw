@@ -18,11 +18,11 @@ impl Tool for ProcessTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage exec background processes using JSON: {action: list|poll|kill, session_id?}. Returns JSON string."
+        "Manage exec background processes using JSON: {action: list|poll|kill|forget, session_id?}. Returns JSON string."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"poll\",\"kill\"]},\"session_id\":{\"type\":\"string\"}},\"required\":[\"action\"]}"
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"poll\",\"kill\",\"forget\"]},\"session_id\":{\"type\":\"string\"}},\"required\":[\"action\"]}"
     }
 
     async fn execute(
@@ -55,8 +55,15 @@ impl Tool for ProcessTool {
                 let snapshot = ctx.process_manager.kill(&session_id).await?;
                 Ok(snapshot_to_json(&snapshot).to_string())
             }
+            "forget" => {
+                let session_id = args.session_id.ok_or_else(|| {
+                    FrameworkError::Tool("process forget requires session_id".to_owned())
+                })?;
+                let snapshot = ctx.process_manager.forget(&session_id).await?;
+                Ok(snapshot_to_json(&snapshot).to_string())
+            }
             other => Err(FrameworkError::Tool(format!(
-                "process action must be one of list|poll|kill, got: {other}"
+                "process action must be one of list|poll|kill|forget, got: {other}"
             ))),
         }
     }

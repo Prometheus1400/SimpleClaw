@@ -1094,6 +1094,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "edit_guest"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ego-tree"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3148,6 +3156,10 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "read_guest"
+version = "0.1.0"
 
 [[package]]
 name = "redox_syscall"

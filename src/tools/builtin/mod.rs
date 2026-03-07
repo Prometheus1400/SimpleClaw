@@ -1,7 +1,7 @@
 mod clock;
 mod common;
 mod edit;
-mod exec;
+pub(crate) mod exec;
 mod forget;
 mod memorize;
 mod memory;
