@@ -16,7 +16,7 @@ use crate::error::FrameworkError;
 pub struct InboundMessage {
     pub source_channel: GatewayChannelKind,
     pub target_agent_id: String,
-    pub session_id: String,
+    pub session_key: String,
     pub channel_id: String,
     pub guild_id: Option<String>,
     pub is_dm: bool,
@@ -27,10 +27,26 @@ pub struct InboundMessage {
     pub content: String,
 }
 
+pub fn build_session_key(
+    agent_id: &str,
+    is_dm: bool,
+    source: GatewayChannelKind,
+    channel_id: &str,
+) -> String {
+    if is_dm {
+        format!("agent:{agent_id}:main")
+    } else {
+        match source {
+            GatewayChannelKind::Discord => format!("agent:{agent_id}:discord:{channel_id}"),
+            GatewayChannelKind::Logging => format!("agent:{agent_id}:logging:{channel_id}"),
+        }
+    }
+}
+
 #[async_trait]
 pub trait Channel: Send + Sync {
-    async fn send_message(&self, session_id: &str, content: &str) -> Result<(), FrameworkError>;
-    async fn broadcast_typing(&self, session_id: &str) -> Result<(), FrameworkError>;
+    async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError>;
+    async fn broadcast_typing(&self, channel_id: &str) -> Result<(), FrameworkError>;
     async fn listen(&self) -> Result<InboundMessage, FrameworkError>;
 }
 
@@ -52,13 +68,13 @@ impl LoggingChannel {
 
 #[async_trait]
 impl Channel for LoggingChannel {
-    async fn send_message(&self, session_id: &str, content: &str) -> Result<(), FrameworkError> {
-        tracing::info!(session_id, content, "send_message");
+    async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
+        tracing::info!(channel_id, content, "send_message");
         Ok(())
     }
 
-    async fn broadcast_typing(&self, session_id: &str) -> Result<(), FrameworkError> {
-        tracing::debug!(session_id, "broadcast_typing");
+    async fn broadcast_typing(&self, channel_id: &str) -> Result<(), FrameworkError> {
+        tracing::debug!(channel_id, "broadcast_typing");
         Ok(())
     }
 
@@ -71,11 +87,17 @@ impl Channel for LoggingChannel {
             drop(queue);
 
             if !self.bootstrapped.swap(true, Ordering::SeqCst) {
+                let channel_id = "bootstrap-session".to_owned();
                 return Ok(InboundMessage {
                     source_channel: GatewayChannelKind::Logging,
                     target_agent_id: self.default_agent_id.clone(),
-                    session_id: "bootstrap-session".to_owned(),
-                    channel_id: "bootstrap-session".to_owned(),
+                    session_key: build_session_key(
+                        &self.default_agent_id,
+                        false,
+                        GatewayChannelKind::Logging,
+                        &channel_id,
+                    ),
+                    channel_id,
                     guild_id: None,
                     is_dm: false,
                     user_id: "bootstrap-user".to_owned(),
@@ -179,11 +201,18 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
+        let channel_id = channel_id.to_string();
+        let target_agent_id = decision.target_agent_id;
         let inbound = InboundMessage {
             source_channel: GatewayChannelKind::Discord,
-            target_agent_id: decision.target_agent_id,
-            session_id: channel_id.to_string(),
-            channel_id: channel_id.to_string(),
+            target_agent_id: target_agent_id.clone(),
+            session_key: build_session_key(
+                &target_agent_id,
+                is_dm,
+                GatewayChannelKind::Discord,
+                &channel_id,
+            ),
+            channel_id,
             guild_id: guild_id.map(|id| id.to_string()),
             is_dm,
             user_id: msg.author.id.get().to_string(),
@@ -201,8 +230,8 @@ impl EventHandler for DiscordHandler {
 
 #[async_trait]
 impl Channel for DiscordChannel {
-    async fn send_message(&self, session_id: &str, content: &str) -> Result<(), FrameworkError> {
-        let channel_id = parse_channel_id(session_id)?;
+    async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
         channel_id
             .say(&self.http, content)
             .await
@@ -210,8 +239,8 @@ impl Channel for DiscordChannel {
         Ok(())
     }
 
-    async fn broadcast_typing(&self, session_id: &str) -> Result<(), FrameworkError> {
-        let channel_id = parse_channel_id(session_id)?;
+    async fn broadcast_typing(&self, channel_id: &str) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
         channel_id
             .broadcast_typing(&self.http)
             .await

@@ -41,9 +41,7 @@ impl Tool for MemorizeTool {
             MemorizeResult::Duplicate => Ok(format!(
                 "already memorized long-term fact (kind={kind}, importance={clamped})"
             )),
-            MemorizeResult::Updated {
-                superseded_content,
-            } => {
+            MemorizeResult::Updated { superseded_content } => {
                 let preview = if superseded_content.len() > 80 {
                     format!("{}…", &superseded_content[..80])
                 } else {

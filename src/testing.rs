@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
 use tokio::sync::Mutex;
 
-use crate::channel::{Channel, InboundMessage};
+use crate::channel::{Channel, InboundMessage, build_session_key};
 use crate::cli::Cli;
 use crate::config::{AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig};
 use crate::error::FrameworkError;
@@ -61,7 +61,7 @@ impl Default for TestHarnessConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestOutboundMessage {
     /// Session id passed to the channel send call.
-    pub session_id: String,
+    pub channel_id: String,
     /// Message content emitted by runtime processing.
     pub content: String,
 }
@@ -165,7 +165,12 @@ pub async fn run_single_gateway_roundtrip(
     let inbound = InboundMessage {
         source_channel: GatewayChannelKind::Logging,
         target_agent_id: config.agent_id.clone(),
-        session_id: config.channel_id.clone(),
+        session_key: build_session_key(
+            &config.agent_id,
+            false,
+            GatewayChannelKind::Logging,
+            &config.channel_id,
+        ),
         channel_id: config.channel_id.clone(),
         guild_id: None,
         is_dm: false,
@@ -175,7 +180,7 @@ pub async fn run_single_gateway_roundtrip(
         invoke: true,
         content: config.inbound_content.clone(),
     };
-    let memory_session_id = format!("{}:{}", inbound.channel_id, inbound.target_agent_id);
+    let memory_session_id = inbound.session_key.clone();
     handle_inbound_once(&state, inbound)
         .await
         .wrap_err("failed to process one inbound message")?;
@@ -252,16 +257,16 @@ impl CaptureChannel {
 
 #[async_trait]
 impl Channel for CaptureChannel {
-    async fn send_message(&self, session_id: &str, content: &str) -> Result<(), FrameworkError> {
+    async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let mut outbound = self.outbound.lock().await;
         outbound.push(TestOutboundMessage {
-            session_id: session_id.to_owned(),
+            channel_id: channel_id.to_owned(),
             content: content.to_owned(),
         });
         Ok(())
     }
 
-    async fn broadcast_typing(&self, _session_id: &str) -> Result<(), FrameworkError> {
+    async fn broadcast_typing(&self, _channel_id: &str) -> Result<(), FrameworkError> {
         self.typing_events.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

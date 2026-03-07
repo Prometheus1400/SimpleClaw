@@ -43,7 +43,7 @@ pub trait TaskService: Send + Sync {
 pub struct CompletionRoute {
     pub source_channel: GatewayChannelKind,
     pub target_agent_id: String,
-    pub session_id: String,
+    pub session_key: String,
     pub channel_id: String,
     pub guild_id: Option<String>,
     pub is_dm: bool,
@@ -469,7 +469,7 @@ impl ProcessManager {
                 let msg = InboundMessage {
                     source_channel: route.source_channel,
                     target_agent_id: route.target_agent_id,
-                    session_id: route.session_id,
+                    session_key: route.session_key,
                     channel_id: route.channel_id,
                     guild_id: route.guild_id,
                     is_dm: route.is_dm,

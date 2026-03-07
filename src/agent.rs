@@ -7,6 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
+use crate::channel::InboundMessage;
 use crate::config::{AgentConfig, ProviderKind, RuntimeConfig, ToolConfig};
 use crate::dispatch::{NativeDispatcher, ToolDispatcher, XmlDispatcher};
 use crate::error::FrameworkError;
@@ -15,7 +16,6 @@ use crate::prompt::PromptAssembler;
 use crate::provider::{Message, Provider, Role};
 use crate::react;
 use crate::tools::skill::{SkillToolLoadStats, load_skill_tools};
-use crate::channel::InboundMessage;
 use crate::tools::{
     CompletionRoute, ProcessManager, SummonService, TaskService, ToolCtx, ToolRegistry,
     default_registry,
@@ -167,7 +167,7 @@ impl AgentRuntime {
             completion_route: Some(CompletionRoute {
                 source_channel: inbound.source_channel,
                 target_agent_id: self.agent_id.clone(),
-                session_id: inbound.session_id.clone(),
+                session_key: inbound.session_key.clone(),
                 channel_id: inbound.channel_id.clone(),
                 guild_id: inbound.guild_id.clone(),
                 is_dm: inbound.is_dm,

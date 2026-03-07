@@ -65,9 +65,7 @@ impl Tool for ExecTool {
                     route.clone(),
                 );
             }
-            return Ok(
-                json!({"status":"backgrounded","sessionId": session_id}).to_string(),
-            );
+            return Ok(json!({"status":"backgrounded","sessionId": session_id}).to_string());
         }
 
         let result = if ctx.sandbox == SandboxMode::On {

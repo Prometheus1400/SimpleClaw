@@ -43,10 +43,7 @@ pub(super) fn parse_memory_args(args_json: &str) -> MemoryAction {
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned);
-            let limit = value
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(20) as usize;
+            let limit = value.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
             return MemoryAction::List { kind, limit };
         }
         if let Some(query) = value.get("query").and_then(|v| v.as_str()) {

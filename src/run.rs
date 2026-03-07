@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -451,10 +451,6 @@ where
     }
 }
 
-fn inbound_session_key(inbound: &InboundMessage) -> String {
-    format!("{}:{}", inbound.channel_id, inbound.target_agent_id)
-}
-
 pub(crate) async fn assemble_runtime_state(
     cli: &Cli,
     loaded: &LoadedConfig,
@@ -543,7 +539,7 @@ pub(crate) async fn handle_inbound_once(
     state: &RuntimeState,
     inbound: InboundMessage,
 ) -> color_eyre::Result<()> {
-    let memory_session_id = format!("{}:{}", inbound.channel_id, inbound.target_agent_id);
+    let memory_session_id = inbound.session_key.clone();
     let Some(runtime) = state.runtimes.get(&inbound.target_agent_id) else {
         tracing::error!(
             target_agent_id = %inbound.target_agent_id,
@@ -620,9 +616,8 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         .wrap_err("failed to load global/workspace configuration")?;
     let deps = RuntimeDependencies::default();
     let state = Arc::new(assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?);
-    let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(
-        SESSION_WORKER_IDLE_TIMEOUT_SECS,
-    ));
+    let coordinator =
+        SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
     let handler: SessionHandler<InboundMessage> = {
         let state = Arc::clone(&state);
         Arc::new(move |inbound: InboundMessage| {
@@ -644,7 +639,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 continue;
             }
         };
-        let key = inbound_session_key(&inbound);
+        let key = inbound.session_key.clone();
         coordinator
             .dispatch(key, inbound, Arc::clone(&handler))
             .await;
@@ -1049,8 +1044,8 @@ fn force_kill_process(pid: u32) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::fs;
+    use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1062,8 +1057,8 @@ mod tests {
     use tokio::time::{Duration, sleep, timeout};
 
     use super::{
-        AsyncMutex, SessionHandler, SessionWorkerCoordinator, collect_log_history,
-        dated_log_path, prune_daily_logs, query_long_memory, query_short_memory,
+        AsyncMutex, SessionHandler, SessionWorkerCoordinator, collect_log_history, dated_log_path,
+        prune_daily_logs, query_long_memory, query_short_memory,
     };
 
     fn temp_db_path(prefix: &str) -> PathBuf {
@@ -1258,12 +1253,7 @@ mod tests {
                             break;
                         }
                         if max_active
-                            .compare_exchange(
-                                prev,
-                                now_active,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            )
+                            .compare_exchange(prev, now_active, Ordering::SeqCst, Ordering::SeqCst)
                             .is_ok()
                         {
                             break;
@@ -1292,10 +1282,18 @@ mod tests {
         });
 
         coordinator
-            .dispatch("session-a".to_owned(), TestMessage { id: 1 }, Arc::clone(&handler))
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 1 },
+                Arc::clone(&handler),
+            )
             .await;
         coordinator
-            .dispatch("session-a".to_owned(), TestMessage { id: 2 }, Arc::clone(&handler))
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 2 },
+                Arc::clone(&handler),
+            )
             .await;
 
         first_started_rx
@@ -1344,12 +1342,7 @@ mod tests {
                             break;
                         }
                         if max_active
-                            .compare_exchange(
-                                prev,
-                                now_active,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            )
+                            .compare_exchange(prev, now_active, Ordering::SeqCst, Ordering::SeqCst)
                             .is_ok()
                         {
                             break;
@@ -1362,10 +1355,18 @@ mod tests {
         });
 
         coordinator
-            .dispatch("session-a".to_owned(), TestMessage { id: 1 }, Arc::clone(&handler))
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 1 },
+                Arc::clone(&handler),
+            )
             .await;
         coordinator
-            .dispatch("session-b".to_owned(), TestMessage { id: 2 }, Arc::clone(&handler))
+            .dispatch(
+                "session-b".to_owned(),
+                TestMessage { id: 2 },
+                Arc::clone(&handler),
+            )
             .await;
 
         timeout(Duration::from_secs(1), barrier.wait())
@@ -1389,7 +1390,11 @@ mod tests {
         });
 
         coordinator
-            .dispatch("session-a".to_owned(), TestMessage { id: 1 }, Arc::clone(&handler))
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 1 },
+                Arc::clone(&handler),
+            )
             .await;
         let first = timeout(Duration::from_secs(1), done_rx.recv())
             .await
@@ -1406,7 +1411,11 @@ mod tests {
         assert_eq!(coordinator.worker_count().await, 0);
 
         coordinator
-            .dispatch("session-a".to_owned(), TestMessage { id: 2 }, Arc::clone(&handler))
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 2 },
+                Arc::clone(&handler),
+            )
             .await;
         let second = timeout(Duration::from_secs(1), done_rx.recv())
             .await
