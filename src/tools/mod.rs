@@ -18,7 +18,7 @@ use tokio::time::sleep;
 
 use tokio::sync::mpsc;
 
-use crate::channel::InboundMessage;
+use crate::channels::InboundMessage;
 use crate::config::{ExecContainerConfig, GatewayChannelKind, SandboxMode, ToolConfig};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
@@ -79,6 +79,9 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema_json(&self) -> &str;
+    fn sandbox_aware(&self) -> bool {
+        false
+    }
 
     async fn execute(
         &self,

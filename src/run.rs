@@ -22,7 +22,7 @@ use crate::agent::{
     AgentRuntime, build_tool_registry_for_agent, load_agent_config_for_workspace,
     load_system_prompt_for_workspace,
 };
-use crate::channel::{Channel, DiscordChannel, InboundMessage, LoggingChannel};
+use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, ProviderKind};
 use crate::gateway::Gateway;
@@ -306,9 +306,6 @@ impl ChannelFactory for DefaultChannelFactory {
                         .await
                         .wrap_err("failed to initialize discord channel")?,
                 ),
-                GatewayChannelKind::Logging => {
-                    Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
-                }
             };
             channels.insert(*kind, channel);
         }
@@ -526,7 +523,12 @@ pub(crate) async fn assemble_runtime_state(
     }
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Gateway::new(channels, gateway_tx, gateway_rx);
+    let gateway = Gateway::new(
+        channels,
+        loaded.global.inbound.clone(),
+        gateway_tx,
+        gateway_rx,
+    );
 
     Ok(RuntimeState {
         gateway,
@@ -646,7 +648,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
     }
 }
 
-pub fn start_service(cli: &Cli) -> color_eyre::Result<()> {
+pub fn start_service() -> color_eyre::Result<()> {
     let paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
     paths
         .ensure_runtime_dirs()
@@ -665,16 +667,11 @@ pub fn start_service(cli: &Cli) -> color_eyre::Result<()> {
     let exe = std::env::current_exe().wrap_err("failed to resolve current executable path")?;
     let mut child = ProcessCommand::new(exe);
     child
-        .arg("--max-steps")
-        .arg(cli.max_steps.to_string())
         .arg("system")
         .arg("run")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(workspace) = &cli.workspace {
-        child.arg("--workspace").arg(workspace);
-    }
 
     let child = child
         .spawn()

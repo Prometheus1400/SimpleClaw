@@ -1097,6 +1097,7 @@ dependencies = [
 name = "edit_tool"
 version = "0.1.0"
 dependencies = [
+ "sandbox_common",
  "serde",
  "serde_json",
 ]
@@ -3204,6 +3205,9 @@ dependencies = [
 [[package]]
 name = "read_tool"
 version = "0.1.0"
+dependencies = [
+ "sandbox_common",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -3494,6 +3498,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "675656c1eabb620b921efea4f9199f97fc86e36dd6ffd1fbbe48d0f59a4987f5"
 dependencies = [
  "hashbrown 0.16.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sandbox_common"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]
@@ -3794,6 +3806,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "sandbox_common",
  "scraper",
  "serde",
  "serde_json",

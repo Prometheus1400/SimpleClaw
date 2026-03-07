@@ -55,14 +55,15 @@
 - Consider a shared `parse_or_fallback<T: Deserialize>` helper.
 - Validate args against the schema or at least rely on serde for structural validation.
 
-### 7. Sandbox Mode is a No-Op in `execute_tool_with_sandbox`
+### 7. Sandbox Architecture Gaps (Status Updated)
 
-**Problem:** In `sandbox.rs`, the `execute_tool_with_sandbox` function matches on `SandboxMode::Off | SandboxMode::On` and does the exact same thing for both -- calls `tool.execute()` directly. The WASM sandbox capability exists (`run_wasm_guest`) but isn't wired into the dispatch path.
-
-**Improvement:**
-- Wire `SandboxMode::On` to route `read` and `edit` tools through `run_wasm_guest`.
-- Or remove the match arms to avoid the misleading impression that sandboxing is active.
-- Document which tools support sandboxed execution and which don't.
+**Findings and status:**
+- Dispatch-layer no-op in `execute_tool_with_sandbox`: fixed by enforcing `Tool::sandbox_aware()` when `SandboxMode::On`.
+- WASM artifacts missing during development runs: fixed by resolving artifacts from env/install prefix and cargo target wasm outputs.
+- Read/edit/path helper code triplication: fixed by extracting shared logic into `sandbox/common`.
+- WASM `/tmp` mount used host shared temp dir: fixed with per-execution isolated temp mount and cleanup.
+- Network tools bypass sandbox (`web_search`, `web_fetch`): known limitation, out of scope for this PR.
+- Podman workspace mount is always read-write: known limitation, out of scope for this PR.
 
 ### 8. Blocking Embedder Under Async Mutex
 

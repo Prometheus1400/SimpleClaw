@@ -3,7 +3,7 @@
 #![deny(missing_docs)]
 
 mod agent;
-mod channel;
+mod channels;
 mod cli;
 mod config;
 mod dispatch;
@@ -42,7 +42,7 @@ pub async fn run() -> color_eyre::Result<()> {
         }) => run::run_service(&cli).await?,
         Some(Command::System {
             action: SystemAction::Start,
-        }) => run::start_service(&cli)?,
+        }) => run::start_service()?,
         Some(Command::System {
             action: SystemAction::Stop,
         }) => run::stop_service(&cli)?,
@@ -50,7 +50,7 @@ pub async fn run() -> color_eyre::Result<()> {
             action: SystemAction::Restart,
         }) => {
             run::stop_service(&cli)?;
-            run::start_service(&cli)?;
+            run::start_service()?;
         }
         Some(Command::Logs { follow }) => run::show_logs(&cli, *follow)?,
         Some(Command::Status) => run::show_status(&cli)?,

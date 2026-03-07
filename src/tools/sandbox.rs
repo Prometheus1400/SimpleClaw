@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;
@@ -17,6 +19,8 @@ use super::{Tool, ToolCtx};
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
 const WASM_TMP_MOUNT: &str = "/tmp";
+const SANDBOX_ENFORCED_TOOLS: &[&str] = &["read", "edit", "exec"];
+static WASM_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct WasmGuestOutput {
     pub stdout: String,
@@ -31,7 +35,16 @@ pub async fn execute_tool_with_sandbox(
     session_id: &str,
 ) -> Result<String, FrameworkError> {
     match ctx.sandbox {
-        SandboxMode::Off | SandboxMode::On => tool.execute(ctx, args_json, session_id).await,
+        SandboxMode::Off => tool.execute(ctx, args_json, session_id).await,
+        SandboxMode::On => {
+            if SANDBOX_ENFORCED_TOOLS.contains(&tool.name()) && !tool.sandbox_aware() {
+                return Err(FrameworkError::Tool(format!(
+                    "tool '{}' is not available in sandbox mode",
+                    tool.name()
+                )));
+            }
+            tool.execute(ctx, args_json, session_id).await
+        }
     }
 }
 
@@ -43,14 +56,12 @@ pub async fn run_wasm_guest(
     time_limit: Duration,
 ) -> Result<WasmGuestOutput, FrameworkError> {
     let workspace = normalize_workspace_root(workspace_root)?;
-    let tmp_dir = env::temp_dir();
     let artifact_path = resolve_guest_artifact_path(artifact_name, &workspace)?;
     let args = args.to_vec();
     let stdin = stdin.to_vec();
 
-    let join = spawn_blocking(move || {
-        run_wasm_guest_blocking(&workspace, &tmp_dir, &artifact_path, &args, &stdin)
-    });
+    let join =
+        spawn_blocking(move || run_wasm_guest_blocking(&workspace, &artifact_path, &args, &stdin));
 
     let joined = timeout(time_limit, join)
         .await
@@ -60,11 +71,12 @@ pub async fn run_wasm_guest(
 
 fn run_wasm_guest_blocking(
     workspace_root: &Path,
-    tmp_dir: &Path,
     artifact_path: &Path,
     args: &[String],
     stdin: &[u8],
 ) -> Result<WasmGuestOutput, FrameworkError> {
+    let isolated_tmp = IsolatedTmpDir::create()?;
+
     let engine = Engine::default();
     let module = Module::from_file(&engine, artifact_path).map_err(|e| {
         FrameworkError::Tool(format!(
@@ -106,11 +118,16 @@ fn run_wasm_guest_blocking(
             ))
         })?;
     wasi_builder
-        .preopened_dir(tmp_dir, WASM_TMP_MOUNT, DirPerms::all(), FilePerms::all())
+        .preopened_dir(
+            isolated_tmp.path(),
+            WASM_TMP_MOUNT,
+            DirPerms::all(),
+            FilePerms::all(),
+        )
         .map_err(|e| {
             FrameworkError::Tool(format!(
                 "wasm guest failed to preopen tmp dir: path={} error={e}",
-                tmp_dir.display()
+                isolated_tmp.path().display()
             ))
         })?;
     let wasi_ctx = wasi_builder.build_p1();
@@ -159,7 +176,7 @@ pub fn workspace_guest_mount_path() -> &'static str {
 
 fn resolve_guest_artifact_path(
     artifact_name: &str,
-    workspace_root: &Path,
+    _workspace_root: &Path,
 ) -> Result<PathBuf, FrameworkError> {
     let env_candidate = env::var_os("SIMPLECLAW_WASM_ASSETS_DIR")
         .map(PathBuf::from)
@@ -175,40 +192,83 @@ fn resolve_guest_artifact_path(
                     .join(artifact_name)
             })
     });
-    let workspace_candidate = workspace_root
-        .join("assets")
-        .join("wasm")
+    let release_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("release")
         .join(artifact_name);
-    let manifest_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("wasm")
+    let debug_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("debug")
         .join(artifact_name);
 
     let candidates = [
-        env_candidate,
-        exe_candidate,
-        Some(workspace_candidate),
-        Some(manifest_candidate),
+        ("SIMPLECLAW_WASM_ASSETS_DIR", env_candidate),
+        ("installed prefix", exe_candidate),
+        ("cargo target release", Some(release_candidate)),
+        ("cargo target debug", Some(debug_candidate)),
     ];
-    for candidate in candidates.into_iter().flatten() {
+    for candidate in candidates.iter().filter_map(|(_, c)| c.as_ref()) {
         if candidate.is_file() {
-            return Ok(candidate);
+            return Ok(candidate.to_path_buf());
         }
     }
 
+    let searched_paths = candidates
+        .iter()
+        .filter_map(|(_, candidate)| candidate.as_ref())
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(FrameworkError::Tool(format!(
-        "missing wasm artifact: name={artifact_name} searched={} and {}",
-        workspace_root.join("assets/wasm").display(),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/wasm")
-            .display()
+        "missing wasm artifact: name={artifact_name} searched=[{searched_paths}] (build with: cargo build --package read_tool --package edit_tool --target wasm32-wasip1 --release)"
     )))
+}
+
+struct IsolatedTmpDir {
+    path: PathBuf,
+}
+
+impl IsolatedTmpDir {
+    fn create() -> Result<Self, FrameworkError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| FrameworkError::Tool(format!("system clock error: {e}")))?;
+        let counter = WASM_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir_name = format!(
+            "simpleclaw_wasm_{}_{}_{}",
+            now.as_secs(),
+            now.subsec_nanos(),
+            counter
+        );
+        let path = env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&path).map_err(FrameworkError::Io)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for IsolatedTmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_guest_artifact_path;
-    use std::path::Path;
+    use super::{execute_tool_with_sandbox, resolve_guest_artifact_path};
+    use crate::config::{DatabaseConfig, ExecContainerConfig, SandboxMode};
+    use crate::error::FrameworkError;
+    use crate::memory::MemoryStore;
+    use crate::tools::{ProcessManager, Tool, ToolCtx};
+    use async_trait::async_trait;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn resolve_guest_artifact_path_errors_for_missing_module() {
@@ -216,5 +276,116 @@ mod tests {
         let err = resolve_guest_artifact_path("definitely_missing.wasm", workspace)
             .expect_err("missing artifact should return error");
         assert!(err.to_string().contains("missing wasm artifact"));
+    }
+
+    struct DummyTool {
+        name: &'static str,
+        aware: bool,
+    }
+
+    #[async_trait]
+    impl Tool for DummyTool {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn description(&self) -> &'static str {
+            "dummy"
+        }
+
+        fn input_schema_json(&self) -> &'static str {
+            "{}"
+        }
+
+        fn sandbox_aware(&self) -> bool {
+            self.aware
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &ToolCtx,
+            _args_json: &str,
+            _session_id: &str,
+        ) -> Result<String, FrameworkError> {
+            Ok("ok".to_owned())
+        }
+    }
+
+    async fn test_ctx(mode: SandboxMode) -> ToolCtx {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("simpleclaw_sandbox_test_{nanos}"));
+        std::fs::create_dir_all(&root).expect("temp test dir should be created");
+        let short = root.join("short.db");
+        let long = root.join("long.db");
+        let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
+            .await
+            .expect("memory should initialize");
+        ToolCtx {
+            memory,
+            sandbox: mode,
+            workspace_root: PathBuf::from("."),
+            user_id: "u".to_owned(),
+            owner_ids: vec![],
+            exec_container: ExecContainerConfig::default(),
+            process_manager: Arc::new(ProcessManager::new()),
+            summon_service: None,
+            task_service: None,
+            completion_tx: None,
+            completion_route: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_mode_rejects_non_aware_tools() {
+        let ctx = test_ctx(SandboxMode::On).await;
+        let err = execute_tool_with_sandbox(
+            &DummyTool {
+                name: "read",
+                aware: false,
+            },
+            &ctx,
+            "{}",
+            "s",
+        )
+        .await
+        .expect_err("sandbox should reject non-aware tools");
+        assert!(err.to_string().contains("not available in sandbox mode"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_on_allows_non_enforced_non_aware_tools() {
+        let ctx = test_ctx(SandboxMode::On).await;
+        let result = execute_tool_with_sandbox(
+            &DummyTool {
+                name: "clock",
+                aware: false,
+            },
+            &ctx,
+            "{}",
+            "s",
+        )
+        .await
+        .expect("sandbox should allow non-enforced tools");
+        assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn sandbox_off_allows_non_aware_tools() {
+        let ctx = test_ctx(SandboxMode::Off).await;
+        let result = execute_tool_with_sandbox(
+            &DummyTool {
+                name: "read",
+                aware: false,
+            },
+            &ctx,
+            "{}",
+            "s",
+        )
+        .await
+        .expect("sandbox off should allow execution");
+        assert_eq!(result, "ok");
     }
 }

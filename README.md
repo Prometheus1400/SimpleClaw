@@ -1,6 +1,6 @@
 # SimpleClaw
 
-A lightweight, multi-agent agentic framework built in Rust. SimpleClaw connects AI agents to messaging platforms (Discord, logging) with local SQLite-backed memory, WASM-sandboxed tool execution, and a modular prompt composition system.
+A lightweight, multi-agent agentic framework built in Rust. SimpleClaw connects AI agents to Discord with local SQLite-backed memory, WASM-sandboxed tool execution, and a modular prompt composition system.
 
 ## Architecture Overview
 
@@ -30,8 +30,6 @@ A lightweight, multi-agent agentic framework built in Rust. SimpleClaw connects 
                    |   |  Channels   |  |          |
                    |   | +--------+  |  |          |
                    |   | |Discord |  |  |          |
-                   |   | +--------+  |  |          |
-                   |   | |Logging |  |  |          |
                    |   | +--------+  |  |          |
                    |   +------+------+  |          |
                    |          |         |          |
@@ -73,7 +71,7 @@ A lightweight, multi-agent agentic framework built in Rust. SimpleClaw connects 
 ## Data Flow: Message Lifecycle
 
 ```
-  User sends message (Discord/Logging)
+  User sends message (Discord)
           |
           v
   Channel.listen() -> InboundMessage
@@ -137,7 +135,7 @@ A lightweight, multi-agent agentic framework built in Rust. SimpleClaw connects 
 | **run** | `src/run.rs` | Service lifecycle (start/stop/restart as daemon), runtime assembly, session worker coordinator, log rotation, agent memory inspection |
 | **agent** | `src/agent.rs` | `AgentRuntime` struct -- per-agent execution context. Owns provider, memory, tools, prompt, skill tools. Orchestrates `RuntimeSummonService` and `RuntimeTaskService` |
 | **gateway** | `src/gateway.rs` | Multi-channel message aggregation via mpsc. Routes inbound messages and dispatches outbound replies |
-| **channel** | `src/channel.rs` | `Channel` trait + implementations: `DiscordChannel` (serenity), `LoggingChannel` (dev/test). Discord inbound policy (per-server, per-channel, DM rules, mention requirements) |
+| **channels** | `src/channels/` | `Channel` trait + `DiscordChannel` (serenity). Discord inbound policy (per-server, per-channel, DM rules, mention requirements) |
 | **react** | `src/react.rs` | Core ReAct loop: iterates provider calls and tool executions up to `max_steps`. Log sanitization and secret redaction |
 | **dispatch** | `src/dispatch.rs` | `ToolDispatcher` trait with two strategies: `NativeDispatcher` (provider-native function calling) and `XmlDispatcher` (XML-in-text fallback). Owner-restricted tool authorization |
 
@@ -177,6 +175,11 @@ On each turn, the system optionally queries long-term memory with the user's mes
 
 ### WASM Sandboxing
 The `read` and `edit` tools can run as WASM guests via `wasmtime` with WASI preview 1, providing filesystem isolation through preopened directory mounts. The sandbox mode is configured per-agent.
+
+### Sandbox Limitations
+- Sandbox-aware tools: `read`, `edit`, and `exec`. In `sandbox: on`, tools that are not sandbox-aware are rejected by the centralized sandbox gate.
+- Network tools (`web_search`, `web_fetch`) are not sandboxed and are currently outside the local filesystem sandbox boundary.
+- Podman sandboxed `exec` uses a read-write bind mount for `/workspace`.
 
 ### Process Management
 The `exec` tool supports both foreground and background execution. Background processes can run on the host or in podman containers (when sandbox mode is on). A completion watcher monitors background processes and re-injects completion events back into the gateway.

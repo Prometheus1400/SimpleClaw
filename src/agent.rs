@@ -7,7 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
-use crate::channel::InboundMessage;
+use crate::channels::InboundMessage;
 use crate::config::{AgentConfig, ProviderKind, RuntimeConfig, ToolConfig};
 use crate::dispatch::{NativeDispatcher, ToolDispatcher, XmlDispatcher};
 use crate::error::FrameworkError;
@@ -86,7 +86,7 @@ impl AgentRuntime {
 
     pub async fn run(
         &self,
-        inbound: &crate::channel::InboundMessage,
+        inbound: &crate::channels::InboundMessage,
         memory_session_id: &str,
     ) -> Result<String, FrameworkError> {
         let execution_started = Instant::now();
@@ -215,7 +215,7 @@ impl AgentRuntime {
 
     pub async fn record_context(
         &self,
-        inbound: &crate::channel::InboundMessage,
+        inbound: &crate::channels::InboundMessage,
         memory_session_id: &str,
     ) -> Result<(), FrameworkError> {
         let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);

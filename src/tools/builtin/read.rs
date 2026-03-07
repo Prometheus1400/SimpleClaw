@@ -1,6 +1,7 @@
 use async_trait::async_trait;
+use sandbox_common::normalize_absolute_path;
 use std::env;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::SandboxMode;
@@ -27,6 +28,10 @@ impl Tool for ReadTool {
 
     fn input_schema_json(&self) -> &'static str {
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
+    }
+
+    fn sandbox_aware(&self) -> bool {
+        true
     }
 
     async fn execute(
@@ -122,28 +127,6 @@ pub(super) fn resolve_path_for_read(
     }
 
     Ok(normalized_path)
-}
-
-fn normalize_absolute_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let can_pop = normalized
-                    .components()
-                    .next_back()
-                    .is_some_and(|last| !matches!(last, Component::RootDir | Component::Prefix(_)));
-                if can_pop {
-                    normalized.pop();
-                }
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
 }
 
 fn expand_home_dir(value: &str) -> Option<PathBuf> {

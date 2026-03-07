@@ -864,10 +864,7 @@ fn normalize_memory_key(value: &str) -> String {
 }
 
 pub(crate) fn normalize_memory_kind(value: &str) -> Option<String> {
-    let normalized = value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_");
+    let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     if normalized.is_empty() {
         return None;
     }
@@ -1038,7 +1035,10 @@ mod tests {
 
     #[test]
     fn normalize_memory_kind_accepts_only_canonical_values() {
-        assert_eq!(normalize_memory_kind("preferences"), Some("preferences".to_owned()));
+        assert_eq!(
+            normalize_memory_kind("preferences"),
+            Some("preferences".to_owned())
+        );
         assert_eq!(normalize_memory_kind("task"), Some("task".to_owned()));
         assert_eq!(normalize_memory_kind("prefs"), None);
         assert_eq!(normalize_memory_kind(""), None);
