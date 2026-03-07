@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -227,7 +227,8 @@ impl ProcessManager {
         }
         child
             .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file));
+            .stderr(Stdio::from(stderr_file))
+            .kill_on_drop(true);
         let child = child
             .spawn()
             .map_err(|e| FrameworkError::Tool(format!("exec failed to start: {e}")))?;
@@ -240,13 +241,136 @@ impl ProcessManager {
             started_at,
             finished_at: None,
             pid,
-            child: Some(child),
+            backend: ProcessBackend::Host { child: Some(child) },
             stdout_path,
             stderr_path,
             exit_code: None,
         };
 
-        self.sessions.lock().await.insert(session_id.clone(), entry);
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(session_id.clone(), entry);
+        Self::auto_evict(&mut sessions);
+        drop(sessions);
+        Ok(session_id)
+    }
+
+    fn auto_evict(sessions: &mut HashMap<String, ProcessEntry>) {
+        const MAX_COMPLETED: usize = 64;
+        let completed_count = sessions
+            .values()
+            .filter(|e| e.status != ProcessStatus::Running)
+            .count();
+        if completed_count <= MAX_COMPLETED {
+            return;
+        }
+        let mut completed: Vec<(String, DateTime<Utc>)> = sessions
+            .iter()
+            .filter(|(_, e)| e.status != ProcessStatus::Running)
+            .map(|(id, e)| (id.clone(), e.finished_at.unwrap_or(e.started_at)))
+            .collect();
+        completed.sort_by_key(|(_, t)| *t);
+        let to_evict = completed_count - MAX_COMPLETED;
+        for (id, _) in completed.into_iter().take(to_evict) {
+            if let Some(entry) = sessions.remove(&id) {
+                entry.cleanup_files();
+            }
+        }
+    }
+
+    pub async fn spawn_podman(
+        &self,
+        command: &str,
+        workspace_root: &std::path::Path,
+        cfg: &ExecContainerConfig,
+    ) -> Result<String, FrameworkError> {
+        builtin::exec::ensure_podman_available().await?;
+        builtin::exec::ensure_sandbox_image(cfg).await?;
+
+        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+        let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
+        let base = std::env::temp_dir().join("simpleclaw_process");
+        std::fs::create_dir_all(&base)
+            .map_err(|e| FrameworkError::Tool(format!("exec failed to create temp dir: {e}")))?;
+        let stdout_path = base.join(format!("{session_id}.stdout.log"));
+        let stderr_path = base.join(format!("{session_id}.stderr.log"));
+        // Create the log files so the bind-mount targets exist.
+        File::create(&stdout_path)
+            .map_err(|e| FrameworkError::Tool(format!("exec failed to create stdout log: {e}")))?;
+        File::create(&stderr_path)
+            .map_err(|e| FrameworkError::Tool(format!("exec failed to create stderr log: {e}")))?;
+
+        let workspace = sandbox::normalize_workspace_root(workspace_root)?;
+        let ws_mount = format!("type=bind,src={},target=/workspace", workspace.display());
+        let stdout_mount = format!(
+            "type=bind,src={},target=/tmp/_sc_stdout.log",
+            stdout_path.display()
+        );
+        let stderr_mount = format!(
+            "type=bind,src={},target=/tmp/_sc_stderr.log",
+            stderr_path.display()
+        );
+
+        let mut runner = Command::new("podman");
+        runner
+            .arg("run")
+            .arg("-d")
+            .arg("--entrypoint")
+            .arg("/bin/sh")
+            .arg("--workdir")
+            .arg("/workspace")
+            .arg("--mount").arg(&ws_mount)
+            .arg("--mount").arg(&stdout_mount)
+            .arg("--mount").arg(&stderr_mount)
+            .arg("--memory")
+            .arg(format!("{}m", cfg.memory_mb.max(64)))
+            .arg("--cpus")
+            .arg(builtin::exec::cpus_flag_value(cfg.cpus_milli.max(100)))
+            .arg("--pids-limit")
+            .arg(cfg.pids_limit.max(64).to_string());
+        if !cfg.network_enabled {
+            runner.arg("--network").arg("none");
+        }
+        runner
+            .arg(&cfg.image)
+            .arg("-lc")
+            .arg(format!(
+                "cd /workspace && {{ {command} ; }} > /tmp/_sc_stdout.log 2> /tmp/_sc_stderr.log"
+            ));
+
+        let output = runner
+            .output()
+            .await
+            .map_err(|e| FrameworkError::Tool(format!("exec failed to start podman: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(FrameworkError::Tool(format!(
+                "podman run -d failed: {}", stderr.trim()
+            )));
+        }
+        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if container_id.is_empty() {
+            return Err(FrameworkError::Tool(
+                "podman run -d returned empty container id".to_owned(),
+            ));
+        }
+
+        let started_at = Utc::now();
+        let entry = ProcessEntry {
+            command: command.to_owned(),
+            status: ProcessStatus::Running,
+            started_at,
+            finished_at: None,
+            pid: None,
+            backend: ProcessBackend::Podman { container_id },
+            stdout_path,
+            stderr_path,
+            exit_code: None,
+        };
+
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(session_id.clone(), entry);
+        Self::auto_evict(&mut sessions);
+        drop(sessions);
         Ok(session_id)
     }
 
@@ -255,24 +379,42 @@ impl ProcessManager {
         let entry = sessions.get_mut(session_id).ok_or_else(|| {
             FrameworkError::Tool(format!("unknown process session_id: {session_id}"))
         })?;
-        entry.poll_completion().await;
+        entry.poll_completion();
         Ok(entry.snapshot(session_id.to_owned()))
     }
 
     pub async fn list(&self) -> Vec<ProcessSnapshot> {
-        let mut sessions = self.sessions.lock().await;
-        let ids: Vec<String> = sessions.keys().cloned().collect();
-        for id in &ids {
-            if let Some(entry) = sessions.get_mut(id) {
-                entry.poll_completion().await;
+        // Phase 1: poll and collect metadata under lock.
+        let metadata: Vec<ProcessEntryMeta> = {
+            let mut sessions = self.sessions.lock().await;
+            for entry in sessions.values_mut() {
+                entry.poll_completion();
             }
-        }
-        let mut items = sessions
-            .iter()
-            .map(|(id, entry)| entry.snapshot(id.clone()))
-            .collect::<Vec<_>>();
-        items.sort_by_key(|snapshot| snapshot.started_at);
-        items.reverse();
+            sessions
+                .iter()
+                .map(|(id, entry)| entry.metadata(id.clone()))
+                .collect()
+        };
+        // Phase 2: read output files without holding the lock.
+        let mut items: Vec<ProcessSnapshot> = metadata
+            .into_iter()
+            .map(|meta| {
+                let stdout = read_process_output_tail(&meta.stdout_path, 32_768);
+                let stderr = read_process_output_tail(&meta.stderr_path, 16_384);
+                ProcessSnapshot {
+                    session_id: meta.session_id,
+                    command: meta.command,
+                    status: meta.status,
+                    pid: meta.pid,
+                    started_at: meta.started_at,
+                    finished_at: meta.finished_at,
+                    exit_code: meta.exit_code,
+                    stdout,
+                    stderr,
+                }
+            })
+            .collect();
+        items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         items
     }
 
@@ -284,6 +426,22 @@ impl ProcessManager {
         entry.kill().await?;
         Ok(entry.snapshot(session_id.to_owned()))
     }
+
+    pub async fn forget(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
+        let mut sessions = self.sessions.lock().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            FrameworkError::Tool(format!("unknown process session_id: {session_id}"))
+        })?;
+        if entry.status == ProcessStatus::Running {
+            return Err(FrameworkError::Tool(
+                "cannot forget a running process — kill it first".to_owned(),
+            ));
+        }
+        let entry = sessions.remove(session_id).unwrap();
+        let snapshot = entry.snapshot(session_id.to_owned());
+        entry.cleanup_files();
+        Ok(snapshot)
+    }
 }
 
 impl Default for ProcessManager {
@@ -293,37 +451,95 @@ impl Default for ProcessManager {
 }
 
 #[derive(Debug)]
+enum ProcessBackend {
+    Host { child: Option<Child> },
+    Podman { container_id: String },
+}
+
+#[derive(Debug)]
 struct ProcessEntry {
     command: String,
     status: ProcessStatus,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     pid: Option<u32>,
-    child: Option<Child>,
+    backend: ProcessBackend,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     exit_code: Option<i32>,
 }
 
+struct ProcessEntryMeta {
+    session_id: String,
+    command: String,
+    status: ProcessStatus,
+    pid: Option<u32>,
+    started_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+    exit_code: Option<i32>,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
+
 impl ProcessEntry {
-    async fn poll_completion(&mut self) {
+    fn poll_completion(&mut self) {
         if self.status != ProcessStatus::Running {
             return;
         }
-        let Some(child) = self.child.as_mut() else {
-            return;
-        };
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let _ = self.child.take();
-                self.exit_code = status.code();
-                self.status = ProcessStatus::Completed;
-                self.finished_at = Some(Utc::now());
+        match &mut self.backend {
+            ProcessBackend::Host { child } => {
+                let Some(c) = child.as_mut() else {
+                    return;
+                };
+                match c.try_wait() {
+                    Ok(Some(status)) => {
+                        let _ = child.take();
+                        self.exit_code = status.code();
+                        self.status = ProcessStatus::Completed;
+                        self.finished_at = Some(Utc::now());
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "poll_completion: try_wait failed");
+                        self.status = ProcessStatus::Completed;
+                        self.finished_at = Some(Utc::now());
+                    }
+                }
             }
-            Ok(None) => {}
-            Err(_) => {
-                self.status = ProcessStatus::Completed;
-                self.finished_at = Some(Utc::now());
+            ProcessBackend::Podman { container_id } => {
+                let output = std::process::Command::new("podman")
+                    .arg("inspect")
+                    .arg("--format")
+                    .arg("{{.State.Status}}|{{.State.ExitCode}}")
+                    .arg(container_id.as_str())
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        let text = String::from_utf8_lossy(&out.stdout);
+                        let text = text.trim();
+                        // Format: "exited|0" or "running|0"
+                        if let Some((state, code_str)) = text.split_once('|') {
+                            if state != "running" {
+                                self.exit_code = code_str.parse().ok();
+                                self.status = ProcessStatus::Completed;
+                                self.finished_at = Some(Utc::now());
+                            }
+                        }
+                    }
+                    Ok(out) => {
+                        tracing::warn!(
+                            stderr = %String::from_utf8_lossy(&out.stderr),
+                            "poll_completion: podman inspect failed"
+                        );
+                        self.status = ProcessStatus::Completed;
+                        self.finished_at = Some(Utc::now());
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "poll_completion: podman inspect failed");
+                        self.status = ProcessStatus::Completed;
+                        self.finished_at = Some(Utc::now());
+                    }
+                }
             }
         }
     }
@@ -332,19 +548,52 @@ impl ProcessEntry {
         if self.status != ProcessStatus::Running {
             return Ok(());
         }
-        let Some(child) = self.child.as_mut() else {
-            return Ok(());
-        };
-        child
-            .kill()
-            .await
-            .map_err(|e| FrameworkError::Tool(format!("failed to kill process: {e}")))?;
-        let _ = child.wait().await;
+        match &mut self.backend {
+            ProcessBackend::Host { child } => {
+                let Some(c) = child.as_mut() else {
+                    return Ok(());
+                };
+                c.kill()
+                    .await
+                    .map_err(|e| FrameworkError::Tool(format!("failed to kill process: {e}")))?;
+                let _ = c.wait().await;
+                let _ = child.take();
+            }
+            ProcessBackend::Podman { container_id } => {
+                let output = Command::new("podman")
+                    .args(["stop", "-t", "5"])
+                    .arg(container_id.as_str())
+                    .output()
+                    .await
+                    .map_err(|e| {
+                        FrameworkError::Tool(format!("failed to stop container: {e}"))
+                    })?;
+                if !output.status.success() {
+                    tracing::warn!(
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "kill: podman stop failed"
+                    );
+                }
+            }
+        }
         self.status = ProcessStatus::Killed;
         self.finished_at = Some(Utc::now());
         self.exit_code = Some(-1);
-        let _ = self.child.take();
         Ok(())
+    }
+
+    fn metadata(&self, session_id: String) -> ProcessEntryMeta {
+        ProcessEntryMeta {
+            session_id,
+            command: self.command.clone(),
+            status: self.status.clone(),
+            pid: self.pid,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            exit_code: self.exit_code,
+            stdout_path: self.stdout_path.clone(),
+            stderr_path: self.stderr_path.clone(),
+        }
     }
 
     fn snapshot(&self, session_id: String) -> ProcessSnapshot {
@@ -356,18 +605,51 @@ impl ProcessEntry {
             started_at: self.started_at,
             finished_at: self.finished_at,
             exit_code: self.exit_code,
-            stdout: read_process_output(&self.stdout_path),
-            stderr: read_process_output(&self.stderr_path),
+            stdout: read_process_output_tail(&self.stdout_path, 32_768),
+            stderr: read_process_output_tail(&self.stderr_path, 16_384),
+        }
+    }
+
+    /// Delete log files and remove podman container if applicable.
+    fn cleanup_files(self) {
+        let _ = std::fs::remove_file(&self.stdout_path);
+        let _ = std::fs::remove_file(&self.stderr_path);
+        if let ProcessBackend::Podman { container_id } = &self.backend {
+            let _ = std::process::Command::new("podman")
+                .args(["rm", "-f", container_id.as_str()])
+                .output();
         }
     }
 }
 
-fn read_process_output(path: &std::path::Path) -> String {
-    let mut content = String::new();
-    if let Ok(mut file) = File::open(path) {
-        let _ = file.read_to_string(&mut content);
+impl Drop for ProcessManager {
+    fn drop(&mut self) {
+        let sessions = self.sessions.get_mut();
+        for entry in sessions.values() {
+            if let ProcessBackend::Podman { container_id } = &entry.backend {
+                let _ = std::process::Command::new("podman")
+                    .args(["rm", "-f", container_id.as_str()])
+                    .output();
+            }
+        }
     }
-    content
+}
+
+fn read_process_output_tail(path: &std::path::Path, max_bytes: u64) -> String {
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let Ok(len) = file.seek(SeekFrom::End(0)) else {
+        return String::new();
+    };
+    if len > max_bytes {
+        let _ = file.seek(SeekFrom::Start(len - max_bytes));
+    } else {
+        let _ = file.seek(SeekFrom::Start(0));
+    }
+    let mut buf = String::new();
+    let _ = file.read_to_string(&mut buf);
+    buf
 }
 
 pub async fn wait_for_completion(

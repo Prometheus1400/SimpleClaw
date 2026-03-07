@@ -43,12 +43,19 @@ impl Tool for ExecTool {
         }
 
         if args.background {
-            if ctx.sandbox == SandboxMode::On {
-                return Err(FrameworkError::Tool(
-                    "background exec is not supported in sandbox mode".to_owned(),
-                ));
-            }
-            let session_id = ctx.process_manager.spawn(args.command.trim(), None).await?;
+            let session_id = if ctx.sandbox == SandboxMode::On {
+                ctx.process_manager
+                    .spawn_podman(
+                        args.command.trim(),
+                        &ctx.workspace_root,
+                        &ctx.exec_container,
+                    )
+                    .await?
+            } else {
+                ctx.process_manager
+                    .spawn(args.command.trim(), Some(&ctx.workspace_root))
+                    .await?
+            };
             let wait_for = Duration::from_millis(args.yield_ms.min(120_000));
             let snapshot = wait_for_completion(&ctx.process_manager, &session_id, wait_for).await?;
             if snapshot.status == ProcessStatus::Running {
@@ -123,7 +130,7 @@ async fn exec_with_podman(
     ))
 }
 
-async fn ensure_podman_available() -> Result<(), FrameworkError> {
+pub(crate) async fn ensure_podman_available() -> Result<(), FrameworkError> {
     let output = timeout(Duration::from_secs(8), Command::new("podman").arg("--version").output())
         .await
         .map_err(|_| FrameworkError::Tool("podman check timed out".to_owned()))?
@@ -137,7 +144,7 @@ async fn ensure_podman_available() -> Result<(), FrameworkError> {
     Ok(())
 }
 
-async fn ensure_sandbox_image(cfg: &ExecContainerConfig) -> Result<(), FrameworkError> {
+pub(crate) async fn ensure_sandbox_image(cfg: &ExecContainerConfig) -> Result<(), FrameworkError> {
     let exists = Command::new("podman")
         .arg("image")
         .arg("exists")
@@ -194,7 +201,7 @@ async fn ensure_sandbox_image(cfg: &ExecContainerConfig) -> Result<(), Framework
     Ok(())
 }
 
-fn cpus_flag_value(cpus_milli: u32) -> String {
+pub(crate) fn cpus_flag_value(cpus_milli: u32) -> String {
     let whole = cpus_milli / 1000;
     let frac = cpus_milli % 1000;
     if frac == 0 {

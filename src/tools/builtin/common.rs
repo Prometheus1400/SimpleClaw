@@ -275,11 +275,19 @@ pub(super) fn snapshot_to_json(snapshot: &ProcessSnapshot) -> Value {
 }
 
 fn truncate_for_tool_output(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+    let total = text.chars().count();
+    if total <= max_chars {
         return text.to_owned();
     }
-    let clipped = text.chars().take(max_chars).collect::<String>();
-    format!("{clipped}\n...[truncated]")
+    let head_budget = max_chars / 5; // ~20%
+    let tail_budget = max_chars - head_budget; // ~80%
+    let head: String = text.chars().take(head_budget).collect();
+    let tail: String = text
+        .chars()
+        .skip(total - tail_budget)
+        .collect();
+    let truncated = total - head_budget - tail_budget;
+    format!("{head}\n...[{truncated} chars truncated]...\n{tail}")
 }
 
 #[cfg(test)]
