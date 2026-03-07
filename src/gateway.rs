@@ -14,9 +14,11 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>) -> Self {
-        let (inbound_tx, inbound_rx) = mpsc::channel(1_024);
-
+    pub fn new(
+        channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
+        inbound_tx: mpsc::Sender<InboundMessage>,
+        inbound_rx: mpsc::Receiver<InboundMessage>,
+    ) -> Self {
         for (kind, channel) in &channels {
             let kind = *kind;
             let channel = Arc::clone(channel);
@@ -72,7 +74,7 @@ impl Gateway {
                 inbound.source_channel.as_str()
             ))
         })?;
-        channel.send_message(&inbound.session_id, content).await
+        channel.send_message(&inbound.channel_id, content).await
     }
 
     pub async fn broadcast_typing(&self, inbound: &InboundMessage) -> Result<(), FrameworkError> {
@@ -82,6 +84,6 @@ impl Gateway {
                 inbound.source_channel.as_str()
             ))
         })?;
-        channel.broadcast_typing(&inbound.session_id).await
+        channel.broadcast_typing(&inbound.channel_id).await
     }
 }

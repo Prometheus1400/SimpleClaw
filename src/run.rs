@@ -1,31 +1,37 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use color_eyre::eyre::WrapErr;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tracing::info;
 
 use crate::agent::{
     AgentRuntime, build_tool_registry_for_agent, load_agent_config_for_workspace,
     load_system_prompt_for_workspace,
 };
-use crate::channel::{Channel, DiscordChannel, LoggingChannel};
+use crate::channel::{Channel, DiscordChannel, InboundMessage, LoggingChannel};
 use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, ProviderKind};
 use crate::gateway::Gateway;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::provider::GeminiProvider;
+use crate::provider::{GeminiProvider, Provider};
 
 pub const RETAIN_DAILY_LOG_FILES: usize = 2;
+const SESSION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Clone)]
 pub struct RotatingLogWriter {
@@ -184,25 +190,81 @@ fn dated_log_path(log_path: &Path, day: NaiveDate) -> PathBuf {
 fn collect_log_history(log_path: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut history = list_daily_log_files(log_path)?;
     history.sort_by_key(|(day, _)| *day);
-    let mut out = history.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+    let mut out = history
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
     if log_path.exists() {
         out.push(log_path.to_path_buf());
     }
     Ok(out)
 }
 
-pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
-    let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
-    let loaded = LoadedConfig::load(cli.workspace.as_deref())
-        .wrap_err("failed to load global/workspace configuration")?;
+#[async_trait]
+pub(crate) trait ProviderFactory: Send + Sync {
+    async fn create_provider(&self, loaded: &LoadedConfig)
+    -> color_eyre::Result<Arc<dyn Provider>>;
+}
 
-    let provider: Arc<dyn crate::provider::Provider> = match loaded.global.provider.kind {
-        ProviderKind::Gemini => {
-            Arc::new(GeminiProvider::from_config(loaded.global.provider.clone()))
+#[async_trait]
+pub(crate) trait MemoryFactory: Send + Sync {
+    async fn create_memory(
+        &self,
+        agent: &AgentEntryConfig,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<MemoryStore>;
+}
+
+#[async_trait]
+pub(crate) trait ChannelFactory: Send + Sync {
+    async fn create_channels(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>>;
+}
+
+pub(crate) struct RuntimeDependencies {
+    pub provider_factory: Arc<dyn ProviderFactory>,
+    pub memory_factory: Arc<dyn MemoryFactory>,
+    pub channel_factory: Arc<dyn ChannelFactory>,
+}
+
+impl Default for RuntimeDependencies {
+    fn default() -> Self {
+        Self {
+            provider_factory: Arc::new(DefaultProviderFactory),
+            memory_factory: Arc::new(DefaultMemoryFactory),
+            channel_factory: Arc::new(DefaultChannelFactory),
         }
-    };
-    let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
-    for agent in &loaded.global.agents.list {
+    }
+}
+
+struct DefaultProviderFactory;
+
+#[async_trait]
+impl ProviderFactory for DefaultProviderFactory {
+    async fn create_provider(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<Arc<dyn Provider>> {
+        let provider: Arc<dyn Provider> = match loaded.global.provider.kind {
+            ProviderKind::Gemini => {
+                Arc::new(GeminiProvider::from_config(loaded.global.provider.clone()))
+            }
+        };
+        Ok(provider)
+    }
+}
+
+struct DefaultMemoryFactory;
+
+#[async_trait]
+impl MemoryFactory for DefaultMemoryFactory {
+    async fn create_memory(
+        &self,
+        agent: &AgentEntryConfig,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<MemoryStore> {
         let (memory_dir, short_term_path, long_term_path) =
             agent_workspace_memory_paths(&agent.workspace);
         fs::create_dir_all(&memory_dir).wrap_err_with(|| {
@@ -212,7 +274,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 memory_dir.display()
             )
         })?;
-        let memory = MemoryStore::new(
+        MemoryStore::new(
             &short_term_path,
             &long_term_path,
             &loaded.global.database,
@@ -224,9 +286,186 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 "failed to initialize sqlite memory store for agent '{}'",
                 agent.id
             )
-        })?;
+        })
+    }
+}
+
+struct DefaultChannelFactory;
+
+#[async_trait]
+impl ChannelFactory for DefaultChannelFactory {
+    async fn create_channels(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        for kind in &loaded.global.gateway.channels {
+            let channel: Arc<dyn Channel> = match kind {
+                GatewayChannelKind::Discord => Arc::new(
+                    DiscordChannel::from_config(&loaded.global.discord)
+                        .await
+                        .wrap_err("failed to initialize discord channel")?,
+                ),
+                GatewayChannelKind::Logging => {
+                    Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
+                }
+            };
+            channels.insert(*kind, channel);
+        }
+        Ok(channels)
+    }
+}
+
+pub(crate) struct RuntimeState {
+    pub gateway: Gateway,
+    pub runtimes: HashMap<String, AgentRuntime>,
+    pub safe_error_reply: String,
+}
+
+type BoxFutureUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
+type SessionHandler<T> = Arc<dyn Fn(T) -> BoxFutureUnit + Send + Sync>;
+
+#[derive(Clone)]
+struct SessionWorkerCoordinator<T> {
+    workers: Arc<AsyncMutex<HashMap<String, SessionWorker<T>>>>,
+    next_worker_id: Arc<AtomicU64>,
+    idle_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct SessionWorker<T> {
+    id: u64,
+    tx: mpsc::UnboundedSender<T>,
+}
+
+impl<T> SessionWorkerCoordinator<T>
+where
+    T: Send + 'static,
+{
+    fn new(idle_timeout: Duration) -> Self {
+        Self {
+            workers: Arc::new(AsyncMutex::new(HashMap::new())),
+            next_worker_id: Arc::new(AtomicU64::new(1)),
+            idle_timeout,
+        }
+    }
+
+    async fn dispatch(&self, key: String, message: T, handler: SessionHandler<T>) {
+        let mut pending = Some(message);
+
+        for attempt in 0..=1 {
+            let (worker_id, tx) = self.worker_sender_for_key(&key, Arc::clone(&handler)).await;
+            let payload = pending
+                .take()
+                .expect("pending message is always present before send attempt");
+
+            match tx.send(payload) {
+                Ok(()) => return,
+                Err(err) => {
+                    pending = Some(err.0);
+                    self.remove_worker_if_matches(&key, worker_id).await;
+
+                    if attempt == 1 {
+                        tracing::error!(
+                            session_key = %key,
+                            "dropping inbound message after worker enqueue retries were exhausted"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn worker_sender_for_key(
+        &self,
+        key: &str,
+        handler: SessionHandler<T>,
+    ) -> (u64, mpsc::UnboundedSender<T>) {
+        let mut workers = self.workers.lock().await;
+        if let Some(existing) = workers.get(key) {
+            return (existing.id, existing.tx.clone());
+        }
+
+        let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::unbounded_channel();
+        workers.insert(
+            key.to_owned(),
+            SessionWorker {
+                id: worker_id,
+                tx: tx.clone(),
+            },
+        );
+        drop(workers);
+
+        self.spawn_worker(key.to_owned(), worker_id, rx, handler);
+        (worker_id, tx)
+    }
+
+    fn spawn_worker(
+        &self,
+        key: String,
+        worker_id: u64,
+        mut rx: mpsc::UnboundedReceiver<T>,
+        handler: SessionHandler<T>,
+    ) {
+        let workers = Arc::clone(&self.workers);
+        let idle_timeout = self.idle_timeout;
+        tokio::spawn(async move {
+            loop {
+                let next = tokio::time::timeout(idle_timeout, rx.recv()).await;
+                let Some(message) = (match next {
+                    Ok(Some(message)) => Some(message),
+                    Ok(None) => None,
+                    Err(_) => {
+                        tracing::debug!(session_key = %key, "session worker idled out");
+                        None
+                    }
+                }) else {
+                    break;
+                };
+
+                handler(message).await;
+            }
+
+            let mut workers = workers.lock().await;
+            if workers.get(&key).is_some_and(|entry| entry.id == worker_id) {
+                workers.remove(&key);
+            }
+        });
+    }
+
+    async fn remove_worker_if_matches(&self, key: &str, expected_worker_id: u64) {
+        let mut workers = self.workers.lock().await;
+        if workers
+            .get(key)
+            .is_some_and(|entry| entry.id == expected_worker_id)
+        {
+            workers.remove(key);
+        }
+    }
+
+    #[cfg(test)]
+    async fn worker_count(&self) -> usize {
+        self.workers.lock().await.len()
+    }
+}
+
+pub(crate) async fn assemble_runtime_state(
+    cli: &Cli,
+    loaded: &LoadedConfig,
+    app_paths: &AppPaths,
+    deps: &RuntimeDependencies,
+) -> color_eyre::Result<RuntimeState> {
+    let provider = deps.provider_factory.create_provider(loaded).await?;
+
+    let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
+    for agent in &loaded.global.agents.list {
+        let memory = deps.memory_factory.create_memory(agent, loaded).await?;
         memory_by_agent.insert(agent.id.clone(), memory);
     }
+
+    let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let summon_agents: HashMap<String, std::path::PathBuf> = loaded
         .global
@@ -281,97 +520,129 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 tooling.tool_registry,
                 tooling.skill_tool_names,
                 cli.max_steps,
+                Some(gateway_tx.clone()),
             ),
         );
     }
 
-    let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
-    for kind in &loaded.global.gateway.channels {
-        let channel: Arc<dyn Channel> = match kind {
-            GatewayChannelKind::Discord => Arc::new(
-                DiscordChannel::from_config(&loaded.global.discord)
-                    .await
-                    .wrap_err("failed to initialize discord channel")?,
-            ),
-            GatewayChannelKind::Logging => {
-                Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
-            }
-        };
-        channels.insert(*kind, channel);
-    }
-    let gateway = Gateway::new(channels);
+    let channels = deps.channel_factory.create_channels(loaded).await?;
+    let gateway = Gateway::new(channels, gateway_tx, gateway_rx);
 
-    let safe_error_reply = loaded.global.runtime.safe_error_reply.clone();
-    info!(agent_count = runtimes.len(), "runtime initialized");
+    Ok(RuntimeState {
+        gateway,
+        runtimes,
+        safe_error_reply: loaded.global.runtime.safe_error_reply.clone(),
+    })
+}
+
+pub(crate) async fn handle_inbound_once(
+    state: &RuntimeState,
+    inbound: InboundMessage,
+) -> color_eyre::Result<()> {
+    let memory_session_id = inbound.session_key.clone();
+    let Some(runtime) = state.runtimes.get(&inbound.target_agent_id) else {
+        tracing::error!(
+            target_agent_id = %inbound.target_agent_id,
+            channel_id = %inbound.channel_id,
+            "dropping message due to unknown routed agent"
+        );
+        if inbound.invoke
+            && let Err(err) = state
+                .gateway
+                .send_message(
+                    &inbound,
+                    "I couldn't route that message due to a configuration error.",
+                )
+                .await
+        {
+            tracing::error!(error = %err, "failed to send unknown-agent route reply");
+        }
+        return Ok(());
+    };
+
+    if !inbound.invoke {
+        tracing::debug!(
+            session_id = %memory_session_id,
+            channel_id = %inbound.channel_id,
+            guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
+            user_id = %inbound.user_id,
+            "recording passive channel context message"
+        );
+        if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
+            tracing::error!(error = %err, "failed to persist passive context message");
+        }
+        return Ok(());
+    }
+
+    if inbound.user_id != "system"
+        && let Err(err) = state.gateway.broadcast_typing(&inbound).await
+    {
+        tracing::warn!(error = %err, "failed to broadcast typing");
+    }
+    tracing::debug!(
+        session_id = %memory_session_id,
+        channel_id = %inbound.channel_id,
+        guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
+        is_dm = inbound.is_dm,
+        user_id = %inbound.user_id,
+        mentioned_bot = inbound.mentioned_bot,
+        target_agent_id = %inbound.target_agent_id,
+        "dispatching inbound message to agent"
+    );
+
+    match runtime.run(&inbound, &memory_session_id).await {
+        Ok(reply) => {
+            if let Err(err) = state.gateway.send_message(&inbound, &reply).await {
+                tracing::error!(error = %err, "failed to send channel response");
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "agent execution failed");
+            if let Err(send_err) = state
+                .gateway
+                .send_message(&inbound, &state.safe_error_reply)
+                .await
+            {
+                tracing::error!(error = %send_err, "failed to send safe error reply");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
+    let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
+    let loaded = LoadedConfig::load(cli.workspace.as_deref())
+        .wrap_err("failed to load global/workspace configuration")?;
+    let deps = RuntimeDependencies::default();
+    let state = Arc::new(assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?);
+    let coordinator =
+        SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
+    let handler: SessionHandler<InboundMessage> = {
+        let state = Arc::clone(&state);
+        Arc::new(move |inbound: InboundMessage| {
+            let state = Arc::clone(&state);
+            Box::pin(async move {
+                if let Err(err) = handle_inbound_once(state.as_ref(), inbound).await {
+                    tracing::error!(error = %err, "failed to process inbound message");
+                }
+            })
+        })
+    };
+
+    info!(agent_count = state.runtimes.len(), "runtime initialized");
     loop {
-        let inbound = match gateway.next_message().await {
+        let inbound = match state.gateway.next_message().await {
             Ok(msg) => msg,
             Err(err) => {
                 tracing::error!(error = %err, "gateway listen failed");
                 continue;
             }
         };
-        let memory_session_id = format!("{}:{}", inbound.channel_id, inbound.target_agent_id);
-        let Some(runtime) = runtimes.get(&inbound.target_agent_id) else {
-            tracing::error!(
-                target_agent_id = %inbound.target_agent_id,
-                channel_id = %inbound.channel_id,
-                "dropping message due to unknown routed agent"
-            );
-            if inbound.invoke
-                && let Err(err) = gateway
-                    .send_message(
-                        &inbound,
-                        "I couldn't route that message due to a configuration error.",
-                    )
-                    .await
-            {
-                tracing::error!(error = %err, "failed to send unknown-agent route reply");
-            }
-            continue;
-        };
-
-        if !inbound.invoke {
-            tracing::debug!(
-                session_id = %memory_session_id,
-                channel_id = %inbound.channel_id,
-                guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-                user_id = %inbound.user_id,
-                "recording passive channel context message"
-            );
-            if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
-                tracing::error!(error = %err, "failed to persist passive context message");
-            }
-            continue;
-        }
-
-        if let Err(err) = gateway.broadcast_typing(&inbound).await {
-            tracing::warn!(error = %err, "failed to broadcast typing");
-        }
-        tracing::debug!(
-            session_id = %memory_session_id,
-            channel_id = %inbound.channel_id,
-            guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-            is_dm = inbound.is_dm,
-            user_id = %inbound.user_id,
-            mentioned_bot = inbound.mentioned_bot,
-            target_agent_id = %inbound.target_agent_id,
-            "dispatching inbound message to agent"
-        );
-
-        match runtime.run(&inbound, &memory_session_id).await {
-            Ok(reply) => {
-                if let Err(err) = gateway.send_message(&inbound, &reply).await {
-                    tracing::error!(error = %err, "failed to send channel response");
-                }
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "agent execution failed");
-                if let Err(send_err) = gateway.send_message(&inbound, &safe_error_reply).await {
-                    tracing::error!(error = %send_err, "failed to send safe error reply");
-                }
-            }
-        }
+        let key = inbound.session_key.clone();
+        coordinator
+            .dispatch(key, inbound, Arc::clone(&handler))
+            .await;
     }
 }
 
@@ -459,8 +730,8 @@ pub fn show_logs(cli: &Cli, follow: bool) -> color_eyre::Result<()> {
 
     if !follow {
         for path in history {
-            let content =
-                fs::read_to_string(&path).wrap_err_with(|| format!("failed to read {}", path.display()))?;
+            let content = fs::read_to_string(&path)
+                .wrap_err_with(|| format!("failed to read {}", path.display()))?;
             print!("{content}");
         }
         return Ok(());
@@ -774,14 +1045,20 @@ fn force_kill_process(pid: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::future::Future;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::NaiveDate;
     use rusqlite::Connection;
+    use tokio::sync::{Barrier, mpsc, oneshot};
+    use tokio::time::{Duration, sleep, timeout};
 
     use super::{
-        collect_log_history, dated_log_path, prune_daily_logs, query_long_memory, query_short_memory,
+        AsyncMutex, SessionHandler, SessionWorkerCoordinator, collect_log_history, dated_log_path,
+        prune_daily_logs, query_long_memory, query_short_memory,
     };
 
     fn temp_db_path(prefix: &str) -> PathBuf {
@@ -926,5 +1203,224 @@ mod tests {
         let _ = fs::remove_file(&old);
         let _ = fs::remove_file(&new);
         let _ = fs::remove_file(&log_path);
+    }
+
+    #[derive(Debug)]
+    struct TestMessage {
+        id: usize,
+    }
+
+    fn boxed_handler<F, Fut>(f: F) -> SessionHandler<TestMessage>
+    where
+        F: Fn(TestMessage) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Arc::new(move |message| Box::pin(f(message)))
+    }
+
+    #[tokio::test]
+    async fn session_workers_serialize_messages_for_same_key() {
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(60));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let (first_started_tx, first_started_rx) = oneshot::channel::<()>();
+        let (second_started_tx, second_started_rx) = oneshot::channel::<()>();
+        let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
+        let release_first_rx = Arc::new(AsyncMutex::new(Some(release_first_rx)));
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel::<usize>();
+        let first_started_tx = Arc::new(AsyncMutex::new(Some(first_started_tx)));
+        let second_started_tx = Arc::new(AsyncMutex::new(Some(second_started_tx)));
+
+        let handler = boxed_handler({
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            let release_first_rx = Arc::clone(&release_first_rx);
+            let done_tx = done_tx.clone();
+            let first_started_tx = Arc::clone(&first_started_tx);
+            let second_started_tx = Arc::clone(&second_started_tx);
+            move |message: TestMessage| {
+                let active = Arc::clone(&active);
+                let max_active = Arc::clone(&max_active);
+                let release_first_rx = Arc::clone(&release_first_rx);
+                let done_tx = done_tx.clone();
+                let first_started_tx = Arc::clone(&first_started_tx);
+                let second_started_tx = Arc::clone(&second_started_tx);
+                async move {
+                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    loop {
+                        let prev = max_active.load(Ordering::SeqCst);
+                        if now_active <= prev {
+                            break;
+                        }
+                        if max_active
+                            .compare_exchange(prev, now_active, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+
+                    if message.id == 1 {
+                        if let Some(tx) = first_started_tx.lock().await.take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(rx) = release_first_rx.lock().await.take() {
+                            let _ = rx.await;
+                        }
+                    }
+
+                    if message.id == 2
+                        && let Some(tx) = second_started_tx.lock().await.take()
+                    {
+                        let _ = tx.send(());
+                    }
+
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let _ = done_tx.send(message.id);
+                }
+            }
+        });
+
+        coordinator
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 1 },
+                Arc::clone(&handler),
+            )
+            .await;
+        coordinator
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 2 },
+                Arc::clone(&handler),
+            )
+            .await;
+
+        first_started_rx
+            .await
+            .expect("first message should begin processing");
+        assert!(
+            timeout(Duration::from_millis(100), second_started_rx)
+                .await
+                .is_err(),
+            "second message should not start before first is released"
+        );
+
+        let _ = release_first_tx.send(());
+        let _ = timeout(Duration::from_secs(1), done_rx.recv())
+            .await
+            .expect("first completion should arrive")
+            .expect("first completion value should exist");
+        let _ = timeout(Duration::from_secs(1), done_rx.recv())
+            .await
+            .expect("second completion should arrive")
+            .expect("second completion value should exist");
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn session_workers_run_different_keys_concurrently() {
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(60));
+        let barrier = Arc::new(Barrier::new(3));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        let handler = boxed_handler({
+            let barrier = Arc::clone(&barrier);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            move |_message: TestMessage| {
+                let barrier = Arc::clone(&barrier);
+                let active = Arc::clone(&active);
+                let max_active = Arc::clone(&max_active);
+                async move {
+                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    loop {
+                        let prev = max_active.load(Ordering::SeqCst);
+                        if now_active <= prev {
+                            break;
+                        }
+                        if max_active
+                            .compare_exchange(prev, now_active, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                    barrier.wait().await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        coordinator
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 1 },
+                Arc::clone(&handler),
+            )
+            .await;
+        coordinator
+            .dispatch(
+                "session-b".to_owned(),
+                TestMessage { id: 2 },
+                Arc::clone(&handler),
+            )
+            .await;
+
+        timeout(Duration::from_secs(1), barrier.wait())
+            .await
+            .expect("both session workers should run concurrently");
+        assert!(
+            max_active.load(Ordering::SeqCst) >= 2,
+            "expected at least two concurrent handlers"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_worker_expires_when_idle_and_respawns() {
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_millis(50));
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel::<usize>();
+        let handler = boxed_handler(move |message: TestMessage| {
+            let done_tx = done_tx.clone();
+            async move {
+                let _ = done_tx.send(message.id);
+            }
+        });
+
+        coordinator
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 1 },
+                Arc::clone(&handler),
+            )
+            .await;
+        let first = timeout(Duration::from_secs(1), done_rx.recv())
+            .await
+            .expect("first completion should arrive")
+            .expect("first completion payload should exist");
+        assert_eq!(first, 1);
+
+        for _ in 0..20 {
+            if coordinator.worker_count().await == 0 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(coordinator.worker_count().await, 0);
+
+        coordinator
+            .dispatch(
+                "session-a".to_owned(),
+                TestMessage { id: 2 },
+                Arc::clone(&handler),
+            )
+            .await;
+        let second = timeout(Duration::from_secs(1), done_rx.recv())
+            .await
+            .expect("second completion should arrive")
+            .expect("second completion payload should exist");
+        assert_eq!(second, 2);
     }
 }

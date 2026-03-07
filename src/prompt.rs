@@ -63,6 +63,7 @@ fn prompt_layers() -> [(&'static str, &'static str); 5] {
         ("IDENTITY", "IDENTITY.md"),
         ("AGENT", "AGENT.md"),
         ("USER", "USER.md"),
+        // Static prompt layer — distinct from the dynamic embedding-based memory in memory.rs
         ("MEMORY", "MEMORY.md"),
         ("SOUL", "SOUL.md"),
     ]

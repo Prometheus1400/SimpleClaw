@@ -16,7 +16,10 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::config::{ExecContainerConfig, SandboxMode, ToolConfig};
+use tokio::sync::mpsc;
+
+use crate::channel::InboundMessage;
+use crate::config::{ExecContainerConfig, GatewayChannelKind, SandboxMode, ToolConfig};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::provider::ToolDefinition;
@@ -36,6 +39,16 @@ pub trait TaskService: Send + Sync {
     async fn run_task(&self, prompt: &str, session_id: &str) -> Result<String, FrameworkError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct CompletionRoute {
+    pub source_channel: GatewayChannelKind,
+    pub target_agent_id: String,
+    pub session_key: String,
+    pub channel_id: String,
+    pub guild_id: Option<String>,
+    pub is_dm: bool,
+}
+
 #[derive(Clone)]
 pub struct ToolCtx {
     pub memory: MemoryStore,
@@ -47,6 +60,8 @@ pub struct ToolCtx {
     pub process_manager: Arc<ProcessManager>,
     pub summon_service: Option<Arc<dyn SummonService>>,
     pub task_service: Option<Arc<dyn TaskService>>,
+    pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
+    pub completion_route: Option<CompletionRoute>,
 }
 
 impl ToolCtx {
@@ -429,6 +444,53 @@ impl ProcessManager {
         Ok(entry.snapshot(session_id.to_owned()))
     }
 
+    pub fn spawn_completion_watcher(
+        self: &Arc<Self>,
+        session_id: String,
+        completion_tx: mpsc::Sender<InboundMessage>,
+        route: CompletionRoute,
+    ) {
+        let pm = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(500)).await;
+                let snapshot = match pm.update(&session_id).await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if snapshot.status == ProcessStatus::Running {
+                    continue;
+                }
+                let exit_code = snapshot.exit_code.unwrap_or(-1);
+                let content = format!(
+                    "[background process completed] session_id={} exit_code={} command={}",
+                    session_id, exit_code, snapshot.command
+                );
+                let msg = InboundMessage {
+                    source_channel: route.source_channel,
+                    target_agent_id: route.target_agent_id,
+                    session_key: route.session_key,
+                    channel_id: route.channel_id,
+                    guild_id: route.guild_id,
+                    is_dm: route.is_dm,
+                    user_id: "system".to_owned(),
+                    username: "system".to_owned(),
+                    mentioned_bot: false,
+                    invoke: true,
+                    content,
+                };
+                if let Err(err) = completion_tx.send(msg).await {
+                    tracing::warn!(
+                        error = %err,
+                        proc_session_id = %session_id,
+                        "failed to send background process completion message"
+                    );
+                }
+                break;
+            }
+        });
+    }
+
     pub async fn forget(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
         let mut sessions = self.sessions.lock().await;
         let entry = sessions.get(session_id).ok_or_else(|| {
@@ -520,12 +582,12 @@ impl ProcessEntry {
                         let text = String::from_utf8_lossy(&out.stdout);
                         let text = text.trim();
                         // Format: "exited|0" or "running|0"
-                        if let Some((state, code_str)) = text.split_once('|') {
-                            if state != "running" {
-                                self.exit_code = code_str.parse().ok();
-                                self.status = ProcessStatus::Completed;
-                                self.finished_at = Some(Utc::now());
-                            }
+                        if let Some((state, code_str)) = text.split_once('|')
+                            && state != "running"
+                        {
+                            self.exit_code = code_str.parse().ok();
+                            self.status = ProcessStatus::Completed;
+                            self.finished_at = Some(Utc::now());
                         }
                     }
                     Ok(out) => {
@@ -650,24 +712,6 @@ fn read_process_output_tail(path: &std::path::Path, max_bytes: u64) -> String {
     let mut buf = String::new();
     let _ = file.read_to_string(&mut buf);
     buf
-}
-
-pub async fn wait_for_completion(
-    process_manager: &ProcessManager,
-    session_id: &str,
-    wait_for: Duration,
-) -> Result<ProcessSnapshot, FrameworkError> {
-    let deadline = std::time::Instant::now() + wait_for;
-    loop {
-        let snapshot = process_manager.update(session_id).await?;
-        if snapshot.status != ProcessStatus::Running {
-            return Ok(snapshot);
-        }
-        if std::time::Instant::now() >= deadline {
-            return Ok(snapshot);
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
+use crate::channel::InboundMessage;
 use crate::config::{AgentConfig, ProviderKind, RuntimeConfig, ToolConfig};
 use crate::dispatch::{NativeDispatcher, ToolDispatcher, XmlDispatcher};
 use crate::error::FrameworkError;
@@ -16,7 +17,8 @@ use crate::provider::{Message, Provider, Role};
 use crate::react;
 use crate::tools::skill::{SkillToolLoadStats, load_skill_tools};
 use crate::tools::{
-    ProcessManager, SummonService, TaskService, ToolCtx, ToolRegistry, default_registry,
+    CompletionRoute, ProcessManager, SummonService, TaskService, ToolCtx, ToolRegistry,
+    default_registry,
 };
 
 pub struct AgentRuntime {
@@ -35,6 +37,7 @@ pub struct AgentRuntime {
     app_base_dir: PathBuf,
     system_prompt: String,
     max_steps: u32,
+    completion_tx: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
 }
 
 impl AgentRuntime {
@@ -54,6 +57,7 @@ impl AgentRuntime {
         tool_registry: Arc<ToolRegistry>,
         skill_tool_names: Vec<String>,
         max_steps: u32,
+        completion_tx: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
     ) -> Self {
         let dispatcher: Arc<dyn ToolDispatcher> = if provider_kind.supports_native_tools() {
             Arc::new(NativeDispatcher)
@@ -76,6 +80,7 @@ impl AgentRuntime {
             app_base_dir,
             system_prompt,
             max_steps,
+            completion_tx,
         }
     }
 
@@ -158,6 +163,15 @@ impl AgentRuntime {
             process_manager: Arc::clone(&self.process_manager),
             summon_service: Some(summon_service),
             task_service: Some(task_service),
+            completion_tx: self.completion_tx.clone(),
+            completion_route: Some(CompletionRoute {
+                source_channel: inbound.source_channel,
+                target_agent_id: self.agent_id.clone(),
+                session_key: inbound.session_key.clone(),
+                channel_id: inbound.channel_id.clone(),
+                guild_id: inbound.guild_id.clone(),
+                is_dm: inbound.is_dm,
+            }),
         };
 
         let reply = match react::run_loop(
@@ -442,6 +456,8 @@ impl SummonService for RuntimeSummonService {
             process_manager: Arc::clone(&self.process_manager),
             summon_service: None,
             task_service: None,
+            completion_tx: None,
+            completion_route: None,
         };
 
         let output = react::run_loop(
@@ -480,6 +496,8 @@ impl TaskService for RuntimeTaskService {
             process_manager: Arc::clone(&self.process_manager),
             summon_service: None,
             task_service: None,
+            completion_tx: None,
+            completion_route: None,
         };
 
         react::run_loop(
