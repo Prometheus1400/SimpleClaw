@@ -54,3 +54,9 @@ Remove the installed binary and wasm artifacts (default prefix `~/.cargo`):
 ```bash
 ./scripts/uninstall.sh
 ```
+
+If the service is running, stop and uninstall in one step:
+
+```bash
+./scripts/uninstall.sh --stop
+```
