@@ -18,11 +18,11 @@ impl Tool for ForgetTool {
     }
 
     fn description(&self) -> &'static str {
-        "Prune long-term memory by semantic similarity using JSON: {query, commit?, similarity_threshold?, max_matches?, kind?}"
+        "Prune long-term memory by semantic similarity using JSON: {query, commit?, similarity_threshold?, max_matches?, kind?}; kind one of: general|profile|preferences|project|task|constraint"
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"commit\":{\"type\":\"boolean\"},\"similarity_threshold\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1},\"max_matches\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50},\"kind\":{\"type\":\"string\"}},\"required\":[\"query\"]}"
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"commit\":{\"type\":\"boolean\"},\"similarity_threshold\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1},\"max_matches\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50},\"kind\":{\"type\":\"string\",\"enum\":[\"general\",\"profile\",\"preferences\",\"project\",\"task\",\"constraint\"]}},\"required\":[\"query\"]}"
     }
 
     async fn execute(

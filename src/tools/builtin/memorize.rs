@@ -18,11 +18,11 @@ impl Tool for MemorizeTool {
     }
 
     fn description(&self) -> &'static str {
-        "Store durable long-term memory using JSON: {fact, kind?, importance?(1-5)}"
+        "Store durable long-term memory using JSON: {fact, kind?, importance?(1-5)}; kind one of: general|profile|preferences|project|task|constraint"
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\"},\"importance\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5}},\"required\":[\"fact\"]}"
+        "{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"general\",\"profile\",\"preferences\",\"project\",\"task\",\"constraint\"]},\"importance\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5}},\"required\":[\"fact\"]}"
     }
 
     async fn execute(

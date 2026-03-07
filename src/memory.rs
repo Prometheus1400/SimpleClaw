@@ -21,6 +21,14 @@ pub struct MemoryStore {
 }
 
 const MEMORIZE_DEDUPE_WINDOW_SECS: i64 = 300;
+const ALLOWED_MEMORY_KINDS: [&str; 6] = [
+    "general",
+    "profile",
+    "preferences",
+    "project",
+    "task",
+    "constraint",
+];
 
 #[derive(Debug, Clone)]
 pub enum MemorizeResult {
@@ -338,8 +346,9 @@ impl MemoryStore {
                      FROM ltm_facts_vec v
                      JOIN ltm_facts f ON f.id = v.fact_id
                      WHERE v.embedding MATCH ?1
+                       AND v.k = ?2
                      ORDER BY v.distance
-                     LIMIT ?2",
+                    ",
                 )?;
                 let mapped = stmt.query_map(params![query_blob, sql_limit], |row| {
                     let content: String = row.get(0)?;
@@ -393,7 +402,8 @@ impl MemoryStore {
         let normalized_kind = kind_filter
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+            .map(parse_memory_kind)
+            .transpose()?;
 
         let conn = self
             .long_term_pool
@@ -417,8 +427,9 @@ impl MemoryStore {
                      FROM ltm_facts_vec v
                      JOIN ltm_facts f ON f.id = v.fact_id
                      WHERE v.embedding MATCH ?1
+                       AND v.k = ?2
                      ORDER BY v.distance
-                     LIMIT ?2",
+                    ",
                 )?;
                 let mapped = stmt.query_map(params![query_blob, fetch_limit], |row| {
                     let id: i64 = row.get(0)?;
@@ -551,7 +562,7 @@ impl MemoryStore {
             if trimmed_kind.is_empty() {
                 "general".to_owned()
             } else {
-                trimmed_kind.to_owned()
+                parse_memory_kind(trimmed_kind)?
             }
         };
         let fact_for_check = fact.clone();
@@ -584,9 +595,10 @@ impl MemoryStore {
                     "SELECT f.id, f.content, v.distance
                      FROM ltm_facts_vec v
                      JOIN ltm_facts f ON f.id = v.fact_id
-                     WHERE f.kind = ?1 AND v.embedding MATCH ?2
-                     ORDER BY v.distance
-                     LIMIT 1",
+                     WHERE f.kind = ?1
+                       AND v.embedding MATCH ?2
+                       AND v.k = 1
+                     ORDER BY v.distance",
                 )?;
                 let mut rows = stmt.query(params![supersede_kind, supersede_blob])?;
                 if let Some(row) = rows.next()? {
@@ -665,7 +677,8 @@ impl MemoryStore {
         let kind = kind_filter
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .map(str::to_owned);
+            .map(parse_memory_kind)
+            .transpose()?;
         let conn = self
             .long_term_pool
             .get()
@@ -850,6 +863,34 @@ fn normalize_memory_key(value: &str) -> String {
         .to_lowercase()
 }
 
+pub(crate) fn normalize_memory_kind(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized.as_str() {
+        "general" => Some("general".to_owned()),
+        "profile" => Some("profile".to_owned()),
+        "preferences" => Some("preferences".to_owned()),
+        "project" => Some("project".to_owned()),
+        "task" => Some("task".to_owned()),
+        "constraint" => Some("constraint".to_owned()),
+        _ => None,
+    }
+}
+
+fn parse_memory_kind(value: &str) -> Result<String, FrameworkError> {
+    normalize_memory_kind(value).ok_or_else(|| {
+        FrameworkError::Tool(format!(
+            "invalid memory kind '{value}'. allowed kinds: {}",
+            ALLOWED_MEMORY_KINDS.join("|")
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -857,7 +898,8 @@ mod tests {
     use crate::config::MemoryPreinjectConfig;
 
     use super::{
-        MemoryHitStore, MemoryPreinjectHit, has_recent_long_term_fact, rank_preinject_hits,
+        MemoryHitStore, MemoryPreinjectHit, has_recent_long_term_fact, normalize_memory_kind,
+        parse_memory_kind, rank_preinject_hits,
     };
 
     #[test]
@@ -921,7 +963,7 @@ mod tests {
             MemoryPreinjectHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Prefers short answers".to_owned(),
-                kind: Some("prefs".to_owned()),
+                kind: Some("preferences".to_owned()),
                 importance: Some(5),
                 raw_similarity: 0.94,
                 final_score: 0.86,
@@ -964,7 +1006,7 @@ mod tests {
             MemoryPreinjectHit {
                 store: MemoryHitStore::LongTerm,
                 content: "High weighted, low raw".to_owned(),
-                kind: Some("prefs".to_owned()),
+                kind: Some("preferences".to_owned()),
                 importance: Some(5),
                 raw_similarity: 0.70,
                 final_score: 0.95,
@@ -992,5 +1034,19 @@ mod tests {
         assert_eq!(ranked[0].content, "Passes raw threshold");
         assert_eq!(ranked[1].content, "Also passes raw threshold");
         assert!(ranked.iter().all(|hit| hit.raw_similarity >= 0.72));
+    }
+
+    #[test]
+    fn normalize_memory_kind_accepts_only_canonical_values() {
+        assert_eq!(normalize_memory_kind("preferences"), Some("preferences".to_owned()));
+        assert_eq!(normalize_memory_kind("task"), Some("task".to_owned()));
+        assert_eq!(normalize_memory_kind("prefs"), None);
+        assert_eq!(normalize_memory_kind(""), None);
+    }
+
+    #[test]
+    fn parse_memory_kind_returns_error_for_unknown_values() {
+        assert!(parse_memory_kind("project").is_ok());
+        assert!(parse_memory_kind("repo").is_err());
     }
 }

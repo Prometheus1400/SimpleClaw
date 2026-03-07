@@ -17,11 +17,11 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &'static str {
-        "Semantic query long-term memory using JSON: {action?, query, top_k?, kind?, limit?}"
+        "Semantic query long-term memory using JSON: {action?, query, top_k?, kind?, limit?}; kind one of: general|profile|preferences|project|task|constraint"
     }
 
     fn input_schema_json(&self) -> &'static str {
-        r#"{"type":"object","properties":{"action":{"type":"string","enum":["query","list"]},"query":{"type":"string"},"top_k":{"type":"integer"},"kind":{"type":"string"},"limit":{"type":"integer"}},"required":[]}"#
+        r#"{"type":"object","properties":{"action":{"type":"string","enum":["query","list"]},"query":{"type":"string"},"top_k":{"type":"integer"},"kind":{"type":"string","enum":["general","profile","preferences","project","task","constraint"]},"limit":{"type":"integer"}},"required":[]}"#
     }
 
     async fn execute(
