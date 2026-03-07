@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use color_eyre::eyre::WrapErr;
 use rusqlite::{Connection, OpenFlags, params};
@@ -23,7 +24,7 @@ use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, Provider
 use crate::gateway::Gateway;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::provider::GeminiProvider;
+use crate::provider::{GeminiProvider, Provider};
 
 pub const RETAIN_DAILY_LOG_FILES: usize = 2;
 
@@ -184,25 +185,81 @@ fn dated_log_path(log_path: &Path, day: NaiveDate) -> PathBuf {
 fn collect_log_history(log_path: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut history = list_daily_log_files(log_path)?;
     history.sort_by_key(|(day, _)| *day);
-    let mut out = history.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+    let mut out = history
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
     if log_path.exists() {
         out.push(log_path.to_path_buf());
     }
     Ok(out)
 }
 
-pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
-    let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
-    let loaded = LoadedConfig::load(cli.workspace.as_deref())
-        .wrap_err("failed to load global/workspace configuration")?;
+#[async_trait]
+pub(crate) trait ProviderFactory: Send + Sync {
+    async fn create_provider(&self, loaded: &LoadedConfig)
+    -> color_eyre::Result<Arc<dyn Provider>>;
+}
 
-    let provider: Arc<dyn crate::provider::Provider> = match loaded.global.provider.kind {
-        ProviderKind::Gemini => {
-            Arc::new(GeminiProvider::from_config(loaded.global.provider.clone()))
+#[async_trait]
+pub(crate) trait MemoryFactory: Send + Sync {
+    async fn create_memory(
+        &self,
+        agent: &AgentEntryConfig,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<MemoryStore>;
+}
+
+#[async_trait]
+pub(crate) trait ChannelFactory: Send + Sync {
+    async fn create_channels(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>>;
+}
+
+pub(crate) struct RuntimeDependencies {
+    pub provider_factory: Arc<dyn ProviderFactory>,
+    pub memory_factory: Arc<dyn MemoryFactory>,
+    pub channel_factory: Arc<dyn ChannelFactory>,
+}
+
+impl Default for RuntimeDependencies {
+    fn default() -> Self {
+        Self {
+            provider_factory: Arc::new(DefaultProviderFactory),
+            memory_factory: Arc::new(DefaultMemoryFactory),
+            channel_factory: Arc::new(DefaultChannelFactory),
         }
-    };
-    let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
-    for agent in &loaded.global.agents.list {
+    }
+}
+
+struct DefaultProviderFactory;
+
+#[async_trait]
+impl ProviderFactory for DefaultProviderFactory {
+    async fn create_provider(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<Arc<dyn Provider>> {
+        let provider: Arc<dyn Provider> = match loaded.global.provider.kind {
+            ProviderKind::Gemini => {
+                Arc::new(GeminiProvider::from_config(loaded.global.provider.clone()))
+            }
+        };
+        Ok(provider)
+    }
+}
+
+struct DefaultMemoryFactory;
+
+#[async_trait]
+impl MemoryFactory for DefaultMemoryFactory {
+    async fn create_memory(
+        &self,
+        agent: &AgentEntryConfig,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<MemoryStore> {
         let (memory_dir, short_term_path, long_term_path) =
             agent_workspace_memory_paths(&agent.workspace);
         fs::create_dir_all(&memory_dir).wrap_err_with(|| {
@@ -212,7 +269,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 memory_dir.display()
             )
         })?;
-        let memory = MemoryStore::new(
+        MemoryStore::new(
             &short_term_path,
             &long_term_path,
             &loaded.global.database,
@@ -224,12 +281,57 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 "failed to initialize sqlite memory store for agent '{}'",
                 agent.id
             )
-        })?;
+        })
+    }
+}
+
+struct DefaultChannelFactory;
+
+#[async_trait]
+impl ChannelFactory for DefaultChannelFactory {
+    async fn create_channels(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        for kind in &loaded.global.gateway.channels {
+            let channel: Arc<dyn Channel> = match kind {
+                GatewayChannelKind::Discord => Arc::new(
+                    DiscordChannel::from_config(&loaded.global.discord)
+                        .await
+                        .wrap_err("failed to initialize discord channel")?,
+                ),
+                GatewayChannelKind::Logging => {
+                    Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
+                }
+            };
+            channels.insert(*kind, channel);
+        }
+        Ok(channels)
+    }
+}
+
+pub(crate) struct RuntimeState {
+    pub gateway: Gateway,
+    pub runtimes: HashMap<String, AgentRuntime>,
+    pub safe_error_reply: String,
+}
+
+pub(crate) async fn assemble_runtime_state(
+    cli: &Cli,
+    loaded: &LoadedConfig,
+    app_paths: &AppPaths,
+    deps: &RuntimeDependencies,
+) -> color_eyre::Result<RuntimeState> {
+    let provider = deps.provider_factory.create_provider(loaded).await?;
+
+    let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
+    for agent in &loaded.global.agents.list {
+        let memory = deps.memory_factory.create_memory(agent, loaded).await?;
         memory_by_agent.insert(agent.id.clone(), memory);
     }
 
-    let (gateway_tx, gateway_rx) =
-        tokio::sync::mpsc::channel::<InboundMessage>(1_024);
+    let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let summon_agents: HashMap<String, std::path::PathBuf> = loaded
         .global
@@ -289,94 +391,109 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         );
     }
 
-    let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
-    for kind in &loaded.global.gateway.channels {
-        let channel: Arc<dyn Channel> = match kind {
-            GatewayChannelKind::Discord => Arc::new(
-                DiscordChannel::from_config(&loaded.global.discord)
-                    .await
-                    .wrap_err("failed to initialize discord channel")?,
-            ),
-            GatewayChannelKind::Logging => {
-                Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
-            }
-        };
-        channels.insert(*kind, channel);
-    }
+    let channels = deps.channel_factory.create_channels(loaded).await?;
     let gateway = Gateway::new(channels, gateway_tx, gateway_rx);
 
-    let safe_error_reply = loaded.global.runtime.safe_error_reply.clone();
-    info!(agent_count = runtimes.len(), "runtime initialized");
+    Ok(RuntimeState {
+        gateway,
+        runtimes,
+        safe_error_reply: loaded.global.runtime.safe_error_reply.clone(),
+    })
+}
+
+pub(crate) async fn handle_inbound_once(
+    state: &RuntimeState,
+    inbound: InboundMessage,
+) -> color_eyre::Result<()> {
+    let memory_session_id = format!("{}:{}", inbound.channel_id, inbound.target_agent_id);
+    let Some(runtime) = state.runtimes.get(&inbound.target_agent_id) else {
+        tracing::error!(
+            target_agent_id = %inbound.target_agent_id,
+            channel_id = %inbound.channel_id,
+            "dropping message due to unknown routed agent"
+        );
+        if inbound.invoke
+            && let Err(err) = state
+                .gateway
+                .send_message(
+                    &inbound,
+                    "I couldn't route that message due to a configuration error.",
+                )
+                .await
+        {
+            tracing::error!(error = %err, "failed to send unknown-agent route reply");
+        }
+        return Ok(());
+    };
+
+    if !inbound.invoke {
+        tracing::debug!(
+            session_id = %memory_session_id,
+            channel_id = %inbound.channel_id,
+            guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
+            user_id = %inbound.user_id,
+            "recording passive channel context message"
+        );
+        if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
+            tracing::error!(error = %err, "failed to persist passive context message");
+        }
+        return Ok(());
+    }
+
+    if inbound.user_id != "system"
+        && let Err(err) = state.gateway.broadcast_typing(&inbound).await
+    {
+        tracing::warn!(error = %err, "failed to broadcast typing");
+    }
+    tracing::debug!(
+        session_id = %memory_session_id,
+        channel_id = %inbound.channel_id,
+        guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
+        is_dm = inbound.is_dm,
+        user_id = %inbound.user_id,
+        mentioned_bot = inbound.mentioned_bot,
+        target_agent_id = %inbound.target_agent_id,
+        "dispatching inbound message to agent"
+    );
+
+    match runtime.run(&inbound, &memory_session_id).await {
+        Ok(reply) => {
+            if let Err(err) = state.gateway.send_message(&inbound, &reply).await {
+                tracing::error!(error = %err, "failed to send channel response");
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "agent execution failed");
+            if let Err(send_err) = state
+                .gateway
+                .send_message(&inbound, &state.safe_error_reply)
+                .await
+            {
+                tracing::error!(error = %send_err, "failed to send safe error reply");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
+    let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
+    let loaded = LoadedConfig::load(cli.workspace.as_deref())
+        .wrap_err("failed to load global/workspace configuration")?;
+    let deps = RuntimeDependencies::default();
+    let state = assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?;
+
+    info!(agent_count = state.runtimes.len(), "runtime initialized");
     loop {
-        let inbound = match gateway.next_message().await {
+        let inbound = match state.gateway.next_message().await {
             Ok(msg) => msg,
             Err(err) => {
                 tracing::error!(error = %err, "gateway listen failed");
                 continue;
             }
         };
-        let memory_session_id = format!("{}:{}", inbound.channel_id, inbound.target_agent_id);
-        let Some(runtime) = runtimes.get(&inbound.target_agent_id) else {
-            tracing::error!(
-                target_agent_id = %inbound.target_agent_id,
-                channel_id = %inbound.channel_id,
-                "dropping message due to unknown routed agent"
-            );
-            if inbound.invoke
-                && let Err(err) = gateway
-                    .send_message(
-                        &inbound,
-                        "I couldn't route that message due to a configuration error.",
-                    )
-                    .await
-            {
-                tracing::error!(error = %err, "failed to send unknown-agent route reply");
-            }
-            continue;
-        };
-
-        if !inbound.invoke {
-            tracing::debug!(
-                session_id = %memory_session_id,
-                channel_id = %inbound.channel_id,
-                guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-                user_id = %inbound.user_id,
-                "recording passive channel context message"
-            );
-            if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
-                tracing::error!(error = %err, "failed to persist passive context message");
-            }
-            continue;
-        }
-
-        if inbound.user_id != "system"
-            && let Err(err) = gateway.broadcast_typing(&inbound).await
-        {
-            tracing::warn!(error = %err, "failed to broadcast typing");
-        }
-        tracing::debug!(
-            session_id = %memory_session_id,
-            channel_id = %inbound.channel_id,
-            guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-            is_dm = inbound.is_dm,
-            user_id = %inbound.user_id,
-            mentioned_bot = inbound.mentioned_bot,
-            target_agent_id = %inbound.target_agent_id,
-            "dispatching inbound message to agent"
-        );
-
-        match runtime.run(&inbound, &memory_session_id).await {
-            Ok(reply) => {
-                if let Err(err) = gateway.send_message(&inbound, &reply).await {
-                    tracing::error!(error = %err, "failed to send channel response");
-                }
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "agent execution failed");
-                if let Err(send_err) = gateway.send_message(&inbound, &safe_error_reply).await {
-                    tracing::error!(error = %send_err, "failed to send safe error reply");
-                }
-            }
+        if let Err(err) = handle_inbound_once(&state, inbound).await {
+            tracing::error!(error = %err, "failed to process inbound message");
         }
     }
 }
@@ -465,8 +582,8 @@ pub fn show_logs(cli: &Cli, follow: bool) -> color_eyre::Result<()> {
 
     if !follow {
         for path in history {
-            let content =
-                fs::read_to_string(&path).wrap_err_with(|| format!("failed to read {}", path.display()))?;
+            let content = fs::read_to_string(&path)
+                .wrap_err_with(|| format!("failed to read {}", path.display()))?;
             print!("{content}");
         }
         return Ok(());
@@ -787,7 +904,8 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        collect_log_history, dated_log_path, prune_daily_logs, query_long_memory, query_short_memory,
+        collect_log_history, dated_log_path, prune_daily_logs, query_long_memory,
+        query_short_memory,
     };
 
     fn temp_db_path(prefix: &str) -> PathBuf {

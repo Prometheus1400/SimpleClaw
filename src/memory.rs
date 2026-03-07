@@ -17,7 +17,7 @@ use crate::paths::AppPaths;
 pub struct MemoryStore {
     pool: Pool,
     long_term_pool: Pool,
-    embedder: Arc<Mutex<TextEmbedding>>,
+    embedder: Option<Arc<Mutex<TextEmbedding>>>,
 }
 
 const MEMORIZE_DEDUPE_WINDOW_SECS: i64 = 300;
@@ -85,6 +85,25 @@ impl MemoryStore {
         db_config: &DatabaseConfig,
         _embedding_config: &EmbeddingConfig,
     ) -> Result<Self, FrameworkError> {
+        let paths = AppPaths::resolve()?;
+        paths.ensure_fastembed_cache_dir()?;
+        Self::new_with_cache_dir(
+            short_term_path,
+            long_term_path,
+            db_config,
+            _embedding_config,
+            &paths.fastembed_cache_dir,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_cache_dir(
+        short_term_path: &Path,
+        long_term_path: &Path,
+        db_config: &DatabaseConfig,
+        _embedding_config: &EmbeddingConfig,
+        fastembed_cache_dir: &Path,
+    ) -> Result<Self, FrameworkError> {
         register_sqlite_vec()?;
 
         let cfg = PoolConfig::new(short_term_path);
@@ -96,17 +115,43 @@ impl MemoryStore {
             .create_pool(Runtime::Tokio1)
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
 
-        let paths = AppPaths::resolve()?;
-        paths.ensure_fastembed_cache_dir()?;
+        std::fs::create_dir_all(fastembed_cache_dir)?;
         let mut embedder_options = InitOptions::default();
-        embedder_options.cache_dir = paths.fastembed_cache_dir.clone();
+        embedder_options.cache_dir = fastembed_cache_dir.to_path_buf();
         let embedder = TextEmbedding::try_new(embedder_options)
             .map_err(|e| FrameworkError::Config(format!("failed to initialize embedder: {e}")))?;
 
         let this = Self {
             pool,
             long_term_pool,
-            embedder: Arc::new(Mutex::new(embedder)),
+            embedder: Some(Arc::new(Mutex::new(embedder))),
+        };
+
+        this.init_schema(db_config).await?;
+        this.init_long_term_schema(db_config).await?;
+        Ok(this)
+    }
+
+    pub(crate) async fn new_without_embedder(
+        short_term_path: &Path,
+        long_term_path: &Path,
+        db_config: &DatabaseConfig,
+    ) -> Result<Self, FrameworkError> {
+        register_sqlite_vec()?;
+
+        let cfg = PoolConfig::new(short_term_path);
+        let pool = cfg
+            .create_pool(Runtime::Tokio1)
+            .map_err(|e| FrameworkError::Config(e.to_string()))?;
+        let long_term_cfg = PoolConfig::new(long_term_path);
+        let long_term_pool = long_term_cfg
+            .create_pool(Runtime::Tokio1)
+            .map_err(|e| FrameworkError::Config(e.to_string()))?;
+
+        let this = Self {
+            pool,
+            long_term_pool,
+            embedder: None,
         };
 
         this.init_schema(db_config).await?;
@@ -276,7 +321,7 @@ impl MemoryStore {
         config: &MemoryPreinjectConfig,
     ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError> {
         let config = config.normalized();
-        let query_embedding = embed_text(&self.embedder, query).await?;
+        let query_embedding = embed_text(self.embedder_ref()?, query).await?;
         let _ = session_id;
 
         let sql_limit = (config.top_k * 3).max(1) as i64;
@@ -344,7 +389,7 @@ impl MemoryStore {
 
         let threshold = similarity_threshold.clamp(0.0, 1.0);
         let max_matches = max_matches.clamp(1, 50);
-        let query_embedding = embed_text(&self.embedder, trimmed).await?;
+        let query_embedding = embed_text(self.embedder_ref()?, trimmed).await?;
         let normalized_kind = kind_filter
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -419,12 +464,8 @@ impl MemoryStore {
                     let tx = conn.transaction()?;
                     let mut count = 0usize;
                     for id in &ids {
-                        count +=
-                            tx.execute("DELETE FROM ltm_facts WHERE id = ?1", params![id])?;
-                        tx.execute(
-                            "DELETE FROM ltm_facts_vec WHERE fact_id = ?1",
-                            params![id],
-                        )?;
+                        count += tx.execute("DELETE FROM ltm_facts WHERE id = ?1", params![id])?;
+                        tx.execute("DELETE FROM ltm_facts_vec WHERE fact_id = ?1", params![id])?;
                     }
                     tx.commit()?;
                     Ok::<usize, rusqlite::Error>(count)
@@ -531,7 +572,7 @@ impl MemoryStore {
             return Ok(MemorizeResult::Duplicate);
         }
 
-        let embedding = embed_text(&self.embedder, trimmed).await?;
+        let embedding = embed_text(self.embedder_ref()?, trimmed).await?;
         let blob = encode_f32_blob(&embedding);
 
         // Check for a semantically similar existing fact to supersede
@@ -657,6 +698,16 @@ impl MemoryStore {
     }
 }
 
+impl MemoryStore {
+    fn embedder_ref(&self) -> Result<&Arc<Mutex<TextEmbedding>>, FrameworkError> {
+        self.embedder.as_ref().ok_or_else(|| {
+            FrameworkError::Config(
+                "embedding model is unavailable; semantic memory features are disabled".to_owned(),
+            )
+        })
+    }
+}
+
 fn has_recent_long_term_fact(
     conn: &rusqlite::Connection,
     kind: &str,
@@ -679,7 +730,14 @@ fn register_sqlite_vec() -> Result<(), FrameworkError> {
     static RESULT: OnceLock<Result<(), i32>> = OnceLock::new();
 
     let result = RESULT.get_or_init(|| unsafe {
-        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<*const (), unsafe extern "C" fn(*mut rusqlite::ffi::sqlite3, *mut *mut i8, *const rusqlite::ffi::sqlite3_api_routines) -> i32>(
+        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
         if rc == rusqlite::ffi::SQLITE_OK {
