@@ -189,13 +189,7 @@ fn build_gemini_contents(history: &[Message]) -> Vec<Value> {
 impl Provider for GeminiProvider {
     #[tracing::instrument(
         name = "provider.generate",
-        skip(self, system_prompt, history, tools),
-        fields(
-            provider = "gemini",
-            model = %self.config.model,
-            history_len = history.len(),
-            tool_count = tools.len()
-        )
+        skip(self, system_prompt, history, tools)
     )]
     async fn generate(
         &self,
@@ -231,11 +225,7 @@ impl Provider for GeminiProvider {
                 "functionDeclarations": function_declarations
             }]
         });
-        debug!(
-            status = "started",
-            system_prompt_chars = system_prompt.chars().count(),
-            "provider request"
-        );
+        debug!(status = "started", "provider request");
 
         let response_value = self
             .client
@@ -330,8 +320,6 @@ impl Provider for GeminiProvider {
         debug!(
             status = "completed",
             elapsed_ms = request_started.elapsed().as_millis() as u64,
-            output_text = output_text.is_some(),
-            tool_call_count = tool_calls.len(),
             "provider request"
         );
 

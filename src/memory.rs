@@ -255,15 +255,12 @@ impl MemoryStore {
         debug!(
             status = "started",
             session_id = %session_id,
-            role,
-            content_chars = content.chars().count(),
             "memory append_message"
         );
         let now = chrono::Utc::now().to_rfc3339();
         let session_for_sessions = session_id.to_owned();
         let session_for_messages = session_id.to_owned();
         let role = role.to_owned();
-        let role_for_log = role.clone();
         let content_owned = content.to_owned();
         let username_owned = username
             .map(str::trim)
@@ -299,7 +296,6 @@ impl MemoryStore {
         debug!(
             status = "completed",
             session_id = %session_id,
-            role = %role_for_log,
             "memory append_message"
         );
 
@@ -346,9 +342,6 @@ impl MemoryStore {
         debug!(
             status = "started",
             session_id = %session_id,
-            query_preview = %crate::telemetry::sanitize_preview(query, 120),
-            top_k = config.top_k,
-            min_score = config.min_score,
             "memory preinject query"
         );
         let config = config.normalized();
@@ -404,7 +397,6 @@ impl MemoryStore {
         debug!(
             status = "completed",
             session_id = %session_id,
-            selected_hits = hits.len(),
             elapsed_ms = started.elapsed().as_millis() as u64,
             "memory preinject query"
         );
@@ -567,8 +559,6 @@ impl MemoryStore {
         debug!(
             status = "completed",
             session_id = %session_id,
-            limit,
-            returned_rows = rows.len(),
             "memory recent_messages"
         );
         Ok(rows)
@@ -841,55 +831,26 @@ fn rank_preinject_hits(
     let mut out = Vec::new();
     for item in candidates {
         if item.raw_similarity < normalized.min_score {
-            trace!(
-                store = %memory_store_name(item.store),
-                final_score = item.final_score,
-                raw_similarity = item.raw_similarity,
-                min_score = normalized.min_score,
-                "long-term memory pre-injection candidate filtered by raw_similarity min_score"
-            );
+            trace!(status = "filtered_by_min_score", "memory preinject candidate");
             continue;
         }
         let key = normalize_memory_key(&item.content);
         if key.is_empty() {
-            trace!(
-                store = %memory_store_name(item.store),
-                final_score = item.final_score,
-                "long-term memory pre-injection candidate filtered by empty content"
-            );
+            trace!(status = "filtered_empty_content", "memory preinject candidate");
             continue;
         }
         if !dedupe.insert(key) {
-            trace!(
-                store = %memory_store_name(item.store),
-                final_score = item.final_score,
-                raw_similarity = item.raw_similarity,
-                "long-term memory pre-injection candidate filtered by dedupe"
-            );
+            trace!(status = "filtered_dedupe", "memory preinject candidate");
             continue;
         }
-        trace!(
-            store = %memory_store_name(item.store),
-            final_score = item.final_score,
-            raw_similarity = item.raw_similarity,
-            "long-term memory pre-injection candidate selected"
-        );
+        trace!(status = "selected", "memory preinject candidate");
         out.push(item);
         if out.len() >= normalized.top_k as usize {
-            trace!(
-                top_k = normalized.top_k,
-                "long-term memory pre-injection reached top_k"
-            );
+            trace!(status = "top_k_reached", "memory preinject candidate");
             break;
         }
     }
     out
-}
-
-fn memory_store_name(store: MemoryHitStore) -> &'static str {
-    match store {
-        MemoryHitStore::LongTerm => "long-term",
-    }
 }
 
 fn normalize_memory_key(value: &str) -> String {

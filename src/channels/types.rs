@@ -22,6 +22,7 @@ pub struct InboundMessage {
     pub is_dm: bool,
     pub user_id: String,
     pub username: String,
+    #[allow(dead_code)]
     pub mentioned_bot: bool,
     pub invoke: bool,
     pub content: String,

@@ -26,6 +26,7 @@ use color_eyre::eyre::WrapErr;
 use std::str::FromStr;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::{Directive, LevelFilter};
+use tracing_subscriber::prelude::*;
 
 use crate::cli::{AgentAction, Cli, Command, ListAction, SystemAction};
 use crate::config::{GlobalConfig, LogLevel, ProviderKind};
@@ -177,12 +178,36 @@ fn init_tracing(cli: &Cli) -> color_eyre::Result<()> {
             paths.log_path.clone(),
             crate::run::RETAIN_DAILY_LOG_FILES,
         )?;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(move || writer.clone())
+        let json_writer = crate::run::RotatingLogWriter::new(
+            crate::run::json_log_path(&paths.log_path),
+            crate::run::RETAIN_DAILY_LOG_FILES,
+        )?;
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().compact().with_writer(move || writer.clone()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .flatten_event(true)
+                    .with_span_list(false)
+                    .with_current_span(true)
+                    .with_writer(move || json_writer.clone()),
+            )
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().compact())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .flatten_event(true)
+                    .with_span_list(false)
+                    .with_current_span(true)
+                    .with_writer(std::io::stderr),
+            )
+            .init();
     }
     Ok(())
 }

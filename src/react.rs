@@ -5,57 +5,52 @@ use crate::tools::{ActiveTools, ToolCtx};
 use std::time::Instant;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
-const FINAL_OUTPUT_PREVIEW_CHARS: usize = 120;
 #[cfg(test)]
 const REDACTED: &str = "***REDACTED***";
 
-#[allow(clippy::too_many_arguments)]
+/// Bundles the dependencies and identity needed for a single ReAct loop execution.
+pub struct ReactContext<'a> {
+    pub provider: &'a dyn Provider,
+    pub dispatcher: &'a dyn ToolDispatcher,
+    pub tool_ctx: &'a ToolCtx,
+    pub active_tools: &'a ActiveTools,
+    pub system_prompt: &'a str,
+    pub agent_id: &'a str,
+    pub session_id: &'a str,
+    pub max_steps: u32,
+}
+
 #[tracing::instrument(
     name = "react.loop",
-    skip(provider, dispatcher, tool_ctx, active_tools, system_prompt, history),
-    fields(session_id = %session_id, agent_id = %agent_id, max_steps)
+    skip(ctx, history),
+    fields(session_id = %ctx.session_id, agent_id = %ctx.agent_id)
 )]
 pub async fn run_loop(
-    provider: &dyn Provider,
-    dispatcher: &dyn ToolDispatcher,
-    tool_ctx: &ToolCtx,
-    active_tools: &ActiveTools,
-    system_prompt: &str,
-    agent_id: &str,
-    session_id: &str,
+    ctx: &ReactContext<'_>,
     mut history: Vec<Message>,
-    max_steps: u32,
 ) -> Result<String, FrameworkError> {
-    let definitions = active_tools.definitions();
-    let tool_names = active_tools.names();
+    let definitions = ctx.active_tools.definitions();
     let run_started = Instant::now();
-    let extra_instructions = dispatcher.prompt_instructions(&definitions);
+    let extra_instructions = ctx.dispatcher.prompt_instructions(&definitions);
     let effective_system_prompt = if extra_instructions.is_empty() {
-        system_prompt.to_owned()
+        ctx.system_prompt.to_owned()
     } else {
-        format!("{system_prompt}{extra_instructions}")
+        format!("{}{extra_instructions}", ctx.system_prompt)
     };
 
-    let tool_specs = if dispatcher.should_send_tool_specs() {
+    let tool_specs = if ctx.dispatcher.should_send_tool_specs() {
         definitions
     } else {
         vec![]
     };
 
-    info!(
-        status = "started",
-        max_steps,
-        history_len = history.len(),
-        enabled_tools = ?tool_names,
-        "react loop"
-    );
+    info!(status = "started", "react loop");
 
-    for step_idx in 0..max_steps {
-        let step = step_idx + 1;
+    for _ in 0..ctx.max_steps {
         let provider_started = Instant::now();
-        let turn_span = info_span!("provider.turn", step, history_len = history.len());
+        let turn_span = info_span!("provider.turn");
         debug!(parent: &turn_span, status = "started", "provider turn");
-        let response = match provider
+        let response = match ctx.provider
             .generate(&effective_system_prompt, &history, &tool_specs)
             .instrument(turn_span.clone())
             .await
@@ -77,28 +72,24 @@ pub async fn run_loop(
             parent: &turn_span,
             status = "completed",
             elapsed_ms = provider_started.elapsed().as_millis() as u64,
-            tool_call_count = response.tool_calls.len(),
-            has_output_text = response.output_text.is_some(),
             "provider turn"
         );
 
-        match dispatcher.parse_response(&response) {
+        match ctx.dispatcher.parse_response(&response) {
             DispatchAction::ToolCalls(calls) => {
-                let results = dispatcher
-                    .execute_tool_calls(&calls, active_tools, tool_ctx, session_id)
+                let results = ctx.dispatcher
+                    .execute_tool_calls(&calls, ctx.active_tools, ctx.tool_ctx, ctx.session_id)
                     .instrument(turn_span.clone())
                     .await;
-                let messages = dispatcher.format_for_history(&calls, &results);
+                let messages = ctx.dispatcher.format_for_history(&calls, &results);
                 history.extend(messages);
                 continue;
             }
             DispatchAction::FinalResponse(text) => {
-                let output_preview = sanitize_log_preview(&text, FINAL_OUTPUT_PREVIEW_CHARS);
                 history.push(Message::text(Role::Assistant, text.clone()));
                 info!(
                     status = "completed",
                     elapsed_ms = run_started.elapsed().as_millis() as u64,
-                    output_preview = %output_preview,
                     "react loop"
                 );
                 return Ok(text);
@@ -112,13 +103,13 @@ pub async fn run_loop(
 
     warn!(
         status = "max_steps_reached",
-        max_steps,
         elapsed_ms = run_started.elapsed().as_millis() as u64,
         "react loop"
     );
     Ok("max_steps reached without final response".to_owned())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
     crate::telemetry::sanitize_preview(text, max_chars)
 }

@@ -44,9 +44,6 @@ impl PromptAssembler {
             .collect::<Result<Vec<_>, FrameworkError>>()?;
         debug!(
             status = "completed",
-            workspace = %workspace.display(),
-            layer_count = layers.len(),
-            present_layers = layers.iter().filter(|layer| layer.exists && layer.bytes > 0).count(),
             "prompt inspect"
         );
         Ok(layers)
@@ -67,10 +64,7 @@ impl PromptAssembler {
         let assembled = sections.join("\n\n");
         debug!(
             status = "completed",
-            workspace = %workspace.display(),
             elapsed_ms = started.elapsed().as_millis() as u64,
-            section_count = sections.len(),
-            prompt_chars = assembled.chars().count(),
             "prompt assemble"
         );
         Ok(assembled)

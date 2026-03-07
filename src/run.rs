@@ -19,8 +19,8 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tracing::{Instrument, info, info_span};
 
 use crate::agent::{
-    AgentRuntime, build_tool_registry_for_agent, load_agent_config_for_workspace,
-    load_system_prompt_for_workspace,
+    AgentRuntime, AgentRuntimeConfig, build_tool_registry_for_agent,
+    load_agent_config_for_workspace, load_system_prompt_for_workspace,
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::{Cli, MemoryMode};
@@ -32,6 +32,10 @@ use crate::provider::{GeminiProvider, Provider};
 
 pub const RETAIN_DAILY_LOG_FILES: usize = 2;
 const SESSION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
+
+pub(crate) fn json_log_path(log_path: &Path) -> PathBuf {
+    log_path.with_file_name("service.jsonl")
+}
 
 #[derive(Clone)]
 pub struct RotatingLogWriter {
@@ -431,7 +435,7 @@ where
                 workers.remove(&key);
             }
         }
-        .instrument(info_span!("session.worker", session_id = %worker_key, worker_id)))
+        .instrument(info_span!("session.worker", session_id = %worker_key)))
         ;
     }
 
@@ -497,31 +501,28 @@ pub(crate) async fn assemble_runtime_state(
         .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
         info!(
             agent_id = %agent.id,
-            requested_skills = tooling.skill_stats.requested,
-            loaded_skill_tools = tooling.skill_stats.loaded,
-            skipped_missing_skills = tooling.skill_stats.skipped_missing,
-            skipped_empty_skills = tooling.skill_stats.skipped_empty,
+            status = "loaded",
             "agent skill tools loaded"
         );
         runtimes.insert(
             agent.id.clone(),
-            AgentRuntime::new(
-                agent.id.clone(),
-                loaded.global.runtime.clone(),
+            AgentRuntime::new(AgentRuntimeConfig {
+                agent_id: agent.id.clone(),
+                runtime_config: loaded.global.runtime.clone(),
                 agent_config,
-                Arc::clone(&provider),
-                loaded.global.provider.kind,
+                provider: Arc::clone(&provider),
+                provider_kind: loaded.global.provider.kind,
                 memory,
-                summon_agents.clone(),
-                memory_by_agent.clone(),
-                agent.workspace.clone(),
-                app_paths.base_dir.clone(),
+                summon_agents: summon_agents.clone(),
+                summon_memories: memory_by_agent.clone(),
+                workspace_root: agent.workspace.clone(),
+                app_base_dir: app_paths.base_dir.clone(),
                 system_prompt,
-                tooling.tool_registry,
-                tooling.skill_tool_names,
-                cli.max_steps,
-                Some(gateway_tx.clone()),
-            ),
+                tool_registry: tooling.tool_registry,
+                skill_tool_names: tooling.skill_tool_names,
+                max_steps: cli.max_steps,
+                completion_tx: Some(gateway_tx.clone()),
+            }),
         );
     }
 
@@ -542,15 +543,11 @@ pub(crate) async fn assemble_runtime_state(
 
 #[tracing::instrument(
     name = "inbound.message",
-    skip(state),
+    skip(state, inbound),
     fields(
         trace_id = %inbound.trace_id,
         session_id = %inbound.session_key,
-        channel_id = %inbound.channel_id,
-        agent_id = %inbound.target_agent_id,
-        source_channel = %inbound.source_channel.as_str(),
-        user_id = %inbound.user_id,
-        invoke = inbound.invoke
+        agent_id = %inbound.target_agent_id
     )
 )]
 pub(crate) async fn handle_inbound_once(
@@ -564,7 +561,6 @@ pub(crate) async fn handle_inbound_once(
         tracing::error!(
             status = "dropped",
             error_kind = "unknown_agent",
-            target_agent_id = %inbound.target_agent_id,
             channel_id = %inbound.channel_id,
             "inbound message dropped"
         );
@@ -588,11 +584,7 @@ pub(crate) async fn handle_inbound_once(
     };
 
     if !inbound.invoke {
-        tracing::debug!(
-            status = "recording_context",
-            guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-            "passive inbound"
-        );
+        tracing::debug!(status = "recording_context", "passive inbound");
         if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
             tracing::error!(
                 status = "failed",
@@ -603,7 +595,7 @@ pub(crate) async fn handle_inbound_once(
         }
         info!(
             status = "completed",
-            latency_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = started.elapsed().as_millis() as u64,
             "inbound lifecycle"
         );
         return Ok(());
@@ -619,13 +611,7 @@ pub(crate) async fn handle_inbound_once(
             "typing broadcast failed"
         );
     }
-    tracing::debug!(
-        status = "dispatching",
-        guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-        is_dm = inbound.is_dm,
-        mentioned_bot = inbound.mentioned_bot,
-        "invoke inbound"
-    );
+    tracing::debug!(status = "dispatching", "invoke inbound");
 
     match runtime.run(&inbound, &memory_session_id).await {
         Ok(reply) => {
@@ -661,7 +647,7 @@ pub(crate) async fn handle_inbound_once(
     }
     info!(
         status = "completed",
-        latency_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms = started.elapsed().as_millis() as u64,
         "inbound lifecycle"
     );
     Ok(())
@@ -687,7 +673,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         })
     };
 
-    let service_span = info_span!("service.run", agent_count = state.runtimes.len());
+    let service_span = info_span!("service.run");
     let _service_entered = service_span.enter();
     info!(status = "started", "service runtime initialized");
     loop {
@@ -712,6 +698,7 @@ pub fn start_service() -> color_eyre::Result<()> {
         .wrap_err("failed to create runtime state directories")?;
     let pid_path = paths.pid_path;
     let log_path = paths.log_path;
+    let json_log_path = json_log_path(&log_path);
 
     if let Some(pid) = read_pid(&pid_path)? {
         if is_process_running(pid) {
@@ -739,6 +726,7 @@ pub fn start_service() -> color_eyre::Result<()> {
     println!("service started (pid {pid})");
     println!("pid file: {}", pid_path.display());
     println!("log file: {}", log_path.display());
+    println!("json log file: {}", json_log_path.display());
     Ok(())
 }
 
@@ -819,6 +807,7 @@ pub fn show_status(cli: &Cli) -> color_eyre::Result<()> {
     let state_dir = paths.run_dir;
     let pid_path = paths.pid_path;
     let log_path = paths.log_path;
+    let json_log_path = json_log_path(&log_path);
     let pid = read_pid(&pid_path)?;
 
     match pid {
@@ -836,6 +825,7 @@ pub fn show_status(cli: &Cli) -> color_eyre::Result<()> {
     println!("state dir: {}", state_dir.display());
     println!("pid file: {}", pid_path.display());
     println!("log file: {}", log_path.display());
+    println!("json log file: {}", json_log_path.display());
     if let Ok(metadata) = fs::metadata(&log_path) {
         println!("log size: {} bytes", metadata.len());
     }

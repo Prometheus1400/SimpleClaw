@@ -21,6 +21,25 @@ use crate::tools::{
     default_registry,
 };
 
+/// Groups the parameters needed to construct an `AgentRuntime`.
+pub struct AgentRuntimeConfig {
+    pub agent_id: String,
+    pub runtime_config: RuntimeConfig,
+    pub agent_config: AgentConfig,
+    pub provider: Arc<dyn Provider>,
+    pub provider_kind: ProviderKind,
+    pub memory: MemoryStore,
+    pub summon_agents: HashMap<String, PathBuf>,
+    pub summon_memories: HashMap<String, MemoryStore>,
+    pub workspace_root: PathBuf,
+    pub app_base_dir: PathBuf,
+    pub system_prompt: String,
+    pub tool_registry: Arc<ToolRegistry>,
+    pub skill_tool_names: Vec<String>,
+    pub max_steps: u32,
+    pub completion_tx: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
+}
+
 pub struct AgentRuntime {
     agent_id: String,
     runtime_config: RuntimeConfig,
@@ -41,58 +60,40 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        agent_id: String,
-        runtime_config: RuntimeConfig,
-        agent_config: AgentConfig,
-        provider: Arc<dyn Provider>,
-        provider_kind: ProviderKind,
-        memory: MemoryStore,
-        summon_agents: HashMap<String, PathBuf>,
-        summon_memories: HashMap<String, MemoryStore>,
-        workspace_root: PathBuf,
-        app_base_dir: PathBuf,
-        system_prompt: String,
-        tool_registry: Arc<ToolRegistry>,
-        skill_tool_names: Vec<String>,
-        max_steps: u32,
-        completion_tx: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
-    ) -> Self {
-        let dispatcher: Arc<dyn ToolDispatcher> = if provider_kind.supports_native_tools() {
-            Arc::new(NativeDispatcher)
-        } else {
-            Arc::new(XmlDispatcher)
-        };
+    pub fn new(config: AgentRuntimeConfig) -> Self {
+        let dispatcher: Arc<dyn ToolDispatcher> =
+            if config.provider_kind.supports_native_tools() {
+                Arc::new(NativeDispatcher)
+            } else {
+                Arc::new(XmlDispatcher)
+            };
         Self {
-            agent_id,
-            runtime_config,
-            agent_config,
-            provider,
+            agent_id: config.agent_id,
+            runtime_config: config.runtime_config,
+            agent_config: config.agent_config,
+            provider: config.provider,
             dispatcher,
-            memory,
-            tool_registry,
-            skill_tool_names,
+            memory: config.memory,
+            tool_registry: config.tool_registry,
+            skill_tool_names: config.skill_tool_names,
             process_manager: Arc::new(ProcessManager::new()),
-            summon_agents,
-            summon_memories,
-            workspace_root,
-            app_base_dir,
-            system_prompt,
-            max_steps,
-            completion_tx,
+            summon_agents: config.summon_agents,
+            summon_memories: config.summon_memories,
+            workspace_root: config.workspace_root,
+            app_base_dir: config.app_base_dir,
+            system_prompt: config.system_prompt,
+            max_steps: config.max_steps,
+            completion_tx: config.completion_tx,
         }
     }
 
     #[tracing::instrument(
         name = "agent.run",
-        skip(self),
+        skip(self, inbound, memory_session_id),
         fields(
             trace_id = %inbound.trace_id,
             session_id = %memory_session_id,
-            channel_id = %inbound.channel_id,
-            agent_id = %self.agent_id,
-            user_id = %inbound.user_id
+            agent_id = %self.agent_id
         )
     )]
     pub async fn run(
@@ -101,11 +102,7 @@ impl AgentRuntime {
         memory_session_id: &str,
     ) -> Result<String, FrameworkError> {
         let execution_started = Instant::now();
-        info!(
-            status = "started",
-            max_steps = self.max_steps.min(self.runtime_config.max_steps),
-            "agent execution"
-        );
+        info!(status = "started", "agent execution");
         let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);
         self.memory
             .append_message(
@@ -121,11 +118,7 @@ impl AgentRuntime {
             .await;
         let system_prompt =
             inject_caller_context(&system_prompt, &inbound.user_id, &inbound.username);
-        debug!(
-            status = "history_loaded",
-            history_len = history.len(),
-            "agent context"
-        );
+        debug!(status = "history_loaded", "agent context");
 
         let summon_service: Arc<dyn SummonService> = Arc::new(RuntimeSummonService {
             provider: Arc::clone(&self.provider),
@@ -182,18 +175,17 @@ impl AgentRuntime {
             }),
         };
 
-        let reply = match react::run_loop(
-            self.provider.as_ref(),
-            self.dispatcher.as_ref(),
-            &tool_ctx,
-            &active_tools,
-            &system_prompt,
-            &self.agent_id,
-            memory_session_id,
-            history,
-            self.max_steps.min(self.runtime_config.max_steps),
-        )
-        .await
+        let react_ctx = react::ReactContext {
+            provider: self.provider.as_ref(),
+            dispatcher: self.dispatcher.as_ref(),
+            tool_ctx: &tool_ctx,
+            active_tools: &active_tools,
+            system_prompt: &system_prompt,
+            agent_id: &self.agent_id,
+            session_id: memory_session_id,
+            max_steps: self.max_steps.min(self.runtime_config.max_steps),
+        };
+        let reply = match react::run_loop(&react_ctx, history).await
         {
             Ok(reply) => reply,
             Err(err) => {
@@ -214,7 +206,6 @@ impl AgentRuntime {
         info!(
             status = "completed",
             elapsed_ms = execution_started.elapsed().as_millis() as u64,
-            output_preview = %react::sanitize_log_preview(&reply, 120),
             "agent execution"
         );
         Ok(reply)
@@ -294,36 +285,11 @@ impl AgentRuntime {
         };
 
         if hits.is_empty() {
-            debug!(
-                status = "completed",
-                query_preview = %react::sanitize_log_preview(trimmed_query, 120),
-                min_score = config.min_score,
-                top_k = config.top_k,
-                selected_hits = 0usize,
-                "memory preinject"
-            );
+            debug!(status = "completed", "memory preinject");
             return self.system_prompt.clone();
         }
 
-        debug!(
-            status = "completed",
-            query_preview = %react::sanitize_log_preview(trimmed_query, 120),
-            selected_hits = hits.len(),
-            min_score = config.min_score,
-            top_k = config.top_k,
-            max_chars = config.max_chars,
-            "memory preinject"
-        );
-        for hit in &hits {
-            debug!(
-                status = "selected_hit",
-                label = %memory_hit_label(hit),
-                score = hit.final_score,
-                raw_similarity = hit.raw_similarity,
-                content_preview = %react::sanitize_log_preview(hit.content.trim(), 160),
-                "memory preinject"
-            );
-        }
+        debug!(status = "completed", "memory preinject");
 
         let section = format_preinjected_memory(&hits, config.max_chars as usize);
         if section.is_empty() {
@@ -465,18 +431,18 @@ impl SummonService for RuntimeSummonService {
             completion_route: None,
         };
 
-        let output = react::run_loop(
-            self.provider.as_ref(),
-            self.dispatcher.as_ref(),
-            &tool_ctx,
-            &active_tools,
-            &system_prompt,
-            target_agent,
+        let react_ctx = react::ReactContext {
+            provider: self.provider.as_ref(),
+            dispatcher: self.dispatcher.as_ref(),
+            tool_ctx: &tool_ctx,
+            active_tools: &active_tools,
+            system_prompt: &system_prompt,
+            agent_id: target_agent,
             session_id,
-            vec![Message::text(Role::User, handoff)],
-            self.max_steps,
-        )
-        .await?;
+            max_steps: self.max_steps,
+        };
+        let output = react::run_loop(&react_ctx, vec![Message::text(Role::User, handoff)])
+            .await?;
 
         Ok(output)
     }
@@ -505,18 +471,18 @@ impl TaskService for RuntimeTaskService {
             completion_route: None,
         };
 
-        react::run_loop(
-            self.provider.as_ref(),
-            self.dispatcher.as_ref(),
-            &tool_ctx,
-            &active_tools,
-            "You are a task worker. Complete the assigned task and return a concise result.",
-            "task-worker",
+        let react_ctx = react::ReactContext {
+            provider: self.provider.as_ref(),
+            dispatcher: self.dispatcher.as_ref(),
+            tool_ctx: &tool_ctx,
+            active_tools: &active_tools,
+            system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
+            agent_id: "task-worker",
             session_id,
-            vec![Message::text(Role::User, prompt.to_owned())],
-            self.max_steps,
-        )
-        .await
+            max_steps: self.max_steps,
+        };
+        react::run_loop(&react_ctx, vec![Message::text(Role::User, prompt.to_owned())])
+            .await
     }
 }
 
@@ -543,6 +509,7 @@ pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<Strin
 pub(crate) struct AgentTooling {
     pub tool_registry: Arc<ToolRegistry>,
     pub skill_tool_names: Vec<String>,
+    #[allow(dead_code)]
     pub skill_stats: SkillToolLoadStats,
 }
 

@@ -3,15 +3,11 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tracing::{debug, info_span, warn};
 
-use crate::config::SandboxMode;
 use crate::error::FrameworkError;
 use crate::provider::{Message, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
-use crate::react::sanitize_log_preview;
 use crate::tools::sandbox::execute_tool_with_sandbox;
 use crate::tools::{ActiveTools, ToolCtx};
 
-const TOOL_ARG_PREVIEW_CHARS: usize = 160;
-const TOOL_OBSERVATION_PREVIEW_CHARS: usize = 220;
 const OWNER_RESTRICTED_TOOLS: &[&str] =
     &["exec", "process", "forget", "summon", "edit", "memorize"];
 
@@ -46,24 +42,18 @@ pub trait ToolDispatcher: Send + Sync {
         session_id: &str,
     ) -> Vec<ToolExecutionResult> {
         let mut results = Vec::with_capacity(calls.len());
-        for (call_idx, call) in calls.iter().enumerate() {
+        for call in calls {
             let args_json = call.arguments.to_string();
-            let args_preview = sanitize_log_preview(&args_json, TOOL_ARG_PREVIEW_CHARS);
+            let args_preview: String = args_json.chars().take(200).collect();
             let tool_started = std::time::Instant::now();
-            let call_index = call_idx + 1;
             let call_span = info_span!(
                 "tool.call",
+                tool_name = %call.name,
+                tool_args = %args_preview,
                 session_id = %session_id,
-                call_index,
-                tool = %call.name,
-                sandbox_mode = %sandbox_mode_label(tool_ctx.sandbox)
             );
             let _call_entered = call_span.enter();
-            debug!(
-                status = "started",
-                args = %args_preview,
-                "tool call"
-            );
+            debug!(status = "started", "tool call");
 
             let (observation, status) = match active_tools.get(call.name.as_str()) {
                 Some(tool) => match enforce_tool_authorization(call.name.as_str(), tool_ctx) {
@@ -85,25 +75,23 @@ pub trait ToolDispatcher: Send + Sync {
                     "unknown",
                 ),
             };
-            let observation_preview =
-                sanitize_log_preview(&observation, TOOL_OBSERVATION_PREVIEW_CHARS);
             let elapsed_ms = tool_started.elapsed().as_millis() as u64;
 
             if status == "ok" {
                 debug!(
                     status = "completed",
+                    tool_name = %call.name,
+                    tool_args = %args_preview,
                     elapsed_ms,
-                    result_status = status,
-                    observation = %observation_preview,
                     "tool call"
                 );
             } else {
                 warn!(
                     status = "failed",
+                    tool_name = %call.name,
+                    tool_args = %args_preview,
                     error_kind = status,
                     elapsed_ms,
-                    result_status = status,
-                    observation = %observation_preview,
                     "tool call"
                 );
             }
@@ -127,13 +115,6 @@ pub trait ToolDispatcher: Send + Sync {
     fn prompt_instructions(&self, tools: &[ToolDefinition]) -> String;
 
     fn should_send_tool_specs(&self) -> bool;
-}
-
-fn sandbox_mode_label(mode: SandboxMode) -> &'static str {
-    match mode {
-        SandboxMode::On => "on",
-        SandboxMode::Off => "off",
-    }
 }
 
 fn enforce_tool_authorization(tool_name: &str, tool_ctx: &ToolCtx) -> Result<(), FrameworkError> {

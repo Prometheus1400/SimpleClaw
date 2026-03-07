@@ -31,7 +31,7 @@ impl Gateway {
             let channel = Arc::clone(channel);
             let inbound_tx = inbound_tx.clone();
             let inbound_policy = inbound_policy.clone();
-            let listener_span = info_span!("gateway.listen", source_channel = kind.as_str());
+            let listener_span = info_span!("gateway.listen");
             tokio::spawn(
                 async move {
                     loop {
@@ -59,7 +59,6 @@ impl Gateway {
                                         status = "dropped",
                                         error_kind = "queue_closed",
                                         error = %err,
-                                        channel = kind.as_str(),
                                         "inbound queue closed"
                                     );
                                     break;
@@ -70,8 +69,6 @@ impl Gateway {
                                     status = "retrying",
                                     error_kind = "channel_listen",
                                     error = %err,
-                                    channel = kind.as_str(),
-                                    backoff_ms = 1_000u64,
                                     "channel listener failed"
                                 );
                                 sleep(Duration::from_secs(1)).await;

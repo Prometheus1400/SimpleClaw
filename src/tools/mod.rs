@@ -274,9 +274,6 @@ impl ProcessManager {
         drop(sessions);
         debug!(
             status = "started",
-            process_backend = "host",
-            proc_session_id = %session_id,
-            command_preview = %crate::telemetry::sanitize_preview(command, 120),
             "process session"
         );
         Ok(session_id)
@@ -402,9 +399,6 @@ impl ProcessManager {
         drop(sessions);
         debug!(
             status = "started",
-            process_backend = "podman",
-            proc_session_id = %session_id,
-            command_preview = %crate::telemetry::sanitize_preview(command, 120),
             "process session"
         );
         Ok(session_id)
@@ -474,8 +468,7 @@ impl ProcessManager {
         let span = info_span!(
             "process.completion_watcher",
             trace_id = %trace_id,
-            session_id = %route.session_key,
-            proc_session_id = %session_id
+            session_id = %route.session_key
         );
         tokio::spawn(
             async move {
@@ -512,16 +505,10 @@ impl ProcessManager {
                             status = "failed",
                             error_kind = "completion_send",
                             error = %err,
-                            proc_session_id = %session_id,
                             "failed to send background process completion message"
                         );
                     } else {
-                        debug!(
-                            status = "completed",
-                            proc_session_id = %session_id,
-                            exit_code,
-                            "process completion watcher"
-                        );
+                        debug!(status = "completed", "process completion watcher");
                     }
                     break;
                 }
@@ -629,11 +616,10 @@ impl ProcessEntry {
                             self.finished_at = Some(Utc::now());
                         }
                     }
-                    Ok(out) => {
+                    Ok(_out) => {
                         tracing::warn!(
                             status = "failed",
                             error_kind = "podman_inspect",
-                            stderr = %String::from_utf8_lossy(&out.stderr),
                             "process poll"
                         );
                         self.status = ProcessStatus::Completed;
@@ -675,7 +661,6 @@ impl ProcessEntry {
                     tracing::warn!(
                         status = "failed",
                         error_kind = "podman_stop",
-                        stderr = %String::from_utf8_lossy(&output.stderr),
                         "process kill"
                     );
                 }
