@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use std::env;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use crate::config::SandboxMode;
 use crate::error::FrameworkError;
+use crate::tools::sandbox::{normalize_workspace_root, run_wasm_guest, workspace_guest_mount_path};
 use crate::tools::{Tool, ToolCtx};
 
 use super::common::parse_simple_text_arg;
@@ -35,9 +37,48 @@ impl Tool for ReadTool {
     ) -> Result<String, FrameworkError> {
         let raw_path = parse_simple_text_arg(args_json);
         let path = resolve_path_for_read(&raw_path, &ctx.workspace_root, ctx.sandbox)?;
+        if ctx.sandbox == SandboxMode::On {
+            let guest_path = host_path_to_workspace_guest_path(&path, &ctx.workspace_root)?;
+            let output = run_wasm_guest(
+                &ctx.workspace_root,
+                "read_guest.wasm",
+                &[guest_path],
+                &[],
+                Duration::from_secs(10),
+            )
+            .await?;
+            if output.exit_code != 0 {
+                return Err(FrameworkError::Tool(format!(
+                    "read guest failed: exit_code={} stderr={}",
+                    output.exit_code,
+                    output.stderr.trim()
+                )));
+            }
+            return Ok(output.stdout);
+        }
         let content = std::fs::read_to_string(path)?;
         Ok(content)
     }
+}
+
+fn host_path_to_workspace_guest_path(
+    host_path: &Path,
+    workspace_root: &Path,
+) -> Result<String, FrameworkError> {
+    let workspace_absolute = normalize_workspace_root(workspace_root)?;
+    let normalized_workspace = normalize_absolute_path(&workspace_absolute);
+    let normalized_path = normalize_absolute_path(host_path);
+    let relative = normalized_path
+        .strip_prefix(&normalized_workspace)
+        .map_err(|_| {
+            FrameworkError::Tool(format!(
+                "read path denied by sandbox: path={} workspace={}",
+                normalized_path.display(),
+                normalized_workspace.display()
+            ))
+        })?;
+    let guest_path = Path::new(workspace_guest_mount_path()).join(relative);
+    Ok(guest_path.to_string_lossy().into_owned())
 }
 
 pub(super) fn resolve_path_for_read(
@@ -62,7 +103,7 @@ pub(super) fn resolve_path_for_read(
     };
     let normalized_path = normalize_absolute_path(&absolute);
 
-    if sandbox == SandboxMode::Wasm {
+    if sandbox == SandboxMode::On {
         let workspace_absolute = if workspace_root.is_absolute() {
             workspace_root.to_path_buf()
         } else {
@@ -216,9 +257,10 @@ fn is_env_name_char(ch: char, first: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::resolve_path_for_read;
+    use super::{host_path_to_workspace_guest_path, resolve_path_for_read};
     use crate::config::SandboxMode;
 
     fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
@@ -234,7 +276,7 @@ mod tests {
         let workspace = unique_test_dir("workspace_relative");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let resolved = resolve_path_for_read("docs/file.txt", &workspace, SandboxMode::Wasm)
+        let resolved = resolve_path_for_read("docs/file.txt", &workspace, SandboxMode::On)
             .expect("path should resolve");
         assert_eq!(resolved, workspace.join("docs/file.txt"));
 
@@ -250,7 +292,7 @@ mod tests {
         let err = resolve_path_for_read(
             outside.to_string_lossy().as_ref(),
             &workspace,
-            SandboxMode::Wasm,
+            SandboxMode::On,
         )
         .expect_err("outside path should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
@@ -263,7 +305,7 @@ mod tests {
         let workspace = unique_test_dir("workspace_traversal");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let err = resolve_path_for_read("../outside.txt", &workspace, SandboxMode::Wasm)
+        let err = resolve_path_for_read("../outside.txt", &workspace, SandboxMode::On)
             .expect_err("parent traversal should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
 
@@ -325,5 +367,14 @@ mod tests {
 
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&env_root);
+    }
+
+    #[test]
+    fn host_path_maps_to_workspace_guest_path() {
+        let workspace = Path::new("/tmp/simpleclaw_ws");
+        let host_path = Path::new("/tmp/simpleclaw_ws/docs/file.txt");
+        let guest_path = host_path_to_workspace_guest_path(host_path, workspace)
+            .expect("host workspace path should map to guest mount path");
+        assert_eq!(guest_path, "/workspace/docs/file.txt");
     }
 }

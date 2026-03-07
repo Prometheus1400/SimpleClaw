@@ -136,6 +136,7 @@ impl AgentRuntime {
             workspace_root: self.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.runtime_config.owner_ids.clone(),
+            exec_container: self.runtime_config.exec_container.clone(),
             max_steps: self.max_steps.min(self.runtime_config.max_steps),
         });
 
@@ -145,6 +146,7 @@ impl AgentRuntime {
             workspace_root: self.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.runtime_config.owner_ids.clone(),
+            exec_container: self.runtime_config.exec_container.clone(),
             process_manager: Arc::clone(&self.process_manager),
             summon_service: Some(summon_service),
             task_service: Some(task_service),
@@ -375,6 +377,7 @@ struct RuntimeTaskService {
     workspace_root: PathBuf,
     user_id: String,
     owner_ids: Vec<String>,
+    exec_container: crate::config::ExecContainerConfig,
     max_steps: u32,
 }
 
@@ -417,6 +420,7 @@ impl SummonService for RuntimeSummonService {
             workspace_root: workspace.clone(),
             user_id: String::new(),
             owner_ids: Vec::new(),
+            exec_container: crate::config::ExecContainerConfig::default(),
             process_manager: Arc::clone(&self.process_manager),
             summon_service: None,
             task_service: None,
@@ -454,6 +458,7 @@ impl TaskService for RuntimeTaskService {
             workspace_root: self.workspace_root.clone(),
             user_id: self.user_id.clone(),
             owner_ids: self.owner_ids.clone(),
+            exec_container: self.exec_container.clone(),
             process_manager: Arc::clone(&self.process_manager),
             summon_service: None,
             task_service: None,

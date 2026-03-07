@@ -1,8 +1,11 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 
+use crate::config::SandboxMode;
 use crate::error::FrameworkError;
+use crate::tools::sandbox::run_wasm_guest;
 use crate::tools::{Tool, ToolCtx};
 
 use super::read::resolve_path_for_read;
@@ -50,6 +53,25 @@ impl Tool for EditTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
+        if ctx.sandbox == SandboxMode::On {
+            let output = run_wasm_guest(
+                &ctx.workspace_root,
+                "edit_guest.wasm",
+                &[],
+                args_json.as_bytes(),
+                Duration::from_secs(15),
+            )
+            .await?;
+            if output.exit_code != 0 {
+                return Err(FrameworkError::Tool(format!(
+                    "edit guest failed: exit_code={} stderr={}",
+                    output.exit_code,
+                    output.stderr.trim()
+                )));
+            }
+            return Ok(output.stdout);
+        }
+
         let args: EditArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
 
@@ -451,7 +473,7 @@ mod tests {
         let err = resolve_path_for_read(
             outside.join("secrets.txt").to_string_lossy().as_ref(),
             &workspace,
-            SandboxMode::Wasm,
+            SandboxMode::On,
         )
         .expect_err("outside path should be denied");
         assert!(err.to_string().contains("path denied by sandbox"));

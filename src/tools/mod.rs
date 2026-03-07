@@ -15,7 +15,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::config::{SandboxMode, ToolConfig};
+use crate::config::{ExecContainerConfig, SandboxMode, ToolConfig};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::provider::ToolDefinition;
@@ -42,6 +42,7 @@ pub struct ToolCtx {
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
+    pub exec_container: ExecContainerConfig,
     pub process_manager: Arc<ProcessManager>,
     pub summon_service: Option<Arc<dyn SummonService>>,
     pub task_service: Option<Arc<dyn TaskService>>,
