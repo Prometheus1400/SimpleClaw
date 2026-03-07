@@ -32,11 +32,9 @@ pub struct DynamicSkillTool {
 }
 
 impl DynamicSkillTool {
-    fn new(skill_id: &str, content: String, source_scope: &str) -> Self {
+    fn new(skill_id: &str, content: String, _source_scope: &str) -> Self {
         let name = format!("skill_{skill_id}");
-        let description = format!(
-            "Return raw SKILL.md markdown for skill `{skill_id}` ({source_scope} scope). Call when you need this skill's instructions."
-        );
+        let description = extract_description(&content, skill_id);
         Self {
             name,
             description,
@@ -126,6 +124,30 @@ pub fn load_skill_tools(
         tool_names,
         stats,
     })
+}
+
+/// Extract description from YAML frontmatter in SKILL.md content.
+fn extract_description(content: &str, skill_id: &str) -> String {
+    let fallback = || format!("Skill `{skill_id}` — call to retrieve its instructions.");
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return fallback();
+    }
+    let after_open = &trimmed[3..];
+    let Some(end) = after_open.find("\n---") else {
+        return fallback();
+    };
+    let frontmatter = &after_open[..end];
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("description:") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return value.to_owned();
+            }
+        }
+    }
+    fallback()
 }
 
 fn resolve_skill_path(
@@ -263,6 +285,34 @@ mod tests {
             other => panic!("expected config error, got {other}"),
         }
         let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn extract_description_from_frontmatter() {
+        let content = "---\ndescription: Do X and Y\n---\n# My Skill\nBody.";
+        let desc = extract_description(content, "test");
+        assert_eq!(desc, "Do X and Y");
+    }
+
+    #[test]
+    fn extract_description_from_quoted_frontmatter() {
+        let content = "---\ndescription: \"Quoted desc\"\n---\n# Skill\n";
+        let desc = extract_description(content, "test");
+        assert_eq!(desc, "Quoted desc");
+    }
+
+    #[test]
+    fn extract_description_fallback_no_frontmatter() {
+        let content = "# Just markdown\nNo frontmatter here.\n";
+        let desc = extract_description(content, "myskill");
+        assert_eq!(desc, "Skill `myskill` — call to retrieve its instructions.");
+    }
+
+    #[test]
+    fn extract_description_fallback_missing_field() {
+        let content = "---\ntitle: Something\n---\n# Skill\n";
+        let desc = extract_description(content, "myskill");
+        assert_eq!(desc, "Skill `myskill` — call to retrieve its instructions.");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

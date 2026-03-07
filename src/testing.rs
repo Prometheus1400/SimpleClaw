@@ -11,14 +11,16 @@ use tokio::sync::Mutex;
 
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
 use crate::cli::Cli;
-use crate::config::{AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig};
+use crate::config::{
+    AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig, ProviderKind,
+};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::provider::{Message, Provider, ProviderResponse, ToolDefinition};
+use crate::providers::{Message, Provider, ProviderResponse, ToolDefinition};
 use crate::run::{
-    ChannelFactory, MemoryFactory, ProviderFactory, RuntimeDependencies, assemble_runtime_state,
-    handle_inbound_once,
+    ChannelFactory, MemoryFactory, ProviderFactory, ProviderHandle, RuntimeDependencies,
+    assemble_runtime_state, handle_inbound_once,
 };
 
 /// Configuration for a single end-to-end roundtrip test run.
@@ -282,11 +284,21 @@ struct StaticProviderFactory {
 
 #[async_trait]
 impl ProviderFactory for StaticProviderFactory {
-    async fn create_provider(
+    async fn create_providers(
         &self,
         _loaded: &LoadedConfig,
-    ) -> color_eyre::Result<Arc<dyn Provider>> {
-        Ok(Arc::clone(&self.provider))
+    ) -> color_eyre::Result<HashMap<String, ProviderHandle>> {
+        Ok(HashMap::from([(
+            "default".to_owned(),
+            ProviderHandle {
+                provider: Arc::clone(&self.provider),
+                metadata: crate::providers::ProviderMetadata {
+                    kind: ProviderKind::Gemini,
+                    supports_native_tools: true,
+                    known_models: &[],
+                },
+            },
+        )]))
     }
 }
 

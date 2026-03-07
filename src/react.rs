@@ -1,6 +1,6 @@
 use crate::dispatch::{DispatchAction, ToolDispatcher};
 use crate::error::FrameworkError;
-use crate::provider::{Message, Provider, Role};
+use crate::providers::{Message, Provider, Role};
 use crate::tools::{ActiveTools, ToolCtx};
 use std::time::Instant;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -50,7 +50,8 @@ pub async fn run_loop(
         let provider_started = Instant::now();
         let turn_span = info_span!("provider.turn");
         debug!(parent: &turn_span, status = "started", "provider turn");
-        let response = match ctx.provider
+        let response = match ctx
+            .provider
             .generate(&effective_system_prompt, &history, &tool_specs)
             .instrument(turn_span.clone())
             .await
@@ -77,7 +78,8 @@ pub async fn run_loop(
 
         match ctx.dispatcher.parse_response(&response) {
             DispatchAction::ToolCalls(calls) => {
-                let results = ctx.dispatcher
+                let results = ctx
+                    .dispatcher
                     .execute_tool_calls(&calls, ctx.active_tools, ctx.tool_ctx, ctx.session_id)
                     .instrument(turn_span.clone())
                     .await;

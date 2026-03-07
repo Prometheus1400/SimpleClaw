@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use tracing::{debug, info_span, warn};
 
 use crate::error::FrameworkError;
-use crate::provider::{Message, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
+use crate::providers::{Message, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
 use crate::tools::sandbox::execute_tool_with_sandbox;
 use crate::tools::{ActiveTools, ToolCtx};
 

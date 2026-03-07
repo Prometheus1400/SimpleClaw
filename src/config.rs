@@ -14,7 +14,7 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
-    pub provider: ProviderConfig,
+    pub providers: ProvidersConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
@@ -34,6 +34,8 @@ pub struct GlobalConfig {
 pub struct AgentConfig {
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub sandbox: SandboxMode,
     #[serde(default)]
@@ -78,6 +80,7 @@ impl LoadedConfig {
                 })?;
             default_agent.workspace = workspace;
         }
+        validate_providers_config(&global.providers)?;
         validate_agents_config(&global.agents)?;
         reconcile_inbound_default_agent(&mut global.inbound, &global.agents);
         validate_gateway_config(&global.gateway)?;
@@ -90,7 +93,7 @@ impl LoadedConfig {
 impl GlobalConfig {
     fn resolve_secrets(&mut self, paths: &AppPaths) -> Result<(), FrameworkError> {
         let resolver = SecretResolver::new(paths)?;
-        self.provider.resolve_secrets(&resolver)?;
+        self.providers.resolve_secrets(&resolver)?;
         self.discord.resolve_secrets(&resolver)?;
         Ok(())
     }
@@ -142,6 +145,21 @@ fn validate_agents_config(agents: &AgentsConfig) -> Result<(), FrameworkError> {
         )));
     }
 
+    Ok(())
+}
+
+fn validate_providers_config(providers: &ProvidersConfig) -> Result<(), FrameworkError> {
+    if providers.entries.is_empty() {
+        return Err(FrameworkError::Config(
+            "providers.entries must include at least one provider".to_owned(),
+        ));
+    }
+    if !providers.entries.contains_key(&providers.default) {
+        return Err(FrameworkError::Config(format!(
+            "providers.default '{}' does not match any providers.entries key",
+            providers.default
+        )));
+    }
     Ok(())
 }
 
@@ -384,10 +402,69 @@ impl Default for DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProvidersConfig {
+    pub default: String,
+    pub entries: HashMap<String, ProviderEntryConfig>,
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        let default_key = default_provider_key();
+        let mut entries = HashMap::new();
+        entries.insert(
+            default_key.clone(),
+            ProviderEntryConfig::Gemini(GeminiProviderConfig::default()),
+        );
+        Self {
+            default: default_key,
+            entries,
+        }
+    }
+}
+
+impl ProvidersConfig {
+    fn resolve_secrets(&mut self, resolver: &SecretResolver) -> Result<(), FrameworkError> {
+        for (key, entry) in &mut self.entries {
+            entry.resolve_secrets(resolver, key)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderEntryConfig {
+    Gemini(GeminiProviderConfig),
+}
+
+impl ProviderEntryConfig {
+    pub fn kind(&self) -> ProviderKind {
+        match self {
+            Self::Gemini(_) => ProviderKind::Gemini,
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Gemini(config) => &config.model,
+        }
+    }
+
+    fn resolve_secrets(
+        &mut self,
+        resolver: &SecretResolver,
+        key: &str,
+    ) -> Result<(), FrameworkError> {
+        match self {
+            Self::Gemini(config) => config.resolve_secrets(resolver, key),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
-    #[serde(default = "default_provider_kind")]
-    pub kind: ProviderKind,
+pub struct GeminiProviderConfig {
     #[serde(default = "default_provider_model")]
     pub model: String,
     #[serde(default = "default_provider_api_base")]
@@ -396,10 +473,9 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
 }
 
-impl Default for ProviderConfig {
+impl Default for GeminiProviderConfig {
     fn default() -> Self {
         Self {
-            kind: default_provider_kind(),
             model: default_provider_model(),
             api_base: default_provider_api_base(),
             api_key: None,
@@ -407,15 +483,20 @@ impl Default for ProviderConfig {
     }
 }
 
-impl ProviderConfig {
-    fn resolve_secrets(&mut self, resolver: &SecretResolver) -> Result<(), FrameworkError> {
+impl GeminiProviderConfig {
+    fn resolve_secrets(
+        &mut self,
+        resolver: &SecretResolver,
+        key: &str,
+    ) -> Result<(), FrameworkError> {
         let Some(raw) = self.api_key.as_deref() else {
             return Ok(());
         };
-        let secret_name = parse_secret_reference("provider.api_key", raw)?;
-        let value = resolver.resolve(&secret_name).map_err(|err| {
-            FrameworkError::Config(format!("provider.api_key failed to resolve: {err}"))
-        })?;
+        let path = format!("providers.entries.{key}.api_key");
+        let secret_name = parse_secret_reference(&path, raw)?;
+        let value = resolver
+            .resolve(&secret_name)
+            .map_err(|err| FrameworkError::Config(format!("{path} failed to resolve: {err}")))?;
         self.api_key = Some(value);
         Ok(())
     }
@@ -610,7 +691,7 @@ pub enum SummonMode {
     Queued,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     #[default]
@@ -621,12 +702,6 @@ impl ProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gemini => "gemini",
-        }
-    }
-
-    pub fn supports_native_tools(self) -> bool {
-        match self {
-            Self::Gemini => true,
         }
     }
 }
@@ -826,8 +901,8 @@ fn default_pool_size() -> usize {
 fn default_busy_timeout_ms() -> u64 {
     5_000
 }
-fn default_provider_kind() -> ProviderKind {
-    ProviderKind::Gemini
+fn default_provider_key() -> String {
+    "default".to_owned()
 }
 fn default_provider_model() -> String {
     "gemini-2.0-flash".to_owned()
@@ -1197,20 +1272,19 @@ model: gemini-2.0-flash
 api_base: https://example.com
 api_key: "${secret:gemini_api_key}"
 "#;
-        let parsed = serde_yaml::from_str::<ProviderConfig>(yaml);
+        let parsed = serde_yaml::from_str::<ProviderEntryConfig>(yaml);
         assert!(parsed.is_err());
     }
 
     #[test]
     fn rejects_legacy_provider_api_key_env_field() {
         let yaml = r#"
-kind: gemini
 model: gemini-2.0-flash
 api_base: https://example.com
 api_key: "${secret:gemini_api_key}"
 api_key_env: GEMINI_API_KEY
 "#;
-        let parsed = serde_yaml::from_str::<ProviderConfig>(yaml);
+        let parsed = serde_yaml::from_str::<GeminiProviderConfig>(yaml);
         assert!(parsed.is_err());
     }
 
@@ -1408,21 +1482,26 @@ routing:
         let paths = test_paths(dir.clone());
 
         let mut global = GlobalConfig {
-            provider: ProviderConfig {
-                api_key: Some(format!("${{secret:{provider_env}}}")),
-                ..ProviderConfig::default()
-            },
             discord: DiscordConfig {
                 token: Some(format!("${{secret:{discord_env}}}")),
                 ..DiscordConfig::default()
             },
             ..GlobalConfig::default()
         };
+        if let Some(ProviderEntryConfig::Gemini(provider)) =
+            global.providers.entries.get_mut(&global.providers.default)
+        {
+            provider.api_key = Some(format!("${{secret:{provider_env}}}"));
+        }
 
         global
             .resolve_secrets(&paths)
             .expect("secret references should resolve");
-        assert_eq!(global.provider.api_key.as_deref(), Some("provider-secret"));
+        let api_key = match global.providers.entries.get(&global.providers.default) {
+            Some(ProviderEntryConfig::Gemini(provider)) => provider.api_key.as_deref(),
+            None => None,
+        };
+        assert_eq!(api_key, Some("provider-secret"));
         assert_eq!(global.discord.token.as_deref(), Some("discord-secret"));
 
         unsafe {
@@ -1439,21 +1518,22 @@ routing:
         let paths = test_paths(dir.clone());
 
         let mut global = GlobalConfig {
-            provider: ProviderConfig {
-                api_key: Some("plaintext-key".to_owned()),
-                ..ProviderConfig::default()
-            },
             discord: DiscordConfig {
                 token: Some("${secret:discord_token}".to_owned()),
                 ..DiscordConfig::default()
             },
             ..GlobalConfig::default()
         };
+        if let Some(ProviderEntryConfig::Gemini(provider)) =
+            global.providers.entries.get_mut(&global.providers.default)
+        {
+            provider.api_key = Some("plaintext-key".to_owned());
+        }
 
         let err = global.resolve_secrets(&paths).unwrap_err();
         assert!(
             err.to_string()
-                .contains("provider.api_key must use secret reference syntax")
+                .contains("providers.entries.default.api_key must use secret reference syntax")
         );
 
         let _ = fs::remove_dir_all(dir);

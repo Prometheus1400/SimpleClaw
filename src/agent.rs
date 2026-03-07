@@ -8,12 +8,12 @@ use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentConfig, ProviderKind, RuntimeConfig, ToolConfig};
+use crate::config::{AgentConfig, RuntimeConfig, ToolConfig};
 use crate::dispatch::{NativeDispatcher, ToolDispatcher, XmlDispatcher};
 use crate::error::FrameworkError;
 use crate::memory::{MemoryHitStore, MemoryPreinjectHit, MemoryStore};
 use crate::prompt::PromptAssembler;
-use crate::provider::{Message, Provider, Role};
+use crate::providers::{Message, Provider, Role};
 use crate::react;
 use crate::tools::skill::{SkillToolLoadStats, load_skill_tools};
 use crate::tools::{
@@ -27,7 +27,7 @@ pub struct AgentRuntimeConfig {
     pub runtime_config: RuntimeConfig,
     pub agent_config: AgentConfig,
     pub provider: Arc<dyn Provider>,
-    pub provider_kind: ProviderKind,
+    pub provider_supports_native_tools: bool,
     pub memory: MemoryStore,
     pub summon_agents: HashMap<String, PathBuf>,
     pub summon_memories: HashMap<String, MemoryStore>,
@@ -61,12 +61,11 @@ pub struct AgentRuntime {
 
 impl AgentRuntime {
     pub fn new(config: AgentRuntimeConfig) -> Self {
-        let dispatcher: Arc<dyn ToolDispatcher> =
-            if config.provider_kind.supports_native_tools() {
-                Arc::new(NativeDispatcher)
-            } else {
-                Arc::new(XmlDispatcher)
-            };
+        let dispatcher: Arc<dyn ToolDispatcher> = if config.provider_supports_native_tools {
+            Arc::new(NativeDispatcher)
+        } else {
+            Arc::new(XmlDispatcher)
+        };
         Self {
             agent_id: config.agent_id,
             runtime_config: config.runtime_config,
@@ -185,8 +184,7 @@ impl AgentRuntime {
             session_id: memory_session_id,
             max_steps: self.max_steps.min(self.runtime_config.max_steps),
         };
-        let reply = match react::run_loop(&react_ctx, history).await
-        {
+        let reply = match react::run_loop(&react_ctx, history).await {
             Ok(reply) => reply,
             Err(err) => {
                 error!(
@@ -441,8 +439,7 @@ impl SummonService for RuntimeSummonService {
             session_id,
             max_steps: self.max_steps,
         };
-        let output = react::run_loop(&react_ctx, vec![Message::text(Role::User, handoff)])
-            .await?;
+        let output = react::run_loop(&react_ctx, vec![Message::text(Role::User, handoff)]).await?;
 
         Ok(output)
     }
@@ -481,8 +478,11 @@ impl TaskService for RuntimeTaskService {
             session_id,
             max_steps: self.max_steps,
         };
-        react::run_loop(&react_ctx, vec![Message::text(Role::User, prompt.to_owned())])
-            .await
+        react::run_loop(
+            &react_ctx,
+            vec![Message::text(Role::User, prompt.to_owned())],
+        )
+        .await
     }
 }
 

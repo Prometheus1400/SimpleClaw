@@ -12,7 +12,7 @@ mod gateway;
 mod memory;
 mod paths;
 mod prompt;
-mod provider;
+mod providers;
 mod react;
 mod run;
 mod secrets;
@@ -29,8 +29,9 @@ use tracing_subscriber::filter::{Directive, LevelFilter};
 use tracing_subscriber::prelude::*;
 
 use crate::cli::{AgentAction, Cli, Command, ListAction, SystemAction};
-use crate::config::{GlobalConfig, LogLevel, ProviderKind};
+use crate::config::{GlobalConfig, LogLevel};
 use crate::paths::AppPaths;
+use crate::providers::ProviderRegistry;
 
 /// Run the CLI application: parse args, initialize tracing, and dispatch commands.
 pub async fn run() -> color_eyre::Result<()> {
@@ -78,13 +79,20 @@ pub async fn run() -> color_eyre::Result<()> {
 fn list_providers(cli: &Cli) -> color_eyre::Result<()> {
     let loaded = crate::config::LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load configuration for provider listing")?;
-    let configured = loaded.global.provider.kind;
-    for provider in known_providers() {
-        let label = provider.as_str();
-        if *provider == configured {
-            println!("{label} (configured)");
+    let mut entries = loaded
+        .global
+        .providers
+        .entries
+        .iter()
+        .collect::<Vec<(&String, &crate::config::ProviderEntryConfig)>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    for (key, entry) in entries {
+        let kind = entry.kind().as_str();
+        if *key == loaded.global.providers.default {
+            println!("{key} ({kind}, default)");
         } else {
-            println!("{label}");
+            println!("{key} ({kind})");
         }
     }
     Ok(())
@@ -93,38 +101,40 @@ fn list_providers(cli: &Cli) -> color_eyre::Result<()> {
 fn list_models(cli: &Cli) -> color_eyre::Result<()> {
     let loaded = crate::config::LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load configuration for model listing")?;
-    let provider = loaded.global.provider.kind;
-    let configured_model = loaded.global.provider.model;
-    let mut showed_configured = false;
+    let registry = ProviderRegistry::new();
+    let mut entries = loaded
+        .global
+        .providers
+        .entries
+        .iter()
+        .collect::<Vec<(&String, &crate::config::ProviderEntryConfig)>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-    for model in known_models_for(provider) {
-        if *model == configured_model {
-            println!("{model} (configured)");
-            showed_configured = true;
-        } else {
-            println!("{model}");
+    for (index, (key, entry)) in entries.into_iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        let metadata = registry
+            .metadata_for_kind(entry.kind())
+            .wrap_err("failed to resolve provider metadata")?;
+        let configured_model = entry.model();
+        println!("{key} ({}):", metadata.kind.as_str());
+
+        let mut showed_configured = false;
+        for model in metadata.known_models {
+            if *model == configured_model {
+                println!("  {model} (configured)");
+                showed_configured = true;
+            } else {
+                println!("  {model}");
+            }
+        }
+
+        if !showed_configured {
+            println!("  {configured_model} (configured custom)");
         }
     }
-
-    if !showed_configured {
-        println!("{configured_model} (configured custom)");
-    }
     Ok(())
-}
-
-fn known_providers() -> &'static [ProviderKind] {
-    &[ProviderKind::Gemini]
-}
-
-fn known_models_for(provider: ProviderKind) -> &'static [&'static str] {
-    match provider {
-        ProviderKind::Gemini => &[
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-        ],
-    }
 }
 
 fn init_tracing(cli: &Cli) -> color_eyre::Result<()> {
@@ -185,7 +195,11 @@ fn init_tracing(cli: &Cli) -> color_eyre::Result<()> {
 
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().compact().with_writer(move || writer.clone()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .compact()
+                    .with_writer(move || writer.clone()),
+            )
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()

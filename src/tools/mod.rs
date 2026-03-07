@@ -11,10 +11,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
 use tracing::{Instrument, debug, info_span};
 
 use tokio::sync::mpsc;
@@ -23,7 +21,7 @@ use crate::channels::InboundMessage;
 use crate::config::{ExecContainerConfig, GatewayChannelKind, SandboxMode, ToolConfig};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
-use crate::provider::ToolDefinition;
+use crate::providers::ToolDefinition;
 
 #[async_trait]
 pub trait SummonService: Send + Sync {
@@ -228,7 +226,7 @@ impl ProcessManager {
         &self,
         command: &str,
         workspace_root: Option<&std::path::Path>,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<(String, CompletionHandle), FrameworkError> {
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
         let base = std::env::temp_dir().join("simpleclaw_process");
@@ -241,28 +239,27 @@ impl ProcessManager {
         let stderr_file = File::create(&stderr_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stderr log: {e}")))?;
 
-        let mut child = Command::new("bash");
-        child.arg("-lc").arg(command);
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-lc").arg(command);
         if let Some(workspace_root) = workspace_root {
-            child.current_dir(workspace_root);
+            cmd.current_dir(workspace_root);
         }
-        child
-            .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file))
-            .kill_on_drop(true);
-        let child = child
+        cmd.stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+        let child = cmd
             .spawn()
             .map_err(|e| FrameworkError::Tool(format!("exec failed to start: {e}")))?;
 
         let started_at = Utc::now();
-        let pid = child.id();
+        let pid = Some(child.id());
+        let handle = CompletionHandle::Host(child);
         let entry = ProcessEntry {
             command: command.to_owned(),
             status: ProcessStatus::Running,
             started_at,
             finished_at: None,
             pid,
-            backend: ProcessBackend::Host { child: Some(child) },
+            backend: ProcessBackend::Host,
             stdout_path,
             stderr_path,
             exit_code: None,
@@ -272,11 +269,8 @@ impl ProcessManager {
         sessions.insert(session_id.clone(), entry);
         Self::auto_evict(&mut sessions);
         drop(sessions);
-        debug!(
-            status = "started",
-            "process session"
-        );
-        Ok(session_id)
+        debug!(status = "started", "process session");
+        Ok((session_id, handle))
     }
 
     fn auto_evict(sessions: &mut HashMap<String, ProcessEntry>) {
@@ -307,7 +301,7 @@ impl ProcessManager {
         command: &str,
         workspace_root: &std::path::Path,
         cfg: &ExecContainerConfig,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<(String, CompletionHandle), FrameworkError> {
         builtin::exec::ensure_podman_available().await?;
         builtin::exec::ensure_sandbox_image(cfg).await?;
 
@@ -381,6 +375,7 @@ impl ProcessManager {
         }
 
         let started_at = Utc::now();
+        let handle = CompletionHandle::Podman(container_id.clone());
         let entry = ProcessEntry {
             command: command.to_owned(),
             status: ProcessStatus::Running,
@@ -397,11 +392,8 @@ impl ProcessManager {
         sessions.insert(session_id.clone(), entry);
         Self::auto_evict(&mut sessions);
         drop(sessions);
-        debug!(
-            status = "started",
-            "process session"
-        );
-        Ok(session_id)
+        debug!(status = "started", "process session");
+        Ok((session_id, handle))
     }
 
     pub async fn update(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
@@ -460,6 +452,7 @@ impl ProcessManager {
     pub fn spawn_completion_watcher(
         self: &Arc<Self>,
         session_id: String,
+        handle: CompletionHandle,
         completion_tx: mpsc::Sender<InboundMessage>,
         route: CompletionRoute,
     ) {
@@ -472,49 +465,83 @@ impl ProcessManager {
         );
         tokio::spawn(
             async move {
-                loop {
-                    sleep(Duration::from_millis(500)).await;
-                    let snapshot = match pm.update(&session_id).await {
-                        Ok(s) => s,
-                        Err(_) => break,
-                    };
-                    if snapshot.status == ProcessStatus::Running {
-                        continue;
+                let exit_code = match handle {
+                    CompletionHandle::Host(mut child) => {
+                        let status = tokio::task::spawn_blocking(move || child.wait())
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok());
+                        status.and_then(|s| s.code())
                     }
-                    let exit_code = snapshot.exit_code.unwrap_or(-1);
-                    let content = format!(
-                        "[background process completed] session_id={} exit_code={} command={}",
-                        session_id, exit_code, snapshot.command
+                    CompletionHandle::Podman(container_id) => {
+                        let cid = container_id.clone();
+                        let output = tokio::task::spawn_blocking(move || {
+                            std::process::Command::new("podman")
+                                .args(["wait", &cid])
+                                .output()
+                        })
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                        output.and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .trim()
+                                .parse::<i32>()
+                                .ok()
+                        })
+                    }
+                };
+
+                pm.mark_completed(&session_id, exit_code).await;
+
+                let snapshot = pm.update(&session_id).await;
+                let command = snapshot
+                    .as_ref()
+                    .map(|s| s.command.as_str())
+                    .unwrap_or("unknown");
+                let code = exit_code.unwrap_or(-1);
+                let content = format!(
+                    "[background process completed] session_id={} exit_code={} command={}",
+                    session_id, code, command
+                );
+                let msg = InboundMessage {
+                    trace_id: route.trace_id.clone(),
+                    source_channel: route.source_channel,
+                    target_agent_id: route.target_agent_id,
+                    session_key: route.session_key,
+                    channel_id: route.channel_id,
+                    guild_id: route.guild_id,
+                    is_dm: route.is_dm,
+                    user_id: "system".to_owned(),
+                    username: "system".to_owned(),
+                    mentioned_bot: false,
+                    invoke: true,
+                    content,
+                };
+                if let Err(err) = completion_tx.send(msg).await {
+                    tracing::warn!(
+                        status = "failed",
+                        error_kind = "completion_send",
+                        error = %err,
+                        "failed to send background process completion message"
                     );
-                    let msg = InboundMessage {
-                        trace_id: route.trace_id.clone(),
-                        source_channel: route.source_channel,
-                        target_agent_id: route.target_agent_id,
-                        session_key: route.session_key,
-                        channel_id: route.channel_id,
-                        guild_id: route.guild_id,
-                        is_dm: route.is_dm,
-                        user_id: "system".to_owned(),
-                        username: "system".to_owned(),
-                        mentioned_bot: false,
-                        invoke: true,
-                        content,
-                    };
-                    if let Err(err) = completion_tx.send(msg).await {
-                        tracing::warn!(
-                            status = "failed",
-                            error_kind = "completion_send",
-                            error = %err,
-                            "failed to send background process completion message"
-                        );
-                    } else {
-                        debug!(status = "completed", "process completion watcher");
-                    }
-                    break;
+                } else {
+                    debug!(status = "completed", "process completion watcher");
                 }
             }
             .instrument(span),
         );
+    }
+
+    async fn mark_completed(&self, session_id: &str, exit_code: Option<i32>) {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            if entry.status == ProcessStatus::Running {
+                entry.status = ProcessStatus::Completed;
+                entry.exit_code = exit_code;
+                entry.finished_at = Some(Utc::now());
+            }
+        }
     }
 
     pub async fn forget(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
@@ -540,9 +567,15 @@ impl Default for ProcessManager {
     }
 }
 
+/// Handle passed to the completion watcher for event-driven (non-polling) wait.
+pub enum CompletionHandle {
+    Host(std::process::Child),
+    Podman(String),
+}
+
 #[derive(Debug)]
 enum ProcessBackend {
-    Host { child: Option<Child> },
+    Host,
     Podman { container_id: String },
 }
 
@@ -573,28 +606,16 @@ struct ProcessEntryMeta {
 
 impl ProcessEntry {
     fn poll_completion(&mut self) {
+        // Status is updated by the completion watcher via ProcessManager::mark_completed.
+        // For podman, we can also check on-demand as a fallback (e.g. for list/update calls
+        // before the watcher has run mark_completed).
         if self.status != ProcessStatus::Running {
             return;
         }
-        match &mut self.backend {
-            ProcessBackend::Host { child } => {
-                let Some(c) = child.as_mut() else {
-                    return;
-                };
-                match c.try_wait() {
-                    Ok(Some(status)) => {
-                        let _ = child.take();
-                        self.exit_code = status.code();
-                        self.status = ProcessStatus::Completed;
-                        self.finished_at = Some(Utc::now());
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(status = "failed", error_kind = "poll_try_wait", error = %e, "process poll");
-                        self.status = ProcessStatus::Completed;
-                        self.finished_at = Some(Utc::now());
-                    }
-                }
+        match &self.backend {
+            ProcessBackend::Host => {
+                // Host processes are tracked by the completion watcher which owns the Child.
+                // No on-demand poll is possible here.
             }
             ProcessBackend::Podman { container_id } => {
                 let output = std::process::Command::new("podman")
@@ -607,7 +628,6 @@ impl ProcessEntry {
                     Ok(out) if out.status.success() => {
                         let text = String::from_utf8_lossy(&out.stdout);
                         let text = text.trim();
-                        // Format: "exited|0" or "running|0"
                         if let Some((state, code_str)) = text.split_once('|')
                             && state != "running"
                         {
@@ -639,16 +659,24 @@ impl ProcessEntry {
         if self.status != ProcessStatus::Running {
             return Ok(());
         }
-        match &mut self.backend {
-            ProcessBackend::Host { child } => {
-                let Some(c) = child.as_mut() else {
-                    return Ok(());
-                };
-                c.kill()
-                    .await
-                    .map_err(|e| FrameworkError::Tool(format!("failed to kill process: {e}")))?;
-                let _ = c.wait().await;
-                let _ = child.take();
+        match &self.backend {
+            ProcessBackend::Host => {
+                if let Some(pid) = self.pid {
+                    let output = Command::new("kill")
+                        .arg(pid.to_string())
+                        .output()
+                        .await
+                        .map_err(|e| {
+                            FrameworkError::Tool(format!("failed to kill process: {e}"))
+                        })?;
+                    if !output.status.success() {
+                        tracing::warn!(
+                            status = "failed",
+                            error_kind = "kill_process",
+                            "process kill"
+                        );
+                    }
+                }
             }
             ProcessBackend::Podman { container_id } => {
                 let output = Command::new("podman")

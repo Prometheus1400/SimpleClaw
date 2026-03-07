@@ -24,11 +24,11 @@ use crate::agent::{
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::{Cli, MemoryMode};
-use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, ProviderKind};
+use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::provider::{GeminiProvider, Provider};
+use crate::providers::{Provider, ProviderMetadata, ProviderRegistry};
 
 pub const RETAIN_DAILY_LOG_FILES: usize = 2;
 const SESSION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
@@ -206,8 +206,15 @@ fn collect_log_history(log_path: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 #[async_trait]
 pub(crate) trait ProviderFactory: Send + Sync {
-    async fn create_provider(&self, loaded: &LoadedConfig)
-    -> color_eyre::Result<Arc<dyn Provider>>;
+    async fn create_providers(
+        &self,
+        loaded: &LoadedConfig,
+    ) -> color_eyre::Result<HashMap<String, ProviderHandle>>;
+}
+
+pub(crate) struct ProviderHandle {
+    pub provider: Arc<dyn Provider>,
+    pub metadata: ProviderMetadata,
 }
 
 #[async_trait]
@@ -247,16 +254,22 @@ struct DefaultProviderFactory;
 
 #[async_trait]
 impl ProviderFactory for DefaultProviderFactory {
-    async fn create_provider(
+    async fn create_providers(
         &self,
         loaded: &LoadedConfig,
-    ) -> color_eyre::Result<Arc<dyn Provider>> {
-        let provider: Arc<dyn Provider> = match loaded.global.provider.kind {
-            ProviderKind::Gemini => {
-                Arc::new(GeminiProvider::from_config(loaded.global.provider.clone()))
-            }
-        };
-        Ok(provider)
+    ) -> color_eyre::Result<HashMap<String, ProviderHandle>> {
+        let registry = ProviderRegistry::new();
+        let mut providers = HashMap::new();
+        for (key, entry) in &loaded.global.providers.entries {
+            let provider = registry
+                .create_provider(entry)
+                .wrap_err_with(|| format!("failed to initialize provider '{key}'"))?;
+            let metadata = registry
+                .metadata_for_kind(entry.kind())
+                .wrap_err_with(|| format!("failed to read metadata for provider '{key}'"))?;
+            providers.insert(key.clone(), ProviderHandle { provider, metadata });
+        }
+        Ok(providers)
     }
 }
 
@@ -461,7 +474,7 @@ pub(crate) async fn assemble_runtime_state(
     app_paths: &AppPaths,
     deps: &RuntimeDependencies,
 ) -> color_eyre::Result<RuntimeState> {
-    let provider = deps.provider_factory.create_provider(loaded).await?;
+    let providers_by_key = deps.provider_factory.create_providers(loaded).await?;
 
     let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
     for agent in &loaded.global.agents.list {
@@ -485,6 +498,23 @@ pub(crate) async fn assemble_runtime_state(
         })?;
         let agent_config = load_agent_config_for_workspace(&agent.workspace)
             .wrap_err_with(|| format!("failed to load agent.yaml for agent '{}'", agent.id))?;
+        let provider_key = agent_config
+            .provider
+            .as_deref()
+            .unwrap_or(loaded.global.providers.default.as_str());
+        if provider_key.trim().is_empty() {
+            return Err(color_eyre::eyre::eyre!(
+                "agent '{}' has an empty provider key in agent.yaml",
+                agent.id
+            ));
+        }
+        let provider_handle = providers_by_key.get(provider_key).ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "agent '{}' references unknown provider key '{}'",
+                agent.id,
+                provider_key
+            )
+        })?;
         let system_prompt =
             load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
                 format!(
@@ -509,9 +539,9 @@ pub(crate) async fn assemble_runtime_state(
             AgentRuntime::new(AgentRuntimeConfig {
                 agent_id: agent.id.clone(),
                 runtime_config: loaded.global.runtime.clone(),
-                agent_config,
-                provider: Arc::clone(&provider),
-                provider_kind: loaded.global.provider.kind,
+                agent_config: agent_config.clone(),
+                provider: Arc::clone(&provider_handle.provider),
+                provider_supports_native_tools: provider_handle.metadata.supports_native_tools,
                 memory,
                 summon_agents: summon_agents.clone(),
                 summon_memories: memory_by_agent.clone(),

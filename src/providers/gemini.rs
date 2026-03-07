@@ -1,117 +1,36 @@
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, error};
 
-use crate::config::ProviderConfig;
+use crate::config::{GeminiProviderConfig, ProviderEntryConfig};
 use crate::error::FrameworkError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
-    #[serde(default)]
-    pub tool_results: Vec<ToolResult>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub args_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    #[serde(default)]
-    pub call_id: Option<String>,
-    pub name: String,
-    pub response: Value,
-}
-
-impl Message {
-    pub fn text(role: Role, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: content.into(),
-            tool_calls: Vec::new(),
-            tool_results: Vec::new(),
-        }
-    }
-
-    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: String::new(),
-            tool_calls,
-            tool_results: Vec::new(),
-        }
-    }
-
-    pub fn tool_results(tool_results: Vec<ToolResult>) -> Self {
-        Self {
-            role: Role::Tool,
-            content: String::new(),
-            tool_calls: Vec::new(),
-            tool_results,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderResponse {
-    pub output_text: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-}
-
-#[async_trait]
-pub trait Provider: Send + Sync {
-    async fn generate(
-        &self,
-        system_prompt: &str,
-        history: &[Message],
-        tools: &[ToolDefinition],
-    ) -> Result<ProviderResponse, FrameworkError>;
-}
+use super::types::{Message, Provider, ProviderResponse, Role, ToolCall, ToolDefinition};
 
 pub struct GeminiProvider {
-    config: ProviderConfig,
+    config: GeminiProviderConfig,
     client: Client,
 }
 
 impl GeminiProvider {
-    pub fn from_config(config: ProviderConfig) -> Self {
+    pub fn from_config(config: GeminiProviderConfig) -> Self {
         Self {
             config,
             client: Client::new(),
         }
     }
 
+    pub fn from_entry(entry: &ProviderEntryConfig) -> Result<Self, FrameworkError> {
+        let ProviderEntryConfig::Gemini(config) = entry;
+        Ok(Self::from_config(config.clone()))
+    }
+
     fn api_key(&self) -> Result<String, FrameworkError> {
         match self.config.api_key.clone() {
             Some(api_key) if !api_key.trim().is_empty() => Ok(api_key),
             _ => Err(FrameworkError::Config(
-                "missing provider API key: set provider.api_key to a ${secret:<name>} reference"
+                "missing provider API key: set providers.entries.<key>.api_key to a ${secret:<name>} reference"
                     .to_owned(),
             )),
         }
@@ -187,10 +106,7 @@ fn build_gemini_contents(history: &[Message]) -> Vec<Value> {
 
 #[async_trait]
 impl Provider for GeminiProvider {
-    #[tracing::instrument(
-        name = "provider.generate",
-        skip(self, system_prompt, history, tools)
-    )]
+    #[tracing::instrument(name = "provider.generate", skip(self, system_prompt, history, tools))]
     async fn generate(
         &self,
         system_prompt: &str,
@@ -334,7 +250,8 @@ impl Provider for GeminiProvider {
 mod tests {
     use serde_json::json;
 
-    use super::{Message, Role, ToolCall, ToolResult, build_gemini_contents};
+    use super::build_gemini_contents;
+    use crate::providers::{Message, Role, ToolCall, ToolResult};
 
     #[test]
     fn encodes_assistant_function_call_part() {

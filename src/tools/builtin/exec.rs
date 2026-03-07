@@ -47,7 +47,7 @@ impl Tool for ExecTool {
         }
 
         if args.background {
-            let session_id = if ctx.sandbox == SandboxMode::On {
+            let (session_id, handle) = if ctx.sandbox == SandboxMode::On {
                 ctx.process_manager
                     .spawn_podman(
                         args.command.trim(),
@@ -65,6 +65,7 @@ impl Tool for ExecTool {
             {
                 ctx.process_manager.spawn_completion_watcher(
                     session_id.clone(),
+                    handle,
                     tx.clone(),
                     route.clone(),
                 );
