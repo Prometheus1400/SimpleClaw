@@ -450,7 +450,6 @@ pub struct MemoryPreinjectConfig {
     pub enabled: bool,
     pub top_k: u32,
     pub min_score: f32,
-    pub max_items_per_store: u32,
     pub long_term_weight: f32,
     pub max_chars: u32,
 }
@@ -461,7 +460,6 @@ impl Default for MemoryPreinjectConfig {
             enabled: default_memory_preinject_enabled(),
             top_k: default_memory_preinject_top_k(),
             min_score: default_memory_preinject_min_score(),
-            max_items_per_store: default_memory_preinject_max_items_per_store(),
             long_term_weight: default_memory_preinject_long_term_weight(),
             max_chars: default_memory_preinject_max_chars(),
         }
@@ -474,7 +472,6 @@ impl MemoryPreinjectConfig {
             enabled: self.enabled,
             top_k: self.top_k.clamp(1, 10),
             min_score: self.min_score.clamp(0.0, 1.0),
-            max_items_per_store: self.max_items_per_store.clamp(1, 100),
             long_term_weight: self.long_term_weight.clamp(0.0, 1.0),
             max_chars: self.max_chars.clamp(200, 4000),
         }
@@ -802,9 +799,6 @@ fn default_memory_preinject_top_k() -> u32 {
 fn default_memory_preinject_min_score() -> f32 {
     0.72
 }
-fn default_memory_preinject_max_items_per_store() -> u32 {
-    20
-}
 fn default_memory_preinject_long_term_weight() -> f32 {
     0.65
 }
@@ -1021,7 +1015,6 @@ memory_preinject:
   enabled: false
   top_k: 5
   min_score: 0.8
-  max_items_per_store: 40
   long_term_weight: 0.7
   max_chars: 900
 "#;
@@ -1029,7 +1022,6 @@ memory_preinject:
         assert!(!parsed.memory_preinject.enabled);
         assert_eq!(parsed.memory_preinject.top_k, 5);
         assert!((parsed.memory_preinject.min_score - 0.8).abs() < f32::EPSILON);
-        assert_eq!(parsed.memory_preinject.max_items_per_store, 40);
         assert!((parsed.memory_preinject.long_term_weight - 0.7).abs() < f32::EPSILON);
         assert_eq!(parsed.memory_preinject.max_chars, 900);
     }
@@ -1061,14 +1053,12 @@ memory_preinject:
             enabled: true,
             top_k: 999,
             min_score: 5.0,
-            max_items_per_store: 0,
             long_term_weight: -4.0,
             max_chars: 32,
         };
         let normalized = config.normalized();
         assert_eq!(normalized.top_k, 10);
         assert!((normalized.min_score - 1.0).abs() < f32::EPSILON);
-        assert_eq!(normalized.max_items_per_store, 1);
         assert!((normalized.long_term_weight - 0.0).abs() < f32::EPSILON);
         assert_eq!(normalized.max_chars, 200);
     }

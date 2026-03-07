@@ -24,17 +24,49 @@ pub(super) fn parse_simple_text_arg(args_json: &str) -> String {
     args_json.trim_matches('"').to_owned()
 }
 
-pub(super) fn parse_memory_args(args_json: &str) -> (String, usize) {
+#[derive(Debug)]
+pub(super) enum MemoryAction {
+    Query { query: String, top_k: usize },
+    List { kind: Option<String>, limit: usize },
+}
+
+pub(super) fn parse_memory_args(args_json: &str) -> MemoryAction {
     if let Ok(value) = serde_json::from_str::<Value>(args_json) {
+        let action = value
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("query");
+        if action == "list" {
+            let kind = value
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned);
+            let limit = value
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+            return MemoryAction::List { kind, limit };
+        }
         if let Some(query) = value.get("query").and_then(|v| v.as_str()) {
             let top_k = value.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            return (query.to_owned(), top_k.max(1));
+            return MemoryAction::Query {
+                query: query.to_owned(),
+                top_k: top_k.max(1),
+            };
         }
         if let Some(s) = value.as_str() {
-            return (s.to_owned(), 5);
+            return MemoryAction::Query {
+                query: s.to_owned(),
+                top_k: 5,
+            };
         }
     }
-    (args_json.trim_matches('"').to_owned(), 5)
+    MemoryAction::Query {
+        query: args_json.trim_matches('"').to_owned(),
+        top_k: 5,
+    }
 }
 
 pub(super) fn parse_summon_args(args_json: &str) -> (String, String) {
