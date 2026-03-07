@@ -33,8 +33,8 @@ fn run() -> Result<(), String> {
     std::io::stdin()
         .read_to_string(&mut input)
         .map_err(|e| format!("failed reading stdin: {e}"))?;
-    let args: EditArgs = serde_json::from_str(&input)
-        .map_err(|e| format!("edit requires JSON object args: {e}"))?;
+    let args: EditArgs =
+        serde_json::from_str(&input).map_err(|e| format!("edit requires JSON object args: {e}"))?;
 
     let command = args.command.trim();
     if command.is_empty() {
@@ -147,8 +147,8 @@ fn apply_replace(path: &Path, path_display: &str, args: &EditArgs) -> Result<Str
         return Err("edit replace requires non-empty old_text".to_owned());
     }
 
-    let original = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {path_display}: {e}"))?;
+    let original =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read {path_display}: {e}"))?;
     let occurrences = original.match_indices(old_text).count();
     if occurrences == 0 {
         return Err(format!(
@@ -192,8 +192,8 @@ fn apply_insert(path: &Path, path_display: &str, args: &EditArgs) -> Result<Stri
         return Err("edit insert line must be >= 1".to_owned());
     }
 
-    let original = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {path_display}: {e}"))?;
+    let original =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read {path_display}: {e}"))?;
     let idx = byte_index_for_line(&original, line)
         .ok_or_else(|| format!("edit insert line {line} out of range for {path_display}"))?;
     let mut updated = String::with_capacity(original.len() + content.len());
@@ -224,8 +224,8 @@ fn apply_delete(path: &Path, path_display: &str, args: &EditArgs) -> Result<Stri
         return Err("edit delete requires non-empty old_text".to_owned());
     }
 
-    let original = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {path_display}: {e}"))?;
+    let original =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read {path_display}: {e}"))?;
     let occurrences = original.match_indices(old_text).count();
     if occurrences == 0 {
         return Err(format!(

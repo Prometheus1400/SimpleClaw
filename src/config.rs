@@ -36,6 +36,8 @@ pub struct AgentConfig {
     pub sandbox: SandboxMode,
     #[serde(default)]
     pub tools: ToolConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 impl Default for AgentConfig {
@@ -44,6 +46,7 @@ impl Default for AgentConfig {
             model: None,
             sandbox: SandboxMode::default(),
             tools: ToolConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -778,6 +781,20 @@ impl Default for ToolConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsConfig {
+    pub enabled_skills: Vec<String>,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled_skills: Vec::new(),
+        }
+    }
+}
+
 fn default_db_path() -> PathBuf {
     AppPaths::resolve()
         .map(|paths| paths.db_path)
@@ -1198,9 +1215,45 @@ tools:
     }
 
     #[test]
+    fn agent_config_supports_enabled_skills_allowlist() {
+        let parsed: AgentConfig = serde_yaml::from_str(
+            r#"
+skills:
+  enabled_skills:
+    - code_review
+    - release_checklist
+"#,
+        )
+        .expect("valid yaml");
+        assert_eq!(
+            parsed.skills.enabled_skills,
+            vec!["code_review".to_owned(), "release_checklist".to_owned()]
+        );
+    }
+
+    #[test]
     fn agent_config_defaults_exec_policy() {
         let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
         assert_eq!(parsed.sandbox, SandboxMode::On);
+    }
+
+    #[test]
+    fn agent_config_defaults_skills_config() {
+        let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
+        assert!(parsed.skills.enabled_skills.is_empty());
+    }
+
+    #[test]
+    fn agent_config_skills_rejects_directory_field() {
+        let parsed = serde_yaml::from_str::<AgentConfig>(
+            r#"
+skills:
+  enabled_skills:
+    - code_review
+  directory: skills
+"#,
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]

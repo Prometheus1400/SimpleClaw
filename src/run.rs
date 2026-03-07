@@ -14,7 +14,8 @@ use serde::Serialize;
 use tracing::info;
 
 use crate::agent::{
-    AgentRuntime, load_agent_config_for_workspace, load_system_prompt_for_workspace,
+    AgentRuntime, build_tool_registry_for_agent, load_agent_config_for_workspace,
+    load_system_prompt_for_workspace,
 };
 use crate::channel::{Channel, DiscordChannel, LoggingChannel};
 use crate::cli::{Cli, MemoryMode};
@@ -191,6 +192,7 @@ fn collect_log_history(log_path: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
+    let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
     let loaded = LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load global/workspace configuration")?;
 
@@ -238,6 +240,8 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         let memory = memory_by_agent.get(&agent.id).cloned().ok_or_else(|| {
             color_eyre::eyre::eyre!("missing memory store for configured agent '{}'", agent.id)
         })?;
+        let agent_config = load_agent_config_for_workspace(&agent.workspace)
+            .wrap_err_with(|| format!("failed to load agent.yaml for agent '{}'", agent.id))?;
         let system_prompt =
             load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
                 format!(
@@ -245,8 +249,16 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                     agent.id
                 )
             })?;
-        let agent_config = load_agent_config_for_workspace(&agent.workspace)
-            .wrap_err_with(|| format!("failed to load agent.yaml for agent '{}'", agent.id))?;
+        let tooling = build_tool_registry_for_agent(&agent.id, &agent_config, &app_paths.base_dir)
+            .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
+        info!(
+            agent_id = %agent.id,
+            requested_skills = tooling.skill_stats.requested,
+            loaded_skill_tools = tooling.skill_stats.loaded,
+            skipped_missing_skills = tooling.skill_stats.skipped_missing,
+            skipped_empty_skills = tooling.skill_stats.skipped_empty,
+            "agent skill tools loaded"
+        );
         runtimes.insert(
             agent.id.clone(),
             AgentRuntime::new(
@@ -259,7 +271,10 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 summon_agents.clone(),
                 memory_by_agent.clone(),
                 agent.workspace.clone(),
+                app_paths.base_dir.clone(),
                 system_prompt,
+                tooling.tool_registry,
+                tooling.skill_tool_names,
                 cli.max_steps,
             ),
         );
