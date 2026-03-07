@@ -240,12 +240,20 @@ pub(super) async fn exec_shell_command(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    Ok(json!({
+    Ok(command_output_to_json(
+        output.status.code().unwrap_or(-1),
+        stdout.trim(),
+        stderr.trim(),
+    ))
+}
+
+pub(super) fn command_output_to_json(exit_code: i32, stdout: &str, stderr: &str) -> Value {
+    json!({
         "status": "completed",
-        "exitCode": output.status.code().unwrap_or(-1),
-        "stdout": truncate_for_tool_output(stdout.trim(), 8_000),
-        "stderr": truncate_for_tool_output(stderr.trim(), 4_000)
-    }))
+        "exitCode": exit_code,
+        "stdout": truncate_for_tool_output(stdout, 8_000),
+        "stderr": truncate_for_tool_output(stderr, 4_000)
+    })
 }
 
 pub(super) fn snapshot_to_json(snapshot: &ProcessSnapshot) -> Value {

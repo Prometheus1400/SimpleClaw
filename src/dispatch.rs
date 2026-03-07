@@ -129,7 +129,7 @@ pub trait ToolDispatcher: Send + Sync {
 
 fn sandbox_mode_label(mode: SandboxMode) -> &'static str {
     match mode {
-        SandboxMode::Wasm => "wasm",
+        SandboxMode::On => "on",
         SandboxMode::Off => "off",
     }
 }

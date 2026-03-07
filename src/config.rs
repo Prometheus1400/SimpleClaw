@@ -407,6 +407,8 @@ pub struct RuntimeConfig {
     pub log_level: LogLevel,
     #[serde(default)]
     pub owner_ids: Vec<String>,
+    #[serde(default)]
+    pub exec_container: ExecContainerConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -419,6 +421,33 @@ impl Default for RuntimeConfig {
             safe_error_reply: default_safe_error_reply(),
             log_level: LogLevel::default(),
             owner_ids: Vec::new(),
+            exec_container: ExecContainerConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecContainerConfig {
+    pub image: String,
+    pub network_enabled: bool,
+    pub memory_mb: u32,
+    pub cpus_milli: u32,
+    pub pids_limit: u32,
+    pub build_timeout_secs: u64,
+    pub exec_timeout_secs: u64,
+}
+
+impl Default for ExecContainerConfig {
+    fn default() -> Self {
+        Self {
+            image: default_exec_container_image(),
+            network_enabled: default_exec_container_network_enabled(),
+            memory_mb: default_exec_container_memory_mb(),
+            cpus_milli: default_exec_container_cpus_milli(),
+            pids_limit: default_exec_container_pids_limit(),
+            build_timeout_secs: default_exec_container_build_timeout_secs(),
+            exec_timeout_secs: default_exec_container_exec_timeout_secs(),
         }
     }
 }
@@ -464,7 +493,7 @@ impl MemoryPreinjectConfig {
 #[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
     #[default]
-    Wasm,
+    On,
     Off,
 }
 
@@ -800,6 +829,27 @@ fn default_memory_preinject_max_chars() -> u32 {
 }
 fn default_safe_error_reply() -> String {
     "I hit an internal error while processing that request.".to_owned()
+}
+fn default_exec_container_image() -> String {
+    "simpleclaw-sandbox:latest".to_owned()
+}
+fn default_exec_container_network_enabled() -> bool {
+    true
+}
+fn default_exec_container_memory_mb() -> u32 {
+    512
+}
+fn default_exec_container_cpus_milli() -> u32 {
+    1000
+}
+fn default_exec_container_pids_limit() -> u32 {
+    256
+}
+fn default_exec_container_build_timeout_secs() -> u64 {
+    120
+}
+fn default_exec_container_exec_timeout_secs() -> u64 {
+    20
 }
 fn default_agent_id() -> String {
     "default".to_owned()
@@ -1150,7 +1200,7 @@ tools:
     #[test]
     fn agent_config_defaults_exec_policy() {
         let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
-        assert_eq!(parsed.sandbox, SandboxMode::Wasm);
+        assert_eq!(parsed.sandbox, SandboxMode::On);
     }
 
     #[test]
@@ -1177,14 +1227,24 @@ sandbox: off
     }
 
     #[test]
-    fn agent_config_sandbox_accepts_wasm() {
+    fn agent_config_sandbox_accepts_on() {
         let parsed: AgentConfig = serde_yaml::from_str(
             r#"
-sandbox: wasm
+sandbox: on
 "#,
         )
         .expect("valid yaml");
-        assert_eq!(parsed.sandbox, SandboxMode::Wasm);
+        assert_eq!(parsed.sandbox, SandboxMode::On);
+    }
+
+    #[test]
+    fn agent_config_sandbox_rejects_wasm() {
+        let parsed = serde_yaml::from_str::<AgentConfig>(
+            r#"
+sandbox: wasm
+"#,
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]
