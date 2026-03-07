@@ -14,9 +14,11 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>) -> Self {
-        let (inbound_tx, inbound_rx) = mpsc::channel(1_024);
-
+    pub fn new(
+        channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
+        inbound_tx: mpsc::Sender<InboundMessage>,
+        inbound_rx: mpsc::Receiver<InboundMessage>,
+    ) -> Self {
         for (kind, channel) in &channels {
             let kind = *kind;
             let channel = Arc::clone(channel);

@@ -17,7 +17,7 @@ use crate::agent::{
     AgentRuntime, build_tool_registry_for_agent, load_agent_config_for_workspace,
     load_system_prompt_for_workspace,
 };
-use crate::channel::{Channel, DiscordChannel, LoggingChannel};
+use crate::channel::{Channel, DiscordChannel, InboundMessage, LoggingChannel};
 use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, ProviderKind};
 use crate::gateway::Gateway;
@@ -228,6 +228,9 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         memory_by_agent.insert(agent.id.clone(), memory);
     }
 
+    let (gateway_tx, gateway_rx) =
+        tokio::sync::mpsc::channel::<InboundMessage>(1_024);
+
     let summon_agents: HashMap<String, std::path::PathBuf> = loaded
         .global
         .agents
@@ -281,6 +284,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                 tooling.tool_registry,
                 tooling.skill_tool_names,
                 cli.max_steps,
+                Some(gateway_tx.clone()),
             ),
         );
     }
@@ -299,7 +303,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         };
         channels.insert(*kind, channel);
     }
-    let gateway = Gateway::new(channels);
+    let gateway = Gateway::new(channels, gateway_tx, gateway_rx);
 
     let safe_error_reply = loaded.global.runtime.safe_error_reply.clone();
     info!(agent_count = runtimes.len(), "runtime initialized");
@@ -345,7 +349,9 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
             continue;
         }
 
-        if let Err(err) = gateway.broadcast_typing(&inbound).await {
+        if inbound.user_id != "system"
+            && let Err(err) = gateway.broadcast_typing(&inbound).await
+        {
             tracing::warn!(error = %err, "failed to broadcast typing");
         }
         tracing::debug!(

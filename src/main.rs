@@ -1,4 +1,9 @@
+//! `simpleclaw` command-line entrypoint.
+//!
+//! This binary wires CLI parsing, tracing initialization, and dispatching of commands.
+//!
 #![deny(warnings)]
+#![deny(missing_docs)] // Ensures every public item has documentation
 
 mod agent;
 mod channel;

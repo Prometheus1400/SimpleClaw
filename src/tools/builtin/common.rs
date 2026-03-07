@@ -156,12 +156,6 @@ pub(super) struct ExecArgs {
     pub command: String,
     #[serde(default)]
     pub background: bool,
-    #[serde(default = "default_exec_yield_ms")]
-    pub yield_ms: u64,
-}
-
-fn default_exec_yield_ms() -> u64 {
-    10_000
 }
 
 pub(super) fn parse_exec_args(args_json: &str) -> ExecArgs {
@@ -171,29 +165,21 @@ pub(super) fn parse_exec_args(args_json: &str) -> ExecArgs {
                 .get("background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let yield_ms = value
-                .get("yield_ms")
-                .or_else(|| value.get("yieldMs"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(default_exec_yield_ms());
             return ExecArgs {
                 command: command.to_owned(),
                 background,
-                yield_ms,
             };
         }
         if let Some(s) = value.as_str() {
             return ExecArgs {
                 command: s.to_owned(),
                 background: false,
-                yield_ms: default_exec_yield_ms(),
             };
         }
     }
     ExecArgs {
         command: args_json.trim_matches('"').to_owned(),
         background: false,
-        yield_ms: default_exec_yield_ms(),
     }
 }
 
@@ -292,11 +278,10 @@ mod tests {
     use super::{parse_exec_args, parse_forget_args, parse_process_args, parse_task_args};
 
     #[test]
-    fn parse_exec_args_accepts_yield_ms_camel_case() {
-        let args = parse_exec_args(r#"{"command":"sleep 1","background":true,"yieldMs":1234}"#);
+    fn parse_exec_args_accepts_background_flag() {
+        let args = parse_exec_args(r#"{"command":"sleep 1","background":true}"#);
         assert_eq!(args.command, "sleep 1");
         assert!(args.background);
-        assert_eq!(args.yield_ms, 1234);
     }
 
     #[test]

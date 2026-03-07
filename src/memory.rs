@@ -293,10 +293,7 @@ impl MemoryStore {
         top_k: usize,
     ) -> Result<Vec<String>, FrameworkError> {
         let top_k = top_k.max(1);
-        let top_k_u32 = match u32::try_from(top_k) {
-            Ok(value) => value,
-            Err(_) => u32::MAX,
-        };
+        let top_k_u32 = u32::try_from(top_k).unwrap_or(u32::MAX);
         let config = MemoryPreinjectConfig {
             enabled: true,
             top_k: top_k_u32,
@@ -627,7 +624,7 @@ fn register_sqlite_vec() -> Result<(), FrameworkError> {
     static RESULT: OnceLock<Result<(), i32>> = OnceLock::new();
 
     let result = RESULT.get_or_init(|| unsafe {
-        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<*const (), unsafe extern "C" fn(*mut rusqlite::ffi::sqlite3, *mut *mut i8, *const rusqlite::ffi::sqlite3_api_routines) -> i32>(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
         if rc == rusqlite::ffi::SQLITE_OK {
@@ -667,7 +664,7 @@ fn encode_f32_blob(values: &[f32]) -> Vec<u8> {
 }
 
 fn decode_f32_blob(bytes: &[u8]) -> Vec<f32> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Vec::new();
     }
     bytes

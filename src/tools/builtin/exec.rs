@@ -6,11 +6,9 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::{ExecContainerConfig, SandboxMode};
 use crate::error::FrameworkError;
-use crate::tools::{ProcessStatus, Tool, ToolCtx, wait_for_completion};
+use crate::tools::{Tool, ToolCtx};
 
-use super::common::{
-    command_output_to_json, exec_shell_command, parse_exec_args, snapshot_to_json,
-};
+use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecTool {
@@ -24,11 +22,11 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run local shell commands using JSON: {command, background?, yield_ms?}. Returns JSON string."
+        "Run local shell commands using JSON: {command, background?}. Returns JSON string."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"},\"yield_ms\":{\"type\":\"integer\",\"minimum\":0}},\"required\":[\"command\"]}"
+        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
     }
 
     async fn execute(
@@ -58,12 +56,18 @@ impl Tool for ExecTool {
                     .spawn(args.command.trim(), Some(&ctx.workspace_root))
                     .await?
             };
-            let wait_for = Duration::from_millis(args.yield_ms.min(120_000));
-            let snapshot = wait_for_completion(&ctx.process_manager, &session_id, wait_for).await?;
-            if snapshot.status == ProcessStatus::Running {
-                return Ok(json!({"status":"running","sessionId": session_id}).to_string());
+            if let (Some(tx), Some(route)) =
+                (ctx.completion_tx.as_ref(), ctx.completion_route.as_ref())
+            {
+                ctx.process_manager.spawn_completion_watcher(
+                    session_id.clone(),
+                    tx.clone(),
+                    route.clone(),
+                );
             }
-            return Ok(snapshot_to_json(&snapshot).to_string());
+            return Ok(
+                json!({"status":"backgrounded","sessionId": session_id}).to_string(),
+            );
         }
 
         let result = if ctx.sandbox == SandboxMode::On {

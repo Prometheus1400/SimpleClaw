@@ -27,7 +27,7 @@ pub struct GlobalConfig {
     pub embedding: EmbeddingConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -38,17 +38,6 @@ pub struct AgentConfig {
     pub tools: ToolConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            model: None,
-            sandbox: SandboxMode::default(),
-            tools: ToolConfig::default(),
-            skills: SkillsConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -587,16 +576,11 @@ pub enum SummonMode {
     Queued,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
+    #[default]
     Gemini,
-}
-
-impl Default for ProviderKind {
-    fn default() -> Self {
-        Self::Gemini
-    }
 }
 
 impl ProviderKind {
@@ -613,22 +597,13 @@ impl ProviderKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscordConfig {
     #[serde(default)]
     pub token: Option<String>,
     #[serde(default)]
     pub inbound: DiscordInboundConfig,
-}
-
-impl Default for DiscordConfig {
-    fn default() -> Self {
-        Self {
-            token: None,
-            inbound: DiscordInboundConfig::default(),
-        }
-    }
 }
 
 impl DiscordConfig {
@@ -781,18 +756,10 @@ impl Default for ToolConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SkillsConfig {
     pub enabled_skills: Vec<String>,
-}
-
-impl Default for SkillsConfig {
-    fn default() -> Self {
-        Self {
-            enabled_skills: Vec::new(),
-        }
-    }
 }
 
 fn default_db_path() -> PathBuf {
