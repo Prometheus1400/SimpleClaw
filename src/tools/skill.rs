@@ -78,6 +78,7 @@ impl Tool for DynamicSkillTool {
 pub fn load_skill_tools(
     agent_id: &str,
     skills: &SkillsConfig,
+    agent_workspace: &Path,
     app_base_dir: &Path,
 ) -> Result<LoadedSkillTools, FrameworkError> {
     let skill_ids = normalized_skill_ids(skills)?;
@@ -91,7 +92,7 @@ pub fn load_skill_tools(
     let mut tool_names = Vec::new();
 
     for skill_id in skill_ids {
-        let resolved = resolve_skill_path(app_base_dir, agent_id, &skill_id);
+        let resolved = resolve_skill_path(agent_workspace, app_base_dir, &skill_id);
         let Some((path, source_scope)) = resolved else {
             warn!(
                 agent_id = %agent_id,
@@ -128,13 +129,11 @@ pub fn load_skill_tools(
 }
 
 fn resolve_skill_path(
+    agent_workspace: &Path,
     base_dir: &Path,
-    agent_id: &str,
     skill_id: &str,
 ) -> Option<(PathBuf, &'static str)> {
-    let agent_path = base_dir
-        .join("workspaces")
-        .join(agent_id)
+    let agent_path = agent_workspace
         .join("skills")
         .join(skill_id)
         .join("SKILL.md");
@@ -187,7 +186,8 @@ mod tests {
     fn agent_scope_overrides_global_scope() {
         let base_dir = unique_temp_dir("skill_tool_override");
         let global_path = base_dir.join("skills/research/SKILL.md");
-        let agent_path = base_dir.join("workspaces/planner/skills/research/SKILL.md");
+        let workspace = unique_temp_dir("skill_tool_override_workspace");
+        let agent_path = workspace.join("skills/research/SKILL.md");
         fs::create_dir_all(global_path.parent().expect("global parent")).expect("global dir");
         fs::create_dir_all(agent_path.parent().expect("agent parent")).expect("agent dir");
         fs::write(&global_path, "GLOBAL\n").expect("write global skill");
@@ -196,7 +196,8 @@ mod tests {
         let skills = SkillsConfig {
             enabled_skills: vec!["research".to_owned()],
         };
-        let loaded = load_skill_tools("planner", &skills, &base_dir).expect("load skills");
+        let loaded =
+            load_skill_tools("planner", &skills, &workspace, &base_dir).expect("load skills");
 
         assert_eq!(loaded.tool_names, vec!["skill_research".to_owned()]);
         assert_eq!(
@@ -211,6 +212,7 @@ mod tests {
         assert_eq!(loaded.tools[0].raw_markdown(), "AGENT\n");
 
         let _ = fs::remove_dir_all(base_dir);
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -231,7 +233,8 @@ mod tests {
                 "ok".to_owned(),
             ],
         };
-        let loaded = load_skill_tools("planner", &skills, &base_dir).expect("load skills");
+        let loaded =
+            load_skill_tools("planner", &skills, &base_dir, &base_dir).expect("load skills");
 
         assert_eq!(loaded.tool_names, vec!["skill_ok".to_owned()]);
         assert_eq!(
@@ -253,7 +256,8 @@ mod tests {
         let skills = SkillsConfig {
             enabled_skills: vec!["bad/skill".to_owned()],
         };
-        let err = load_skill_tools("planner", &skills, &base_dir).expect_err("invalid id");
+        let err =
+            load_skill_tools("planner", &skills, &base_dir, &base_dir).expect_err("invalid id");
         match err {
             FrameworkError::Config(message) => assert!(message.contains("invalid skill id")),
             other => panic!("expected config error, got {other}"),

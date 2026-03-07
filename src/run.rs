@@ -249,8 +249,13 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
                     agent.id
                 )
             })?;
-        let tooling = build_tool_registry_for_agent(&agent.id, &agent_config, &app_paths.base_dir)
-            .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
+        let tooling = build_tool_registry_for_agent(
+            &agent.id,
+            &agent_config,
+            &agent.workspace,
+            &app_paths.base_dir,
+        )
+        .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
         info!(
             agent_id = %agent.id,
             requested_skills = tooling.skill_stats.requested,

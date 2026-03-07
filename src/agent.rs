@@ -408,8 +408,12 @@ impl SummonService for RuntimeSummonService {
 
         let target_agent_config = load_agent_config(workspace)?;
         let system_prompt = load_system_prompt_for_workspace(workspace)?;
-        let target_tooling =
-            build_tool_registry_for_agent(target_agent, &target_agent_config, &self.app_base_dir)?;
+        let target_tooling = build_tool_registry_for_agent(
+            target_agent,
+            &target_agent_config,
+            workspace,
+            &self.app_base_dir,
+        )?;
         let effective_target_tools = with_auto_enabled_skill_tools(
             &target_agent_config.tools,
             &target_tooling.skill_tool_names,
@@ -522,10 +526,16 @@ pub(crate) struct AgentTooling {
 pub(crate) fn build_tool_registry_for_agent(
     agent_id: &str,
     agent_config: &AgentConfig,
+    agent_workspace: &Path,
     app_base_dir: &Path,
 ) -> Result<AgentTooling, FrameworkError> {
     let mut registry = default_registry();
-    let loaded_skills = load_skill_tools(agent_id, &agent_config.skills, app_base_dir)?;
+    let loaded_skills = load_skill_tools(
+        agent_id,
+        &agent_config.skills,
+        agent_workspace,
+        app_base_dir,
+    )?;
     for skill_tool in loaded_skills.tools {
         registry.register(skill_tool);
     }
