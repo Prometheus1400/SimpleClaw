@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::{debug, error};
 
 use crate::config::ProviderConfig;
 use crate::error::FrameworkError;
@@ -186,12 +187,23 @@ fn build_gemini_contents(history: &[Message]) -> Vec<Value> {
 
 #[async_trait]
 impl Provider for GeminiProvider {
+    #[tracing::instrument(
+        name = "provider.generate",
+        skip(self, system_prompt, history, tools),
+        fields(
+            provider = "gemini",
+            model = %self.config.model,
+            history_len = history.len(),
+            tool_count = tools.len()
+        )
+    )]
     async fn generate(
         &self,
         system_prompt: &str,
         history: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<ProviderResponse, FrameworkError> {
+        let request_started = std::time::Instant::now();
         let api_key = self.api_key()?;
         let url = self.endpoint();
 
@@ -219,6 +231,11 @@ impl Provider for GeminiProvider {
                 "functionDeclarations": function_declarations
             }]
         });
+        debug!(
+            status = "started",
+            system_prompt_chars = system_prompt.chars().count(),
+            "provider request"
+        );
 
         let response_value = self
             .client
@@ -227,12 +244,39 @@ impl Provider for GeminiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| FrameworkError::Provider(format!("gemini request failed: {e}")))?
+            .map_err(|e| {
+                error!(
+                    status = "failed",
+                    error_kind = "http_send",
+                    elapsed_ms = request_started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "provider request"
+                );
+                FrameworkError::Provider(format!("gemini request failed: {e}"))
+            })?
             .error_for_status()
-            .map_err(|e| FrameworkError::Provider(format!("gemini returned error: {e}")))?
+            .map_err(|e| {
+                error!(
+                    status = "failed",
+                    error_kind = "http_status",
+                    elapsed_ms = request_started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "provider request"
+                );
+                FrameworkError::Provider(format!("gemini returned error: {e}"))
+            })?
             .json::<Value>()
             .await
-            .map_err(|e| FrameworkError::Provider(format!("invalid gemini response: {e}")))?;
+            .map_err(|e| {
+                error!(
+                    status = "failed",
+                    error_kind = "response_parse",
+                    elapsed_ms = request_started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "provider request"
+                );
+                FrameworkError::Provider(format!("invalid gemini response: {e}"))
+            })?;
 
         let mut output_text = None;
         let mut tool_calls = Vec::new();
@@ -282,6 +326,14 @@ impl Provider for GeminiProvider {
                 }
             }
         }
+
+        debug!(
+            status = "completed",
+            elapsed_ms = request_started.elapsed().as_millis() as u64,
+            output_text = output_text.is_some(),
+            tool_call_count = tool_calls.len(),
+            "provider request"
+        );
 
         Ok(ProviderResponse {
             output_text,

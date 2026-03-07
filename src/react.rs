@@ -3,12 +3,18 @@ use crate::error::FrameworkError;
 use crate::provider::{Message, Provider, Role};
 use crate::tools::{ActiveTools, ToolCtx};
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 const FINAL_OUTPUT_PREVIEW_CHARS: usize = 120;
+#[cfg(test)]
 const REDACTED: &str = "***REDACTED***";
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    name = "react.loop",
+    skip(provider, dispatcher, tool_ctx, active_tools, system_prompt, history),
+    fields(session_id = %session_id, agent_id = %agent_id, max_steps)
+)]
 pub async fn run_loop(
     provider: &dyn Provider,
     dispatcher: &dyn ToolDispatcher,
@@ -23,7 +29,6 @@ pub async fn run_loop(
     let definitions = active_tools.definitions();
     let tool_names = active_tools.names();
     let run_started = Instant::now();
-
     let extra_instructions = dispatcher.prompt_instructions(&definitions);
     let effective_system_prompt = if extra_instructions.is_empty() {
         system_prompt.to_owned()
@@ -38,55 +43,50 @@ pub async fn run_loop(
     };
 
     info!(
-        agent_id = %agent_id,
-        session_id = %session_id,
+        status = "started",
         max_steps,
         history_len = history.len(),
         enabled_tools = ?tool_names,
-        "agent react loop started"
+        "react loop"
     );
 
     for step_idx in 0..max_steps {
         let step = step_idx + 1;
         let provider_started = Instant::now();
-        debug!(
-            agent_id = %agent_id,
-            session_id = %session_id,
-            step,
-            history_len = history.len(),
-            "requesting provider turn"
-        );
+        let turn_span = info_span!("provider.turn", step, history_len = history.len());
+        debug!(parent: &turn_span, status = "started", "provider turn");
         let response = match provider
             .generate(&effective_system_prompt, &history, &tool_specs)
+            .instrument(turn_span.clone())
             .await
         {
             Ok(response) => response,
             Err(err) => {
                 error!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    step,
+                    parent: &turn_span,
+                    status = "failed",
+                    error_kind = "provider_generate",
                     elapsed_ms = provider_started.elapsed().as_millis() as u64,
                     error = %err,
-                    "provider turn failed"
+                    "provider turn"
                 );
                 return Err(err);
             }
         };
         debug!(
-            agent_id = %agent_id,
-            session_id = %session_id,
-            step,
+            parent: &turn_span,
+            status = "completed",
             elapsed_ms = provider_started.elapsed().as_millis() as u64,
             tool_call_count = response.tool_calls.len(),
             has_output_text = response.output_text.is_some(),
-            "provider turn completed"
+            "provider turn"
         );
 
         match dispatcher.parse_response(&response) {
             DispatchAction::ToolCalls(calls) => {
                 let results = dispatcher
                     .execute_tool_calls(&calls, active_tools, tool_ctx, session_id)
+                    .instrument(turn_span.clone())
                     .await;
                 let messages = dispatcher.format_for_history(&calls, &results);
                 history.extend(messages);
@@ -96,201 +96,31 @@ pub async fn run_loop(
                 let output_preview = sanitize_log_preview(&text, FINAL_OUTPUT_PREVIEW_CHARS);
                 history.push(Message::text(Role::Assistant, text.clone()));
                 info!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    step,
+                    status = "completed",
                     elapsed_ms = run_started.elapsed().as_millis() as u64,
                     output_preview = %output_preview,
-                    "agent react loop completed"
+                    "react loop"
                 );
                 return Ok(text);
             }
             DispatchAction::Empty => {
-                warn!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    step,
-                    "provider returned empty response"
-                );
+                warn!(parent: &turn_span, status = "empty", "provider response");
                 continue;
             }
         }
     }
 
     warn!(
-        agent_id = %agent_id,
-        session_id = %session_id,
+        status = "max_steps_reached",
         max_steps,
         elapsed_ms = run_started.elapsed().as_millis() as u64,
-        "agent react loop reached max steps without final response"
+        "react loop"
     );
     Ok("max_steps reached without final response".to_owned())
 }
 
 pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
-    truncate_for_log(
-        &normalize_for_log_line(&redact_sensitive_values(text)),
-        max_chars,
-    )
-}
-
-fn truncate_for_log(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let clipped = text.chars().take(max_chars).collect::<String>();
-    format!("{clipped}...[truncated]")
-}
-
-fn normalize_for_log_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn redact_sensitive_values(text: &str) -> String {
-    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(text) {
-        redact_json_value(&mut json);
-        return json.to_string();
-    }
-
-    let mut redacted = text.to_owned();
-    for key in [
-        "api_key",
-        "apikey",
-        "token",
-        "secret",
-        "password",
-        "authorization",
-        "access_token",
-        "refresh_token",
-    ] {
-        redacted = redact_after_key(&redacted, key, '=');
-        redacted = redact_after_key(&redacted, key, ':');
-    }
-    redact_bearer_token(&redacted)
-}
-
-fn redact_json_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, child) in map.iter_mut() {
-                if is_sensitive_key(key) {
-                    *child = serde_json::Value::String(REDACTED.to_owned());
-                } else {
-                    redact_json_value(child);
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                redact_json_value(item);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    [
-        "api_key",
-        "apikey",
-        "token",
-        "secret",
-        "password",
-        "authorization",
-        "access_token",
-        "refresh_token",
-    ]
-    .iter()
-    .any(|candidate| lower.contains(candidate))
-}
-
-fn redact_after_key(input: &str, key: &str, separator: char) -> String {
-    let needle = format!("{key}{separator}");
-    let mut output = input.to_owned();
-    let mut search_from = 0usize;
-
-    loop {
-        if search_from >= output.len() {
-            break;
-        }
-        let lower = output.to_ascii_lowercase();
-        let Some(relative_idx) = lower[search_from..].find(&needle) else {
-            break;
-        };
-        let token_start = search_from + relative_idx;
-        let value_start = token_start + needle.len();
-        if value_start >= output.len() {
-            break;
-        }
-        let mut value_end = output[value_start..]
-            .find(is_secret_value_terminator)
-            .map(|idx| value_start + idx)
-            .unwrap_or(output.len());
-
-        if key.eq_ignore_ascii_case("authorization")
-            && output[value_start..]
-                .to_ascii_lowercase()
-                .starts_with("bearer ")
-        {
-            let bearer_token_start = value_start + "bearer ".len();
-            value_end = output[bearer_token_start..]
-                .find(is_secret_value_terminator)
-                .map(|idx| bearer_token_start + idx)
-                .unwrap_or(output.len());
-        }
-        if value_end == value_start {
-            search_from = value_start + 1;
-            continue;
-        }
-
-        output.replace_range(value_start..value_end, REDACTED);
-        search_from = value_start + REDACTED.len();
-    }
-
-    output
-}
-
-fn redact_bearer_token(input: &str) -> String {
-    let mut output = input.to_owned();
-    let mut search_from = 0usize;
-    let needle = "bearer ";
-
-    loop {
-        if search_from >= output.len() {
-            break;
-        }
-        let lower = output.to_ascii_lowercase();
-        let Some(relative_idx) = lower[search_from..].find(needle) else {
-            break;
-        };
-        let token_start = search_from + relative_idx;
-        let value_start = token_start + needle.len();
-        if value_start >= output.len() {
-            break;
-        }
-        let value_end = output[value_start..]
-            .find(is_secret_value_terminator)
-            .map(|idx| value_start + idx)
-            .unwrap_or(output.len());
-        if value_end == value_start {
-            search_from = value_start + 1;
-            continue;
-        }
-
-        output.replace_range(value_start..value_end, REDACTED);
-        search_from = value_start + REDACTED.len();
-    }
-
-    output
-}
-
-fn is_secret_value_terminator(ch: char) -> bool {
-    ch.is_whitespace()
-        || matches!(
-            ch,
-            '"' | '\'' | ',' | '&' | ';' | ')' | '(' | ']' | '[' | '{' | '}'
-        )
+    crate::telemetry::sanitize_preview(text, max_chars)
 }
 
 #[cfg(test)]

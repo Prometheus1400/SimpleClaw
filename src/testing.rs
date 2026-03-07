@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
 use tokio::sync::Mutex;
 
-use crate::channel::{Channel, InboundMessage, build_session_key};
+use crate::channels::{Channel, ChannelInbound, InboundMessage};
 use crate::cli::Cli;
 use crate::config::{AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig};
 use crate::error::FrameworkError;
@@ -135,7 +135,7 @@ pub async fn run_single_gateway_roundtrip(
         name: config.agent_name.clone(),
         workspace: workspace_dir.clone(),
     }];
-    global.gateway.channels = vec![GatewayChannelKind::Logging];
+    global.gateway.channels = vec![GatewayChannelKind::Discord];
     let loaded = LoadedConfig { global };
 
     let app_base_dir = ephemeral_paths.root_dir.join("app");
@@ -163,14 +163,10 @@ pub async fn run_single_gateway_roundtrip(
         .wrap_err("failed to assemble runtime state for integration harness")?;
 
     let inbound = InboundMessage {
-        source_channel: GatewayChannelKind::Logging,
+        trace_id: crate::telemetry::next_trace_id(),
+        source_channel: GatewayChannelKind::Discord,
         target_agent_id: config.agent_id.clone(),
-        session_key: build_session_key(
-            &config.agent_id,
-            false,
-            GatewayChannelKind::Logging,
-            &config.channel_id,
-        ),
+        session_key: format!("agent:{}:discord:{}", config.agent_id, config.channel_id),
         channel_id: config.channel_id.clone(),
         guild_id: None,
         is_dm: false,
@@ -231,8 +227,8 @@ impl Provider for StaticMockProvider {
 struct CaptureChannel {
     outbound: Mutex<Vec<TestOutboundMessage>>,
     typing_events: AtomicUsize,
-    listen_tx: tokio::sync::mpsc::Sender<InboundMessage>,
-    listen_rx: Mutex<tokio::sync::mpsc::Receiver<InboundMessage>>,
+    listen_tx: tokio::sync::mpsc::Sender<ChannelInbound>,
+    listen_rx: Mutex<tokio::sync::mpsc::Receiver<ChannelInbound>>,
 }
 
 impl CaptureChannel {
@@ -271,7 +267,7 @@ impl Channel for CaptureChannel {
         Ok(())
     }
 
-    async fn listen(&self) -> Result<InboundMessage, FrameworkError> {
+    async fn listen(&self) -> Result<ChannelInbound, FrameworkError> {
         let _keep_sender_alive = &self.listen_tx;
         let mut rx = self.listen_rx.lock().await;
         rx.recv()
@@ -334,7 +330,7 @@ impl ChannelFactory for StaticChannelFactory {
         _loaded: &LoadedConfig,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
-        channels.insert(GatewayChannelKind::Logging, self.channel.clone());
+        channels.insert(GatewayChannelKind::Discord, self.channel.clone());
         Ok(channels)
     }
 }

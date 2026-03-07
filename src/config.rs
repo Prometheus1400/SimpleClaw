@@ -20,6 +20,8 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
+    pub inbound: InboundConfig,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
@@ -77,8 +79,9 @@ impl LoadedConfig {
             default_agent.workspace = workspace;
         }
         validate_agents_config(&global.agents)?;
+        reconcile_inbound_default_agent(&mut global.inbound, &global.agents);
         validate_gateway_config(&global.gateway)?;
-        validate_discord_inbound_config(&global.discord.inbound)?;
+        validate_inbound_config(&global.inbound)?;
 
         Ok(Self { global })
     }
@@ -142,6 +145,30 @@ fn validate_agents_config(agents: &AgentsConfig) -> Result<(), FrameworkError> {
     Ok(())
 }
 
+fn reconcile_inbound_default_agent(inbound: &mut InboundConfig, agents: &AgentsConfig) {
+    let Some(current_agent_raw) = inbound.defaults.agent.as_deref() else {
+        inbound.defaults.agent = Some(agents.default.clone());
+        return;
+    };
+    let current_agent = current_agent_raw.trim();
+    if current_agent.is_empty() {
+        inbound.defaults.agent = Some(agents.default.clone());
+        return;
+    }
+
+    let legacy_default = default_agent_id();
+    if current_agent != legacy_default {
+        return;
+    }
+    let legacy_exists = agents.list.iter().any(|agent| agent.id == legacy_default);
+    if legacy_exists {
+        return;
+    }
+    if agents.list.iter().any(|agent| agent.id == agents.default) {
+        inbound.defaults.agent = Some(agents.default.clone());
+    }
+}
+
 fn validate_gateway_config(gateway: &GatewayConfig) -> Result<(), FrameworkError> {
     if gateway.channels.is_empty() {
         return Err(FrameworkError::Config(
@@ -160,7 +187,7 @@ fn validate_gateway_config(gateway: &GatewayConfig) -> Result<(), FrameworkError
     Ok(())
 }
 
-fn validate_discord_inbound_config(inbound: &DiscordInboundConfig) -> Result<(), FrameworkError> {
+fn validate_inbound_config(inbound: &InboundConfig) -> Result<(), FrameworkError> {
     if inbound
         .defaults
         .agent
@@ -170,21 +197,33 @@ fn validate_discord_inbound_config(inbound: &DiscordInboundConfig) -> Result<(),
         .unwrap_or(true)
     {
         return Err(FrameworkError::Config(
-            "discord.inbound.defaults.agent is required and must be non-empty".to_owned(),
+            "inbound.defaults.agent is required and must be non-empty".to_owned(),
         ));
     }
-    validate_optional_policy_agent("discord.inbound.defaults", &inbound.defaults)?;
-    validate_optional_policy_agent("discord.inbound.dm", &inbound.dm)?;
-    for (server_id, server) in &inbound.servers {
+    validate_optional_policy_agent("inbound.defaults", &inbound.defaults)?;
+    validate_optional_policy_agent("inbound.dm", &inbound.dm)?;
+    for (kind, channel) in &inbound.channels {
         validate_optional_policy_agent(
-            &format!("discord.inbound.servers.{server_id}"),
-            &server.policy,
+            &format!("inbound.channels.{}", kind.as_str()),
+            &channel.policy,
         )?;
-        for (channel_id, policy) in &server.channels {
+        for (workspace_id, workspace) in &channel.workspaces {
             validate_optional_policy_agent(
-                &format!("discord.inbound.servers.{server_id}.channels.{channel_id}"),
-                policy,
+                &format!(
+                    "inbound.channels.{}.workspaces.{workspace_id}",
+                    kind.as_str()
+                ),
+                &workspace.policy,
             )?;
+            for (channel_id, policy) in &workspace.channels {
+                validate_optional_policy_agent(
+                    &format!(
+                        "inbound.channels.{}.workspaces.{workspace_id}.channels.{channel_id}",
+                        kind.as_str()
+                    ),
+                    policy,
+                )?;
+            }
         }
     }
     Ok(())
@@ -192,7 +231,7 @@ fn validate_discord_inbound_config(inbound: &DiscordInboundConfig) -> Result<(),
 
 fn validate_optional_policy_agent(
     path: &str,
-    policy: &DiscordInboundPolicyConfig,
+    policy: &InboundPolicyConfig,
 ) -> Result<(), FrameworkError> {
     if let Some(agent) = policy.agent.as_deref()
         && agent.trim().is_empty()
@@ -530,14 +569,12 @@ pub struct AgentEntryConfig {
 #[serde(rename_all = "snake_case")]
 pub enum GatewayChannelKind {
     Discord,
-    Logging,
 }
 
 impl GatewayChannelKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Discord => "discord",
-            Self::Logging => "logging",
         }
     }
 }
@@ -599,8 +636,6 @@ impl ProviderKind {
 pub struct DiscordConfig {
     #[serde(default)]
     pub token: Option<String>,
-    #[serde(default)]
-    pub inbound: DiscordInboundConfig,
 }
 
 impl DiscordConfig {
@@ -618,38 +653,47 @@ impl DiscordConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiscordInboundConfig {
-    #[serde(default)]
-    pub defaults: DiscordInboundPolicyConfig,
-    #[serde(default)]
-    pub servers: HashMap<String, DiscordServerInboundConfig>,
-    #[serde(default)]
-    pub dm: DiscordInboundPolicyConfig,
+#[serde(default, deny_unknown_fields)]
+pub struct InboundConfig {
+    pub defaults: InboundPolicyConfig,
+    pub channels: HashMap<GatewayChannelKind, ChannelInboundConfig>,
+    pub dm: InboundPolicyConfig,
 }
 
-impl Default for DiscordInboundConfig {
+impl Default for InboundConfig {
     fn default() -> Self {
         Self {
-            defaults: DiscordInboundPolicyConfig {
+            defaults: InboundPolicyConfig {
                 agent: Some(default_agent_id()),
-                ..DiscordInboundPolicyConfig::default()
+                ..InboundPolicyConfig::default()
             },
-            servers: HashMap::new(),
-            dm: DiscordInboundPolicyConfig::default(),
+            channels: HashMap::new(),
+            dm: InboundPolicyConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DiscordServerInboundConfig {
+#[serde(default, deny_unknown_fields)]
+pub struct ChannelInboundConfig {
     #[serde(flatten)]
-    pub policy: DiscordInboundPolicyConfig,
+    pub policy: InboundPolicyConfig,
     #[serde(default)]
-    pub channels: HashMap<String, DiscordInboundPolicyConfig>,
+    pub workspaces: HashMap<String, WorkspaceInboundConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DiscordInboundPolicyConfig {
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceInboundConfig {
+    #[serde(flatten)]
+    pub policy: InboundPolicyConfig,
+    #[serde(default)]
+    pub channels: HashMap<String, InboundPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct InboundPolicyConfig {
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]
@@ -659,39 +703,46 @@ pub struct DiscordInboundPolicyConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct DiscordInboundPolicy {
+pub struct InboundPolicy {
     pub agent: String,
     pub allow_from: Option<Vec<String>>,
     pub require_mentions: bool,
 }
 
-impl DiscordInboundConfig {
+impl InboundConfig {
     pub fn resolve(
         &self,
-        guild_id: Option<u64>,
-        channel_id: u64,
+        source_channel: GatewayChannelKind,
+        workspace_id: Option<&str>,
+        channel_id: &str,
         is_dm: bool,
-    ) -> DiscordInboundPolicy {
+    ) -> InboundPolicy {
         let mut effective = self.defaults.clone();
+
+        if let Some(channel_scope) = self.channels.get(&source_channel) {
+            effective.apply_override(&channel_scope.policy);
+            if !is_dm
+                && let Some(workspace) =
+                    workspace_id.and_then(|id| channel_scope.workspaces.get(id))
+            {
+                effective.apply_override(&workspace.policy);
+                if let Some(channel) = workspace.channels.get(channel_id) {
+                    effective.apply_override(channel);
+                }
+            }
+        }
 
         if is_dm {
             effective.apply_override(&self.dm);
             return effective.finalize(true);
         }
 
-        if let Some(server) = guild_id.and_then(|id| self.servers.get(&id.to_string())) {
-            effective.apply_override(&server.policy);
-            if let Some(channel) = server.channels.get(&channel_id.to_string()) {
-                effective.apply_override(channel);
-            }
-        }
-
         effective.finalize(false)
     }
 }
 
-impl DiscordInboundPolicyConfig {
-    fn apply_override(&mut self, lower: &DiscordInboundPolicyConfig) {
+impl InboundPolicyConfig {
+    fn apply_override(&mut self, lower: &InboundPolicyConfig) {
         if let Some(agent) = lower.agent.as_deref() {
             self.agent = Some(agent.to_owned());
         }
@@ -703,8 +754,8 @@ impl DiscordInboundPolicyConfig {
         }
     }
 
-    fn finalize(self, is_dm: bool) -> DiscordInboundPolicy {
-        DiscordInboundPolicy {
+    fn finalize(self, is_dm: bool) -> InboundPolicy {
+        InboundPolicy {
             agent: self.agent.unwrap_or_default(),
             allow_from: self.allow_from,
             require_mentions: if is_dm {
@@ -716,10 +767,10 @@ impl DiscordInboundPolicyConfig {
     }
 }
 
-impl DiscordInboundPolicy {
-    pub fn allows_user(&self, user_id: u64) -> bool {
+impl InboundPolicy {
+    pub fn allows_user(&self, user_id: &str) -> bool {
         match &self.allow_from {
-            Some(ids) => ids.iter().any(|id| id == &user_id.to_string()),
+            Some(ids) => ids.iter().any(|id| id == user_id),
             None => true,
         }
     }
@@ -900,102 +951,159 @@ mod tests {
 
     #[test]
     fn channel_policy_overrides_server_and_global() {
-        let mut inbound = DiscordInboundConfig {
-            defaults: DiscordInboundPolicyConfig {
+        let mut inbound = InboundConfig {
+            defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: Some(vec!["1".to_owned()]),
                 require_mentions: Some(true),
             },
-            ..DiscordInboundConfig::default()
+            ..InboundConfig::default()
         };
 
-        inbound.servers.insert(
-            "100".to_owned(),
-            DiscordServerInboundConfig {
-                policy: DiscordInboundPolicyConfig {
-                    agent: Some("server".to_owned()),
-                    allow_from: Some(vec!["2".to_owned()]),
+        inbound.channels.insert(
+            GatewayChannelKind::Discord,
+            ChannelInboundConfig {
+                policy: InboundPolicyConfig {
+                    agent: Some("channel-kind".to_owned()),
+                    allow_from: None,
                     require_mentions: None,
                 },
-                channels: HashMap::from([(
-                    "200".to_owned(),
-                    DiscordInboundPolicyConfig {
-                        agent: Some("channel".to_owned()),
-                        allow_from: Some(vec!["3".to_owned()]),
-                        require_mentions: Some(false),
+                workspaces: HashMap::from([(
+                    "100".to_owned(),
+                    WorkspaceInboundConfig {
+                        policy: InboundPolicyConfig {
+                            agent: Some("workspace".to_owned()),
+                            allow_from: Some(vec!["2".to_owned()]),
+                            require_mentions: None,
+                        },
+                        channels: HashMap::from([(
+                            "200".to_owned(),
+                            InboundPolicyConfig {
+                                agent: Some("channel".to_owned()),
+                                allow_from: Some(vec!["3".to_owned()]),
+                                require_mentions: Some(false),
+                            },
+                        )]),
                     },
                 )]),
             },
         );
 
-        let policy = inbound.resolve(Some(100), 200, false);
+        let policy = inbound.resolve(GatewayChannelKind::Discord, Some("100"), "200", false);
+        assert_eq!(policy.agent, "channel");
         assert_eq!(policy.allow_from, Some(vec!["3".to_owned()]));
         assert!(!policy.require_mentions);
     }
 
     #[test]
-    fn server_policy_applies_when_channel_missing() {
-        let mut inbound = DiscordInboundConfig::default();
+    fn workspace_policy_applies_when_channel_missing() {
+        let mut inbound = InboundConfig::default();
         inbound.defaults.agent = Some("default".to_owned());
-        inbound.servers.insert(
-            "100".to_owned(),
-            DiscordServerInboundConfig {
-                policy: DiscordInboundPolicyConfig {
-                    agent: Some("server".to_owned()),
-                    allow_from: Some(vec!["42".to_owned()]),
-                    require_mentions: Some(true),
+        inbound.channels.insert(
+            GatewayChannelKind::Discord,
+            ChannelInboundConfig {
+                policy: InboundPolicyConfig {
+                    agent: Some("channel-kind".to_owned()),
+                    allow_from: None,
+                    require_mentions: None,
                 },
-                channels: HashMap::new(),
+                workspaces: HashMap::from([(
+                    "100".to_owned(),
+                    WorkspaceInboundConfig {
+                        policy: InboundPolicyConfig {
+                            agent: Some("workspace".to_owned()),
+                            allow_from: Some(vec!["42".to_owned()]),
+                            require_mentions: Some(true),
+                        },
+                        channels: HashMap::new(),
+                    },
+                )]),
             },
         );
 
-        let policy = inbound.resolve(Some(100), 201, false);
+        let policy = inbound.resolve(GatewayChannelKind::Discord, Some("100"), "201", false);
+        assert_eq!(policy.agent, "workspace");
         assert_eq!(policy.allow_from, Some(vec!["42".to_owned()]));
         assert!(policy.require_mentions);
     }
 
     #[test]
-    fn global_defaults_apply_when_no_server_or_channel_match() {
-        let inbound = DiscordInboundConfig {
-            defaults: DiscordInboundPolicyConfig {
+    fn global_defaults_apply_when_no_workspace_or_channel_match() {
+        let inbound = InboundConfig {
+            defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: Some(vec!["9".to_owned()]),
                 require_mentions: Some(true),
             },
-            ..DiscordInboundConfig::default()
+            ..InboundConfig::default()
         };
 
-        let policy = inbound.resolve(Some(999), 888, false);
+        let policy = inbound.resolve(GatewayChannelKind::Discord, Some("999"), "888", false);
         assert_eq!(policy.allow_from, Some(vec!["9".to_owned()]));
         assert!(policy.require_mentions);
     }
 
     #[test]
     fn dm_scope_overrides_defaults_and_forces_mentions_off() {
-        let inbound = DiscordInboundConfig {
-            defaults: DiscordInboundPolicyConfig {
+        let inbound = InboundConfig {
+            defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            dm: DiscordInboundPolicyConfig {
+            dm: InboundPolicyConfig {
                 agent: Some("dm".to_owned()),
                 allow_from: Some(vec!["11".to_owned()]),
                 require_mentions: Some(true),
             },
-            ..DiscordInboundConfig::default()
+            ..InboundConfig::default()
         };
 
-        let policy = inbound.resolve(None, 321, true);
+        let policy = inbound.resolve(GatewayChannelKind::Discord, None, "321", true);
+        assert_eq!(policy.agent, "dm");
         assert_eq!(policy.allow_from, Some(vec!["11".to_owned()]));
         assert!(!policy.require_mentions);
     }
 
     #[test]
     fn no_allow_from_defaults_to_allow_all() {
-        let inbound = DiscordInboundConfig::default();
-        let policy = inbound.resolve(Some(100), 200, false);
-        assert!(policy.allows_user(123456789));
+        let inbound = InboundConfig::default();
+        let policy = inbound.resolve(GatewayChannelKind::Discord, Some("100"), "200", false);
+        assert!(policy.allows_user("123456789"));
+    }
+
+    #[test]
+    fn dm_override_applies_after_channel_defaults() {
+        let mut inbound = InboundConfig {
+            defaults: InboundPolicyConfig {
+                agent: Some("default".to_owned()),
+                allow_from: None,
+                require_mentions: Some(true),
+            },
+            dm: InboundPolicyConfig {
+                agent: Some("dm".to_owned()),
+                allow_from: Some(vec!["5".to_owned()]),
+                require_mentions: Some(true),
+            },
+            ..InboundConfig::default()
+        };
+
+        inbound.channels.insert(
+            GatewayChannelKind::Discord,
+            ChannelInboundConfig {
+                policy: InboundPolicyConfig {
+                    agent: Some("server".to_owned()),
+                    allow_from: Some(vec!["2".to_owned()]),
+                    require_mentions: None,
+                },
+                workspaces: HashMap::new(),
+            },
+        );
+
+        let policy = inbound.resolve(GatewayChannelKind::Discord, None, "200", true);
+        assert_eq!(policy.agent, "dm");
+        assert_eq!(policy.allow_from, Some(vec!["5".to_owned()]));
+        assert!(!policy.require_mentions);
     }
 
     #[test]
@@ -1472,6 +1580,45 @@ routing:
             }],
         };
         assert!(validate_agents_config(&agents).is_err());
+    }
+
+    #[test]
+    fn reconcile_inbound_default_agent_uses_agents_default_when_legacy_default_missing() {
+        let mut inbound = InboundConfig::default();
+        let agents = AgentsConfig {
+            default: "researcher".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "researcher".to_owned(),
+                name: "Researcher".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+            }],
+        };
+
+        reconcile_inbound_default_agent(&mut inbound, &agents);
+        assert_eq!(inbound.defaults.agent, Some("researcher".to_owned()));
+    }
+
+    #[test]
+    fn reconcile_inbound_default_agent_does_not_override_when_legacy_default_exists() {
+        let mut inbound = InboundConfig::default();
+        let agents = AgentsConfig {
+            default: "researcher".to_owned(),
+            list: vec![
+                AgentEntryConfig {
+                    id: "default".to_owned(),
+                    name: "Default".to_owned(),
+                    workspace: PathBuf::from("./workspace"),
+                },
+                AgentEntryConfig {
+                    id: "researcher".to_owned(),
+                    name: "Researcher".to_owned(),
+                    workspace: PathBuf::from("./workspace-researcher"),
+                },
+            ],
+        };
+
+        reconcile_inbound_default_agent(&mut inbound, &agents);
+        assert_eq!(inbound.defaults.agent, Some("default".to_owned()));
     }
 
     #[test]

@@ -29,6 +29,10 @@ impl Tool for ExecTool {
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
     }
 
+    fn sandbox_aware(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         ctx: &ToolCtx,

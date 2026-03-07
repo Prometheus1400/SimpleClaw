@@ -7,7 +7,7 @@ use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
 use fastembed::{InitOptions, TextEmbedding};
 use rusqlite::params;
 use tokio::sync::Mutex;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use crate::config::{DatabaseConfig, EmbeddingConfig, MemoryPreinjectConfig};
 use crate::error::FrameworkError;
@@ -252,10 +252,18 @@ impl MemoryStore {
         content: &str,
         username: Option<&str>,
     ) -> Result<(), FrameworkError> {
+        debug!(
+            status = "started",
+            session_id = %session_id,
+            role,
+            content_chars = content.chars().count(),
+            "memory append_message"
+        );
         let now = chrono::Utc::now().to_rfc3339();
         let session_for_sessions = session_id.to_owned();
         let session_for_messages = session_id.to_owned();
         let role = role.to_owned();
+        let role_for_log = role.clone();
         let content_owned = content.to_owned();
         let username_owned = username
             .map(str::trim)
@@ -288,6 +296,12 @@ impl MemoryStore {
         })
         .await
         .map_err(|e| FrameworkError::Config(e.to_string()))??;
+        debug!(
+            status = "completed",
+            session_id = %session_id,
+            role = %role_for_log,
+            "memory append_message"
+        );
 
         Ok(())
     }
@@ -328,9 +342,17 @@ impl MemoryStore {
         query: &str,
         config: &MemoryPreinjectConfig,
     ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError> {
+        let started = std::time::Instant::now();
+        debug!(
+            status = "started",
+            session_id = %session_id,
+            query_preview = %crate::telemetry::sanitize_preview(query, 120),
+            top_k = config.top_k,
+            min_score = config.min_score,
+            "memory preinject query"
+        );
         let config = config.normalized();
         let query_embedding = embed_text(self.embedder_ref()?, query).await?;
-        let _ = session_id;
 
         let sql_limit = (config.top_k * 3).max(1) as i64;
         let query_blob = encode_f32_blob(&query_embedding);
@@ -378,7 +400,15 @@ impl MemoryStore {
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))??;
 
-        Ok(rank_preinject_hits(candidates, &config))
+        let hits = rank_preinject_hits(candidates, &config);
+        debug!(
+            status = "completed",
+            session_id = %session_id,
+            selected_hits = hits.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "memory preinject query"
+        );
+        Ok(hits)
     }
 
     pub async fn semantic_forget_long_term(
@@ -534,6 +564,13 @@ impl MemoryStore {
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))??;
         rows.reverse();
+        debug!(
+            status = "completed",
+            session_id = %session_id,
+            limit,
+            returned_rows = rows.len(),
+            "memory recent_messages"
+        );
         Ok(rows)
     }
 
@@ -864,10 +901,7 @@ fn normalize_memory_key(value: &str) -> String {
 }
 
 pub(crate) fn normalize_memory_kind(value: &str) -> Option<String> {
-    let normalized = value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_");
+    let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     if normalized.is_empty() {
         return None;
     }
@@ -1038,7 +1072,10 @@ mod tests {
 
     #[test]
     fn normalize_memory_kind_accepts_only_canonical_values() {
-        assert_eq!(normalize_memory_kind("preferences"), Some("preferences".to_owned()));
+        assert_eq!(
+            normalize_memory_kind("preferences"),
+            Some("preferences".to_owned())
+        );
         assert_eq!(normalize_memory_kind("task"), Some("task".to_owned()));
         assert_eq!(normalize_memory_kind("prefs"), None);
         assert_eq!(normalize_memory_kind(""), None);

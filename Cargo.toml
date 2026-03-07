@@ -5,6 +5,7 @@ edition = "2024"
 
 [workspace]
 members = [
+  "sandbox/common",
   "sandbox/read_tool",
   "sandbox/edit_tool",
 ]
@@ -34,3 +35,4 @@ regex = "1"
 wasmtime = "21"
 wasmtime-wasi = "21"
 cap-std = "3"
+sandbox_common = { path = "sandbox/common" }

@@ -16,13 +16,13 @@ use color_eyre::eyre::WrapErr;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tracing::info;
+use tracing::{Instrument, info, info_span};
 
 use crate::agent::{
     AgentRuntime, build_tool_registry_for_agent, load_agent_config_for_workspace,
     load_system_prompt_for_workspace,
 };
-use crate::channel::{Channel, DiscordChannel, InboundMessage, LoggingChannel};
+use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig, ProviderKind};
 use crate::gateway::Gateway;
@@ -306,9 +306,6 @@ impl ChannelFactory for DefaultChannelFactory {
                         .await
                         .wrap_err("failed to initialize discord channel")?,
                 ),
-                GatewayChannelKind::Logging => {
-                    Arc::new(LoggingChannel::new(loaded.global.agents.default.clone()))
-                }
             };
             channels.insert(*kind, channel);
         }
@@ -411,6 +408,7 @@ where
     ) {
         let workers = Arc::clone(&self.workers);
         let idle_timeout = self.idle_timeout;
+        let worker_key = key.clone();
         tokio::spawn(async move {
             loop {
                 let next = tokio::time::timeout(idle_timeout, rx.recv()).await;
@@ -418,7 +416,7 @@ where
                     Ok(Some(message)) => Some(message),
                     Ok(None) => None,
                     Err(_) => {
-                        tracing::debug!(session_key = %key, "session worker idled out");
+                        tracing::debug!(status = "idled_out", session_id = %key, "session worker");
                         None
                     }
                 }) else {
@@ -432,7 +430,9 @@ where
             if workers.get(&key).is_some_and(|entry| entry.id == worker_id) {
                 workers.remove(&key);
             }
-        });
+        }
+        .instrument(info_span!("session.worker", session_id = %worker_key, worker_id)))
+        ;
     }
 
     async fn remove_worker_if_matches(&self, key: &str, expected_worker_id: u64) {
@@ -526,7 +526,12 @@ pub(crate) async fn assemble_runtime_state(
     }
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Gateway::new(channels, gateway_tx, gateway_rx);
+    let gateway = Gateway::new(
+        channels,
+        loaded.global.inbound.clone(),
+        gateway_tx,
+        gateway_rx,
+    );
 
     Ok(RuntimeState {
         gateway,
@@ -535,16 +540,33 @@ pub(crate) async fn assemble_runtime_state(
     })
 }
 
+#[tracing::instrument(
+    name = "inbound.message",
+    skip(state),
+    fields(
+        trace_id = %inbound.trace_id,
+        session_id = %inbound.session_key,
+        channel_id = %inbound.channel_id,
+        agent_id = %inbound.target_agent_id,
+        source_channel = %inbound.source_channel.as_str(),
+        user_id = %inbound.user_id,
+        invoke = inbound.invoke
+    )
+)]
 pub(crate) async fn handle_inbound_once(
     state: &RuntimeState,
     inbound: InboundMessage,
 ) -> color_eyre::Result<()> {
     let memory_session_id = inbound.session_key.clone();
+    let started = std::time::Instant::now();
+    info!(status = "started", "inbound lifecycle");
     let Some(runtime) = state.runtimes.get(&inbound.target_agent_id) else {
         tracing::error!(
+            status = "dropped",
+            error_kind = "unknown_agent",
             target_agent_id = %inbound.target_agent_id,
             channel_id = %inbound.channel_id,
-            "dropping message due to unknown routed agent"
+            "inbound message dropped"
         );
         if inbound.invoke
             && let Err(err) = state
@@ -555,58 +577,93 @@ pub(crate) async fn handle_inbound_once(
                 )
                 .await
         {
-            tracing::error!(error = %err, "failed to send unknown-agent route reply");
+            tracing::error!(
+                status = "failed",
+                error_kind = "channel_send",
+                error = %err,
+                "route reply failed"
+            );
         }
         return Ok(());
     };
 
     if !inbound.invoke {
         tracing::debug!(
-            session_id = %memory_session_id,
-            channel_id = %inbound.channel_id,
+            status = "recording_context",
             guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
-            user_id = %inbound.user_id,
-            "recording passive channel context message"
+            "passive inbound"
         );
         if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
-            tracing::error!(error = %err, "failed to persist passive context message");
+            tracing::error!(
+                status = "failed",
+                error_kind = "memory_write",
+                error = %err,
+                "passive context persist failed"
+            );
         }
+        info!(
+            status = "completed",
+            latency_ms = started.elapsed().as_millis() as u64,
+            "inbound lifecycle"
+        );
         return Ok(());
     }
 
     if inbound.user_id != "system"
         && let Err(err) = state.gateway.broadcast_typing(&inbound).await
     {
-        tracing::warn!(error = %err, "failed to broadcast typing");
+        tracing::warn!(
+            status = "failed",
+            error_kind = "typing_broadcast",
+            error = %err,
+            "typing broadcast failed"
+        );
     }
     tracing::debug!(
-        session_id = %memory_session_id,
-        channel_id = %inbound.channel_id,
+        status = "dispatching",
         guild_id = inbound.guild_id.as_deref().unwrap_or("dm"),
         is_dm = inbound.is_dm,
-        user_id = %inbound.user_id,
         mentioned_bot = inbound.mentioned_bot,
-        target_agent_id = %inbound.target_agent_id,
-        "dispatching inbound message to agent"
+        "invoke inbound"
     );
 
     match runtime.run(&inbound, &memory_session_id).await {
         Ok(reply) => {
             if let Err(err) = state.gateway.send_message(&inbound, &reply).await {
-                tracing::error!(error = %err, "failed to send channel response");
+                tracing::error!(
+                    status = "failed",
+                    error_kind = "channel_send",
+                    error = %err,
+                    "channel response failed"
+                );
             }
         }
         Err(err) => {
-            tracing::error!(error = %err, "agent execution failed");
+            tracing::error!(
+                status = "failed",
+                error_kind = "agent_runtime",
+                error = %err,
+                "agent execution failed"
+            );
             if let Err(send_err) = state
                 .gateway
                 .send_message(&inbound, &state.safe_error_reply)
                 .await
             {
-                tracing::error!(error = %send_err, "failed to send safe error reply");
+                tracing::error!(
+                    status = "failed",
+                    error_kind = "safe_reply_send",
+                    error = %send_err,
+                    "safe error reply send failed"
+                );
             }
         }
     }
+    info!(
+        status = "completed",
+        latency_ms = started.elapsed().as_millis() as u64,
+        "inbound lifecycle"
+    );
     Ok(())
 }
 
@@ -630,12 +687,14 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
         })
     };
 
-    info!(agent_count = state.runtimes.len(), "runtime initialized");
+    let service_span = info_span!("service.run", agent_count = state.runtimes.len());
+    let _service_entered = service_span.enter();
+    info!(status = "started", "service runtime initialized");
     loop {
         let inbound = match state.gateway.next_message().await {
             Ok(msg) => msg,
             Err(err) => {
-                tracing::error!(error = %err, "gateway listen failed");
+                tracing::error!(status = "failed", error_kind = "gateway_listen", error = %err, "gateway listen failed");
                 continue;
             }
         };
@@ -646,7 +705,7 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
     }
 }
 
-pub fn start_service(cli: &Cli) -> color_eyre::Result<()> {
+pub fn start_service() -> color_eyre::Result<()> {
     let paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
     paths
         .ensure_runtime_dirs()
@@ -665,16 +724,11 @@ pub fn start_service(cli: &Cli) -> color_eyre::Result<()> {
     let exe = std::env::current_exe().wrap_err("failed to resolve current executable path")?;
     let mut child = ProcessCommand::new(exe);
     child
-        .arg("--max-steps")
-        .arg(cli.max_steps.to_string())
         .arg("system")
         .arg("run")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(workspace) = &cli.workspace {
-        child.arg("--workspace").arg(workspace);
-    }
 
     let child = child
         .spawn()

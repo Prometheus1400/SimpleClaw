@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::{debug, info_span, warn};
 
 use crate::config::SandboxMode;
 use crate::error::FrameworkError;
@@ -50,13 +50,19 @@ pub trait ToolDispatcher: Send + Sync {
             let args_json = call.arguments.to_string();
             let args_preview = sanitize_log_preview(&args_json, TOOL_ARG_PREVIEW_CHARS);
             let tool_started = std::time::Instant::now();
-            debug!(
+            let call_index = call_idx + 1;
+            let call_span = info_span!(
+                "tool.call",
                 session_id = %session_id,
-                call_index = call_idx + 1,
+                call_index,
                 tool = %call.name,
-                sandbox_mode = %sandbox_mode_label(tool_ctx.sandbox),
+                sandbox_mode = %sandbox_mode_label(tool_ctx.sandbox)
+            );
+            let _call_entered = call_span.enter();
+            debug!(
+                status = "started",
                 args = %args_preview,
-                "tool call started"
+                "tool call"
             );
 
             let (observation, status) = match active_tools.get(call.name.as_str()) {
@@ -85,25 +91,20 @@ pub trait ToolDispatcher: Send + Sync {
 
             if status == "ok" {
                 debug!(
-                    session_id = %session_id,
-                    call_index = call_idx + 1,
-                    tool = %call.name,
-                    sandbox_mode = %sandbox_mode_label(tool_ctx.sandbox),
+                    status = "completed",
                     elapsed_ms,
-                    status,
+                    result_status = status,
                     observation = %observation_preview,
-                    "tool call completed"
+                    "tool call"
                 );
             } else {
                 warn!(
-                    session_id = %session_id,
-                    call_index = call_idx + 1,
-                    tool = %call.name,
-                    sandbox_mode = %sandbox_mode_label(tool_ctx.sandbox),
+                    status = "failed",
+                    error_kind = status,
                     elapsed_ms,
-                    status,
+                    result_status = status,
                     observation = %observation_preview,
-                    "tool call completed with issue"
+                    "tool call"
                 );
             }
 
