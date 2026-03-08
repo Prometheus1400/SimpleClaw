@@ -68,12 +68,15 @@ impl AgentRuntime {
         let execution_started = Instant::now();
         info!(status = "started", "agent execution");
 
-        let memory = memories.get(&self.config.agent_id).cloned().ok_or_else(|| {
-            FrameworkError::Config(format!(
-                "missing memory store for agent '{}'",
-                self.config.agent_id
-            ))
-        })?;
+        let memory = memories
+            .get(&self.config.agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                FrameworkError::Config(format!(
+                    "missing memory store for agent '{}'",
+                    self.config.agent_id
+                ))
+            })?;
 
         let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);
         memory
@@ -93,7 +96,10 @@ impl AgentRuntime {
             inject_caller_context(&system_prompt, &inbound.user_id, &inbound.username);
         debug!(status = "history_loaded", "agent context");
 
-        let effective_max_steps = self.config.max_steps.min(self.config.runtime_config.max_steps);
+        let effective_max_steps = self
+            .config
+            .max_steps
+            .min(self.config.runtime_config.max_steps);
 
         let params = RunParams {
             provider_key: &self.config.provider_key,
@@ -103,11 +109,10 @@ impl AgentRuntime {
             session_id: memory_session_id,
             max_steps: effective_max_steps,
             memory: memory.clone(),
-            sandbox: self.config.agent_config.sandbox,
+            sandbox: self.config.agent_config.sandbox.clone(),
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.runtime_config.owner_ids.clone(),
-            exec_container: self.config.runtime_config.exec_container.clone(),
             process_manager,
             react_loop: Arc::clone(&react_loop),
             agent_configs,

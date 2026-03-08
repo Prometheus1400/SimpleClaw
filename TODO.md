@@ -47,7 +47,7 @@
 - Read/edit/path helper code triplication: fixed by extracting shared logic into `sandbox/common`.
 - WASM `/tmp` mount used host shared temp dir: fixed with per-execution isolated temp mount and cleanup.
 - Network tools bypass sandbox (`web_search`, `web_fetch`): known limitation, out of scope for this PR.
-- Podman workspace mount is always read-write: known limitation, out of scope for this PR.
+- Sandbox runtime workspace policy granularity still needs hardening review: known limitation, out of scope for this PR.
 
 ### 8. Blocking Embedder Under Async Mutex
 
@@ -75,14 +75,13 @@
 - Add circuit breaker logic to avoid hammering Discord during extended outages.
 - Log reconnection attempts with attempt count.
 
-### 11. `ProcessManager` Uses Polling for Completion Detection
+### 11. `ProcessManager` Completion Detection
 
-**Problem:** `spawn_completion_watcher` polls every 500ms to check if a background process has completed. For podman containers, this involves running `podman inspect` every 500ms.
+**Problem:** Background process completion should be event-driven and avoid polling loops.
 
 **Improvement:**
-- For host processes, use `child.wait()` in a spawned task instead of polling `try_wait()`.
-- For podman containers, consider `podman wait` which blocks until completion.
-- Fall back to polling only when the efficient approach isn't available.
+- Use `child.wait()` in a spawned task and update session state on completion.
+- Avoid periodic polling as the primary completion mechanism.
 
 ### 12. Memory Pre-injection Calls `config.normalized()` Twice
 

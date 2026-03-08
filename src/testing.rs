@@ -11,9 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
 use crate::cli::Cli;
-use crate::config::{
-    AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig,
-};
+use crate::config::{AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;

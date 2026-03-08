@@ -8,9 +8,7 @@ use color_eyre::eyre::WrapErr;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::agent::{
-    AgentRuntime, AgentRuntimeConfig, load_system_prompt_for_workspace,
-};
+use crate::agent::{AgentRuntime, AgentRuntimeConfig, load_system_prompt_for_workspace};
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::Cli;
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
@@ -178,14 +176,17 @@ pub(crate) async fn assemble_runtime_state(
                 agent.id
             ));
         }
-        provider_factory.get(&provider_key).map_err(color_eyre::Report::from)?;
+        provider_factory
+            .get(&provider_key)
+            .map_err(color_eyre::Report::from)?;
 
-        let system_prompt = load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
-            format!(
-                "failed to assemble layered system prompt for agent '{}'",
-                agent.id
-            )
-        })?;
+        let system_prompt =
+            load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
+                format!(
+                    "failed to assemble layered system prompt for agent '{}'",
+                    agent.id
+                )
+            })?;
         let skill_tools = skill_factory
             .load_for_agent(&agent.id, &agent_config, &agent.workspace)
             .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;

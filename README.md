@@ -5,7 +5,7 @@ SimpleClaw is a Rust multi-agent runtime that connects channel events (currently
 - layered prompt assembly
 - short-term and long-term SQLite memory
 - provider-native or XML tool calling
-- tool sandbox controls (`read`/`edit` WASM, `exec` host or podman)
+- tool sandbox controls (`read`/`edit` WASM, `exec` host or sandbox-runtime-rs)
 - per-session concurrency control
 
 This README is an implementation-level architecture deep dive, focused on message lifecycle.

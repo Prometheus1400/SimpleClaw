@@ -21,11 +21,11 @@ mod logging;
 mod session;
 
 pub use daemon::{start_service, stop_service};
-pub use logging::{RETAIN_DAILY_LOG_FILES, RotatingLogWriter};
 pub(crate) use logging::json_log_path;
+pub use logging::{RETAIN_DAILY_LOG_FILES, RotatingLogWriter};
 
 use composition::{
-    RuntimeState, RuntimeDependencies, agent_workspace_memory_paths, assemble_runtime_state,
+    RuntimeDependencies, RuntimeState, agent_workspace_memory_paths, assemble_runtime_state,
 };
 use daemon::{is_process_running, read_pid, state_paths};
 use logging::collect_log_history;

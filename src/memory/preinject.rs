@@ -30,12 +30,18 @@ pub(super) fn rank_preinject_hits(
     let mut out = Vec::new();
     for item in candidates {
         if item.raw_similarity < normalized_config.min_score {
-            trace!(status = "filtered_by_min_score", "memory preinject candidate");
+            trace!(
+                status = "filtered_by_min_score",
+                "memory preinject candidate"
+            );
             continue;
         }
         let key = normalize_memory_key(&item.content);
         if key.is_empty() {
-            trace!(status = "filtered_empty_content", "memory preinject candidate");
+            trace!(
+                status = "filtered_empty_content",
+                "memory preinject candidate"
+            );
             continue;
         }
         if !dedupe.insert(key) {

@@ -714,11 +714,10 @@ fn has_recent_long_term_fact(
     Ok(rows.next()?.is_some())
 }
 
-
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use super::has_recent_long_term_fact;
+    use rusqlite::Connection;
 
     #[test]
     fn long_term_duplicate_check_matches_recent_identical_fact() {
@@ -767,5 +766,4 @@ mod tests {
         .expect("query should succeed");
         assert!(!too_old);
     }
-
 }

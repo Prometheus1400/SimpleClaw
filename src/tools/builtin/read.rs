@@ -4,7 +4,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::SandboxMode;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::{normalize_workspace_root, run_wasm_guest, workspace_guest_mount_path};
 use crate::tools::{Tool, ToolExecEnv};
@@ -41,8 +40,8 @@ impl Tool for ReadTool {
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
         let raw_path = parse_simple_text_arg(args_json);
-        let path = resolve_path_for_read(&raw_path, &ctx.workspace_root, ctx.sandbox)?;
-        if ctx.sandbox == SandboxMode::On {
+        let path = resolve_path_for_read(&raw_path, &ctx.workspace_root, ctx.sandbox.enabled)?;
+        if ctx.sandbox.enabled {
             let guest_path = host_path_to_workspace_guest_path(&path, &ctx.workspace_root)?;
             let output = run_wasm_guest(
                 &ctx.workspace_root,
@@ -89,7 +88,7 @@ fn host_path_to_workspace_guest_path(
 pub(super) fn resolve_path_for_read(
     raw_path: &str,
     workspace_root: &Path,
-    sandbox: SandboxMode,
+    sandbox_enabled: bool,
 ) -> Result<PathBuf, FrameworkError> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
@@ -108,7 +107,7 @@ pub(super) fn resolve_path_for_read(
     };
     let normalized_path = normalize_absolute_path(&absolute);
 
-    if sandbox == SandboxMode::On {
+    if sandbox_enabled {
         let workspace_absolute = if workspace_root.is_absolute() {
             workspace_root.to_path_buf()
         } else {
@@ -244,7 +243,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{host_path_to_workspace_guest_path, resolve_path_for_read};
-    use crate::config::SandboxMode;
 
     fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -259,7 +257,7 @@ mod tests {
         let workspace = unique_test_dir("workspace_relative");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let resolved = resolve_path_for_read("docs/file.txt", &workspace, SandboxMode::On)
+        let resolved = resolve_path_for_read("docs/file.txt", &workspace, true)
             .expect("path should resolve");
         assert_eq!(resolved, workspace.join("docs/file.txt"));
 
@@ -275,7 +273,7 @@ mod tests {
         let err = resolve_path_for_read(
             outside.to_string_lossy().as_ref(),
             &workspace,
-            SandboxMode::On,
+            true,
         )
         .expect_err("outside path should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
@@ -288,7 +286,7 @@ mod tests {
         let workspace = unique_test_dir("workspace_traversal");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let err = resolve_path_for_read("../outside.txt", &workspace, SandboxMode::On)
+        let err = resolve_path_for_read("../outside.txt", &workspace, true)
             .expect_err("parent traversal should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
 
@@ -304,7 +302,7 @@ mod tests {
         let resolved = resolve_path_for_read(
             outside.to_string_lossy().as_ref(),
             &workspace,
-            SandboxMode::Off,
+            false,
         )
         .expect("outside path should resolve with sandbox off");
         assert_eq!(resolved, outside);
@@ -322,7 +320,7 @@ mod tests {
             std::env::set_var("HOME", &fake_home);
         }
 
-        let resolved = resolve_path_for_read("~/keys.txt", &workspace, SandboxMode::Off)
+        let resolved = resolve_path_for_read("~/keys.txt", &workspace, false)
             .expect("home path should resolve");
         assert_eq!(resolved, fake_home.join("keys.txt"));
 
@@ -343,7 +341,7 @@ mod tests {
         let resolved = resolve_path_for_read(
             "$SIMPLECLAW_READ_TEST_DIR/token.txt",
             &workspace,
-            SandboxMode::Off,
+            false,
         )
         .expect("env path should resolve");
         assert_eq!(resolved, env_root.join("token.txt"));

@@ -100,10 +100,7 @@ impl EventHandler for DiscordHandler {
             content: msg.content,
         };
 
-        tracing::debug!(
-            status = "received",
-            "discord inbound received"
-        );
+        tracing::debug!(status = "received", "discord inbound received");
         if let Err(err) = self.inbound_tx.send(inbound).await {
             tracing::warn!(status = "dropped", error_kind = "queue_closed", error = %err, "discord inbound queue closed");
         }
@@ -114,10 +111,7 @@ impl EventHandler for DiscordHandler {
 impl Channel for DiscordChannel {
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
-        tracing::debug!(
-            status = "sending",
-            "discord send"
-        );
+        tracing::debug!(status = "sending", "discord send");
         channel_id
             .say(&self.http, content)
             .await

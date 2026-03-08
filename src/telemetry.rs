@@ -183,4 +183,3 @@ fn is_secret_value_terminator(ch: char) -> bool {
             '"' | '\'' | ',' | '&' | ';' | ')' | '(' | ']' | '[' | '{' | '}'
         )
 }
-

@@ -36,3 +36,4 @@ wasmtime = "21"
 wasmtime-wasi = "21"
 cap-std = "3"
 sandbox_common = { path = "sandbox/common" }
+sandbox-runtime = "0.1.1"

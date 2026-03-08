@@ -1,15 +1,15 @@
 use crate::dispatch::{DispatchAction, ToolDispatcher};
 use crate::error::FrameworkError;
-use crate::providers::{Message, Provider, Role};
 use crate::providers::ProviderFactory;
+use crate::providers::{Message, Provider, Role};
 use crate::tools::skill::SkillFactory;
 use crate::tools::{CompletionRoute, ToolExecEnv, ToolFactory};
 use crate::{agent::AgentRuntimeConfig, channels::InboundMessage, memory::MemoryStore};
-use crate::{config::ExecContainerConfig, config::SandboxMode, tools::ProcessManager};
+use crate::{config::AgentSandboxConfig, tools::ProcessManager};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(test)]
@@ -29,11 +29,10 @@ pub struct RunParams<'a> {
     pub session_id: &'a str,
     pub max_steps: u32,
     pub memory: MemoryStore,
-    pub sandbox: SandboxMode,
+    pub sandbox: AgentSandboxConfig,
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
-    pub exec_container: ExecContainerConfig,
     pub process_manager: Arc<ProcessManager>,
     pub react_loop: Arc<ReactLoop>,
     pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
@@ -74,11 +73,10 @@ impl ReactLoop {
         let skills = self.skill_factory.tools_for_agent(params.agent_id);
         let tool_env = ToolExecEnv {
             memory: params.memory.clone(),
-            sandbox: params.sandbox,
+            sandbox: params.sandbox.clone(),
             workspace_root: params.workspace_root.clone(),
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),
-            exec_container: params.exec_container.clone(),
             process_manager: Arc::clone(&params.process_manager),
             react_loop: Arc::clone(&params.react_loop),
             agent_configs: Arc::clone(&params.agent_configs),

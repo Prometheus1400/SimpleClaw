@@ -10,6 +10,7 @@ use crate::tools::{ActiveTools, ToolExecEnv};
 
 const OWNER_RESTRICTED_TOOLS: &[&str] =
     &["exec", "process", "forget", "summon", "edit", "memorize"];
+const TOOL_OUTPUT_LOG_PREVIEW_CHARS: usize = 500;
 
 pub(crate) struct ParsedToolCall {
     pub name: String,
@@ -76,12 +77,14 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                 ),
             };
             let elapsed_ms = tool_started.elapsed().as_millis() as u64;
+            let output_preview = preview_for_log(&observation, TOOL_OUTPUT_LOG_PREVIEW_CHARS);
 
             if status == "ok" {
                 debug!(
                     status = "completed",
                     tool_name = %call.name,
                     tool_args = %args_preview,
+                    tool_output = %output_preview,
                     elapsed_ms,
                     "tool call"
                 );
@@ -90,6 +93,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                     status = "failed",
                     tool_name = %call.name,
                     tool_args = %args_preview,
+                    tool_output = %output_preview,
                     error_kind = status,
                     elapsed_ms,
                     "tool call"
@@ -115,6 +119,10 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     fn prompt_instructions(&self, tools: &[ToolDefinition]) -> String;
 
     fn should_send_tool_specs(&self) -> bool;
+}
+
+fn preview_for_log(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn enforce_tool_authorization(
