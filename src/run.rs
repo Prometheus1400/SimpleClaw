@@ -19,13 +19,14 @@ pub(crate) mod composition;
 mod daemon;
 mod logging;
 mod session;
+mod transparency;
 
 pub use daemon::{start_service, stop_service};
-pub use logging::{RETAIN_DAILY_LOG_FILES, RotatingLogWriter};
 pub(crate) use logging::json_log_path;
+pub use logging::{RETAIN_DAILY_LOG_FILES, RotatingLogWriter};
 
 use composition::{
-    RuntimeState, RuntimeDependencies, agent_workspace_memory_paths, assemble_runtime_state,
+    RuntimeDependencies, RuntimeState, agent_workspace_memory_paths, assemble_runtime_state,
 };
 use daemon::{is_process_running, read_pid, state_paths};
 use logging::collect_log_history;
@@ -78,7 +79,7 @@ pub(crate) async fn handle_inbound_once(
     if !inbound.invoke {
         tracing::debug!(status = "recording_context", "passive inbound");
         if let Err(err) = runtime
-            .record_context(&inbound, &memory_session_id, state.memories.as_ref())
+            .record_context(&inbound, &memory_session_id, state.context.agents.as_ref())
             .await
         {
             tracing::error!(
@@ -109,19 +110,17 @@ pub(crate) async fn handle_inbound_once(
     tracing::debug!(status = "dispatching", "invoke inbound");
 
     match runtime
-        .run(
-            &inbound,
-            &memory_session_id,
-            Arc::clone(&state.react_loop),
-            Arc::clone(&state.agent_configs),
-            Arc::clone(&state.memories),
-            Arc::clone(&state.process_manager),
-            Some(state.completion_tx.clone()),
-        )
+        .run(&inbound, &memory_session_id, state.context.as_ref())
         .await
     {
-        Ok(reply) => {
-            if let Err(err) = state.gateway.send_message(&inbound, &reply).await {
+        Ok(outcome) => {
+            let outbound = transparency::render_tool_call_transparency(
+                &outcome.reply,
+                &outcome.tool_calls,
+                state.context.tool_call_transparency,
+                inbound.source_channel,
+            );
+            if let Err(err) = state.gateway.send_message(&inbound, &outbound).await {
                 tracing::error!(
                     status = "failed",
                     error_kind = "channel_send",
@@ -139,7 +138,7 @@ pub(crate) async fn handle_inbound_once(
             );
             if let Err(send_err) = state
                 .gateway
-                .send_message(&inbound, &state.safe_error_reply)
+                .send_message(&inbound, &state.context.safe_error_reply)
                 .await
             {
                 tracing::error!(
@@ -159,12 +158,12 @@ pub(crate) async fn handle_inbound_once(
     Ok(())
 }
 
-pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
+pub async fn run_service() -> color_eyre::Result<()> {
     let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
-    let loaded = LoadedConfig::load(cli.workspace.as_deref())
-        .wrap_err("failed to load global/workspace configuration")?;
+    let loaded = LoadedConfig::load(None).wrap_err("failed to load global configuration")?;
     let deps = RuntimeDependencies::default();
-    let state = Arc::new(assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?);
+    let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps).await?;
+    let state = Arc::new(state);
     let coordinator =
         SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
     let handler: SessionHandler<InboundMessage> = {
@@ -183,12 +182,13 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
     let _service_entered = service_span.enter();
     info!(status = "started", "service runtime initialized");
     loop {
-        let inbound = match state.gateway.next_message().await {
-            Ok(msg) => msg,
-            Err(err) => {
-                tracing::error!(status = "failed", error_kind = "gateway_listen", error = %err, "gateway listen failed");
-                continue;
-            }
+        let Some(inbound) = inbound_rx.recv().await else {
+            tracing::error!(
+                status = "failed",
+                error_kind = "gateway_listen",
+                "gateway inbound channel closed"
+            );
+            continue;
         };
         let key = inbound.session_key.clone();
         coordinator

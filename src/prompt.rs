@@ -42,10 +42,7 @@ impl PromptAssembler {
                 })
             })
             .collect::<Result<Vec<_>, FrameworkError>>()?;
-        debug!(
-            status = "completed",
-            "prompt inspect"
-        );
+        debug!(status = "completed", "prompt inspect");
         Ok(layers)
     }
 

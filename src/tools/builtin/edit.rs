@@ -4,7 +4,6 @@ use sandbox_common::{EditArgs, apply_edit_command_at_path};
 use sandbox_common::{apply_create as shared_apply_create, apply_replace as shared_apply_replace};
 use std::time::Duration;
 
-use crate::config::SandboxMode;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::run_wasm_guest;
 use crate::tools::{Tool, ToolExecEnv};
@@ -40,7 +39,7 @@ impl Tool for EditTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
-        if ctx.sandbox == SandboxMode::On {
+        if ctx.sandbox.enabled {
             let output = run_wasm_guest(
                 &ctx.workspace_root,
                 "edit_tool.wasm",
@@ -62,7 +61,7 @@ impl Tool for EditTool {
         let args: EditArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
 
-        let path = resolve_path_for_read(&args.path, &ctx.workspace_root, ctx.sandbox)?;
+        let path = resolve_path_for_read(&args.path, &ctx.workspace_root, ctx.sandbox.enabled)?;
         apply_edit_command_at_path(&args, &path).map_err(|e| FrameworkError::Tool(e.to_string()))
     }
 }
@@ -93,7 +92,6 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{EditArgs, apply_create, apply_replace, resolve_path_for_read};
-    use crate::config::SandboxMode;
 
     fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -199,7 +197,7 @@ mod tests {
         let err = resolve_path_for_read(
             outside.join("secrets.txt").to_string_lossy().as_ref(),
             &workspace,
-            SandboxMode::On,
+            true,
         )
         .expect_err("outside path should be denied");
         assert!(err.to_string().contains("path denied by sandbox"));

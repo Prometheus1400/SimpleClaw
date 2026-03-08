@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentConfig, RuntimeConfig};
+use crate::config::{AgentConfig, RuntimeConfig, ToolCallTransparency};
 use crate::error::FrameworkError;
-use crate::memory::{MemoryHitStore, MemoryPreinjectHit, MemoryStore};
+use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
-use crate::react::{ReactLoop, RunParams};
+use crate::react::{ReactLoop, RunOutcome, RunParams};
 use crate::tools::{CompletionRoute, ProcessManager};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
@@ -26,6 +27,46 @@ pub struct AgentRuntimeConfig {
     pub app_base_dir: PathBuf,
     pub system_prompt: String,
     pub max_steps: u32,
+}
+
+#[derive(Clone)]
+pub struct AgentDirectory {
+    agent_configs: HashMap<String, AgentRuntimeConfig>,
+    memories: HashMap<String, DynMemory>,
+}
+
+impl AgentDirectory {
+    pub fn new(
+        agent_configs: HashMap<String, AgentRuntimeConfig>,
+        memories: HashMap<String, DynMemory>,
+    ) -> Self {
+        Self {
+            agent_configs,
+            memories,
+        }
+    }
+
+    pub fn config(&self, agent_id: &str) -> Option<&AgentRuntimeConfig> {
+        self.agent_configs.get(agent_id)
+    }
+
+    pub fn memory(&self, agent_id: &str) -> Option<&DynMemory> {
+        self.memories.get(agent_id)
+    }
+
+    pub fn iter_configs(&self) -> impl Iterator<Item = (&String, &AgentRuntimeConfig)> {
+        self.agent_configs.iter()
+    }
+}
+
+#[derive(Clone)]
+pub struct RuntimeContext {
+    pub react_loop: Arc<ReactLoop>,
+    pub agents: Arc<AgentDirectory>,
+    pub process_manager: Arc<ProcessManager>,
+    pub completion_tx: mpsc::Sender<InboundMessage>,
+    pub safe_error_reply: String,
+    pub tool_call_transparency: ToolCallTransparency,
 }
 
 pub struct AgentRuntime {
@@ -43,11 +84,7 @@ impl AgentRuntime {
             self,
             inbound,
             memory_session_id,
-            react_loop,
-            agent_configs,
-            memories,
-            process_manager,
-            completion_tx
+            context
         ),
         fields(
             trace_id = %inbound.trace_id,
@@ -59,27 +96,27 @@ impl AgentRuntime {
         &self,
         inbound: &InboundMessage,
         memory_session_id: &str,
-        react_loop: Arc<ReactLoop>,
-        agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
-        memories: Arc<HashMap<String, MemoryStore>>,
-        process_manager: Arc<ProcessManager>,
-        completion_tx: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
-    ) -> Result<String, FrameworkError> {
+        context: &RuntimeContext,
+    ) -> Result<RunOutcome, FrameworkError> {
         let execution_started = Instant::now();
         info!(status = "started", "agent execution");
 
-        let memory = memories.get(&self.config.agent_id).cloned().ok_or_else(|| {
-            FrameworkError::Config(format!(
-                "missing memory store for agent '{}'",
-                self.config.agent_id
-            ))
-        })?;
+        let memory = context
+            .agents
+            .memory(&self.config.agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                FrameworkError::Config(format!(
+                    "missing memory store for agent '{}'",
+                    self.config.agent_id
+                ))
+            })?;
 
         let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);
         memory
             .append_message(
                 memory_session_id,
-                "user",
+                StoredRole::User,
                 &inbound.content,
                 Some(&display_identity),
             )
@@ -93,7 +130,10 @@ impl AgentRuntime {
             inject_caller_context(&system_prompt, &inbound.user_id, &inbound.username);
         debug!(status = "history_loaded", "agent context");
 
-        let effective_max_steps = self.config.max_steps.min(self.config.runtime_config.max_steps);
+        let effective_max_steps = self
+            .config
+            .max_steps
+            .min(self.config.runtime_config.max_steps);
 
         let params = RunParams {
             provider_key: &self.config.provider_key,
@@ -103,17 +143,12 @@ impl AgentRuntime {
             session_id: memory_session_id,
             max_steps: effective_max_steps,
             memory: memory.clone(),
-            sandbox: self.config.agent_config.sandbox,
+            sandbox: self.config.agent_config.sandbox.clone(),
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.runtime_config.owner_ids.clone(),
-            exec_container: self.config.runtime_config.exec_container.clone(),
-            process_manager,
-            react_loop: Arc::clone(&react_loop),
-            agent_configs,
-            memories,
-            enabled_tools: self.config.agent_config.tools.enabled_tools.clone(),
-            completion_tx,
+            process_manager: Arc::clone(&context.process_manager),
+            completion_tx: Some(context.completion_tx.clone()),
             completion_route: Some(CompletionRoute {
                 trace_id: inbound.trace_id.clone(),
                 source_channel: inbound.source_channel,
@@ -125,8 +160,8 @@ impl AgentRuntime {
             }),
         };
 
-        let reply = match react_loop.run(params, history).await {
-            Ok(reply) => reply,
+        let outcome = match context.react_loop.run(params, history).await {
+            Ok(outcome) => outcome,
             Err(err) => {
                 error!(
                     status = "failed",
@@ -140,23 +175,28 @@ impl AgentRuntime {
         };
 
         memory
-            .append_message(memory_session_id, "assistant", &reply, None)
+            .append_message(
+                memory_session_id,
+                StoredRole::Assistant,
+                &outcome.reply,
+                None,
+            )
             .await?;
         info!(
             status = "completed",
             elapsed_ms = execution_started.elapsed().as_millis() as u64,
             "agent execution"
         );
-        Ok(reply)
+        Ok(outcome)
     }
 
     pub async fn record_context(
         &self,
         inbound: &InboundMessage,
         memory_session_id: &str,
-        memories: &HashMap<String, MemoryStore>,
+        directory: &AgentDirectory,
     ) -> Result<(), FrameworkError> {
-        let memory = memories.get(&self.config.agent_id).ok_or_else(|| {
+        let memory = directory.memory(&self.config.agent_id).ok_or_else(|| {
             FrameworkError::Config(format!(
                 "missing memory store for agent '{}'",
                 self.config.agent_id
@@ -166,7 +206,7 @@ impl AgentRuntime {
         memory
             .append_message(
                 memory_session_id,
-                "user",
+                StoredRole::User,
                 &inbound.content,
                 Some(&display_identity),
             )
@@ -175,16 +215,16 @@ impl AgentRuntime {
 
     async fn seeded_history(
         &self,
-        memory: &MemoryStore,
+        memory: &DynMemory,
         session_id: &str,
     ) -> Result<Vec<Message>, FrameworkError> {
         let history_limit = self.config.runtime_config.history_messages as usize;
         let stored = memory.recent_messages(session_id, history_limit).await?;
         let mut history = Vec::with_capacity(stored.len());
         for item in stored {
-            let role = match item.role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
+            let role = match item.role {
+                StoredRole::User => Role::User,
+                StoredRole::Assistant => Role::Assistant,
                 _ => continue,
             };
             let content = if matches!(role, Role::User) {
@@ -205,7 +245,7 @@ impl AgentRuntime {
 
     async fn build_turn_system_prompt(
         &self,
-        memory: &MemoryStore,
+        memory: &DynMemory,
         session_id: &str,
         query: &str,
     ) -> String {

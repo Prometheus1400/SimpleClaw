@@ -37,7 +37,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
-    pub sandbox: SandboxMode,
+    pub sandbox: AgentSandboxConfig,
     #[serde(default)]
     pub tools: ToolConfig,
     #[serde(default)]
@@ -520,11 +520,11 @@ pub struct RuntimeConfig {
     #[serde(default = "default_safe_error_reply")]
     pub safe_error_reply: String,
     #[serde(default)]
+    pub tool_call_transparency: ToolCallTransparency,
+    #[serde(default)]
     pub log_level: LogLevel,
     #[serde(default)]
     pub owner_ids: Vec<String>,
-    #[serde(default)]
-    pub exec_container: ExecContainerConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -535,37 +535,74 @@ impl Default for RuntimeConfig {
             memory_preinject: MemoryPreinjectConfig::default(),
             summon_mode: SummonMode::default(),
             safe_error_reply: default_safe_error_reply(),
+            tool_call_transparency: ToolCallTransparency::default(),
             log_level: LogLevel::default(),
             owner_ids: Vec::new(),
-            exec_container: ExecContainerConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExecContainerConfig {
-    pub image: String,
-    pub network_enabled: bool,
-    pub memory_mb: u32,
-    pub cpus_milli: u32,
-    pub pids_limit: u32,
-    pub build_timeout_secs: u64,
-    pub exec_timeout_secs: u64,
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallTransparency {
+    #[default]
+    Off,
+    Concise,
+    Detailed,
 }
 
-impl Default for ExecContainerConfig {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSandboxConfig {
+    pub enabled: bool,
+    pub filesystem: AgentSandboxFilesystemConfig,
+    pub network: AgentSandboxNetworkConfig,
+}
+
+impl Default for AgentSandboxConfig {
     fn default() -> Self {
         Self {
-            image: default_exec_container_image(),
-            network_enabled: default_exec_container_network_enabled(),
-            memory_mb: default_exec_container_memory_mb(),
-            cpus_milli: default_exec_container_cpus_milli(),
-            pids_limit: default_exec_container_pids_limit(),
-            build_timeout_secs: default_exec_container_build_timeout_secs(),
-            exec_timeout_secs: default_exec_container_exec_timeout_secs(),
+            enabled: default_sandbox_enabled(),
+            filesystem: AgentSandboxFilesystemConfig::default(),
+            network: AgentSandboxNetworkConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSandboxFilesystemConfig {
+    pub extra_writable_paths: Vec<String>,
+}
+
+impl Default for AgentSandboxFilesystemConfig {
+    fn default() -> Self {
+        Self {
+            extra_writable_paths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSandboxNetworkConfig {
+    pub mode: SandboxNetworkMode,
+}
+
+impl Default for AgentSandboxNetworkConfig {
+    fn default() -> Self {
+        Self {
+            mode: SandboxNetworkMode::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetworkMode {
+    Enabled,
+    #[default]
+    Disabled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,14 +637,6 @@ impl MemoryPreinjectConfig {
             max_chars: self.max_chars.clamp(200, 4000),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxMode {
-    #[default]
-    On,
-    Off,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -840,7 +869,7 @@ impl InboundPolicyConfig {
 
     fn finalize(self, is_dm: bool) -> InboundPolicy {
         InboundPolicy {
-            agent: self.agent.unwrap_or_default(),
+            agent: self.agent.unwrap_or_else(default_agent_id),
             allow_from: self.allow_from,
             require_mentions: if is_dm {
                 false
@@ -943,26 +972,8 @@ fn default_memory_preinject_max_chars() -> u32 {
 fn default_safe_error_reply() -> String {
     "I hit an internal error while processing that request.".to_owned()
 }
-fn default_exec_container_image() -> String {
-    "simpleclaw-sandbox:latest".to_owned()
-}
-fn default_exec_container_network_enabled() -> bool {
+fn default_sandbox_enabled() -> bool {
     true
-}
-fn default_exec_container_memory_mb() -> u32 {
-    512
-}
-fn default_exec_container_cpus_milli() -> u32 {
-    1000
-}
-fn default_exec_container_pids_limit() -> u32 {
-    256
-}
-fn default_exec_container_build_timeout_secs() -> u64 {
-    120
-}
-fn default_exec_container_exec_timeout_secs() -> u64 {
-    20
 }
 fn default_agent_id() -> String {
     "default".to_owned()
@@ -1266,6 +1277,33 @@ memory_preinject:
     }
 
     #[test]
+    fn runtime_tool_call_transparency_defaults_off() {
+        let runtime = RuntimeConfig::default();
+        assert_eq!(runtime.tool_call_transparency, ToolCallTransparency::Off);
+    }
+
+    #[test]
+    fn runtime_tool_call_transparency_accepts_values() {
+        let yaml = r#"
+tool_call_transparency: detailed
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml).expect("valid yaml");
+        assert_eq!(
+            parsed.tool_call_transparency,
+            ToolCallTransparency::Detailed
+        );
+    }
+
+    #[test]
+    fn runtime_tool_call_transparency_rejects_unknown_value() {
+        let yaml = r#"
+tool_call_transparency: verbose
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
     fn runtime_log_level_accepts_debug() {
         let yaml = r#"
 log_level: debug
@@ -1390,9 +1428,11 @@ skills:
     }
 
     #[test]
-    fn agent_config_defaults_exec_policy() {
+    fn agent_config_defaults_sandbox_policy() {
         let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
-        assert_eq!(parsed.sandbox, SandboxMode::On);
+        assert!(parsed.sandbox.enabled);
+        assert!(parsed.sandbox.filesystem.extra_writable_paths.is_empty());
+        assert_eq!(parsed.sandbox.network.mode, SandboxNetworkMode::Disabled);
     }
 
     #[test]
@@ -1427,45 +1467,50 @@ skills:
     }
 
     #[test]
-    fn agent_config_sandbox_accepts_off() {
+    fn agent_config_sandbox_accepts_enabled_false() {
         let parsed: AgentConfig = serde_yaml::from_str(
+            r#"
+sandbox:
+  enabled: false
+"#,
+        )
+        .expect("valid yaml");
+        assert!(!parsed.sandbox.enabled);
+    }
+
+    #[test]
+    fn agent_config_sandbox_accepts_enabled_true() {
+        let parsed: AgentConfig = serde_yaml::from_str(
+            r#"
+sandbox:
+  enabled: true
+"#,
+        )
+        .expect("valid yaml");
+        assert!(parsed.sandbox.enabled);
+    }
+
+    #[test]
+    fn agent_config_sandbox_rejects_legacy_scalar_field() {
+        let parsed = serde_yaml::from_str::<AgentConfig>(
             r#"
 sandbox: off
 "#,
-        )
-        .expect("valid yaml");
-        assert_eq!(parsed.sandbox, SandboxMode::Off);
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]
-    fn agent_config_sandbox_accepts_on() {
+    fn agent_config_sandbox_supports_network_mode() {
         let parsed: AgentConfig = serde_yaml::from_str(
             r#"
-sandbox: on
+sandbox:
+  network:
+    mode: enabled
 "#,
         )
         .expect("valid yaml");
-        assert_eq!(parsed.sandbox, SandboxMode::On);
-    }
-
-    #[test]
-    fn agent_config_sandbox_rejects_wasm() {
-        let parsed = serde_yaml::from_str::<AgentConfig>(
-            r#"
-sandbox: wasm
-"#,
-        );
-        assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn agent_config_sandbox_rejects_workspace() {
-        let parsed = serde_yaml::from_str::<AgentConfig>(
-            r#"
-sandbox: workspace
-"#,
-        );
-        assert!(parsed.is_err());
+        assert_eq!(parsed.sandbox.network.mode, SandboxNetworkMode::Enabled);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use crate::config::{GatewayChannelKind, InboundConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InboundDecision {
-    pub ingest_for_context: bool,
-    pub allow_invoke: bool,
-    pub target_agent_id: String,
+pub(crate) enum InboundDecision {
+    Drop,
+    ContextOnly { agent_id: String },
+    Invoke { agent_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -27,15 +27,15 @@ pub(crate) fn classify_inbound(
         &context.channel_id,
         context.is_dm,
     );
-    let target_agent_id = policy.agent.trim().to_owned();
-    let allow_invoke = !target_agent_id.is_empty()
-        && policy.allows_user(&context.user_id)
-        && (!policy.require_mentions || context.mentioned_bot);
-    let ingest_for_context = if context.is_dm { allow_invoke } else { true };
-    InboundDecision {
-        ingest_for_context,
-        allow_invoke,
-        target_agent_id,
+    let agent_id = policy.agent.trim().to_owned();
+    let allow_invoke =
+        policy.allows_user(&context.user_id) && (!policy.require_mentions || context.mentioned_bot);
+    if allow_invoke {
+        InboundDecision::Invoke { agent_id }
+    } else if context.is_dm {
+        InboundDecision::Drop
+    } else {
+        InboundDecision::ContextOnly { agent_id }
     }
 }
 
@@ -43,7 +43,7 @@ pub(crate) fn classify_inbound(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{InboundPolicyContext, classify_inbound};
+    use super::{InboundDecision, InboundPolicyContext, classify_inbound};
     use crate::config::{
         ChannelInboundConfig, GatewayChannelKind, InboundConfig, InboundPolicyConfig,
         WorkspaceInboundConfig,
@@ -81,8 +81,12 @@ mod tests {
             &inbound_policy,
             &context(Some("10"), "20", false, "9", true),
         );
-        assert!(decision.ingest_for_context);
-        assert!(!decision.allow_invoke);
+        assert_eq!(
+            decision,
+            InboundDecision::ContextOnly {
+                agent_id: "default".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -108,8 +112,7 @@ mod tests {
         };
 
         let decision = classify_inbound(&inbound_policy, &context(None, "20", true, "9", true));
-        assert!(!decision.ingest_for_context);
-        assert!(!decision.allow_invoke);
+        assert_eq!(decision, InboundDecision::Drop);
     }
 
     #[test]
@@ -127,8 +130,12 @@ mod tests {
             &inbound_policy,
             &context(Some("10"), "20", false, "7", false),
         );
-        assert!(decision.ingest_for_context);
-        assert!(!decision.allow_invoke);
+        assert_eq!(
+            decision,
+            InboundDecision::ContextOnly {
+                agent_id: "default".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -146,8 +153,12 @@ mod tests {
             &inbound_policy,
             &context(Some("10"), "20", false, "7", true),
         );
-        assert!(decision.ingest_for_context);
-        assert!(decision.allow_invoke);
+        assert_eq!(
+            decision,
+            InboundDecision::Invoke {
+                agent_id: "default".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -174,8 +185,12 @@ mod tests {
         };
 
         let decision = classify_inbound(&inbound_policy, &context(None, "20", true, "7", false));
-        assert!(decision.ingest_for_context);
-        assert!(decision.allow_invoke);
+        assert_eq!(
+            decision,
+            InboundDecision::Invoke {
+                agent_id: "default".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -218,8 +233,11 @@ mod tests {
             &inbound_policy,
             &context(Some("10"), "20", false, "3", false),
         );
-        assert!(decision.ingest_for_context);
-        assert!(decision.allow_invoke);
-        assert_eq!(decision.target_agent_id, "researcher");
+        assert_eq!(
+            decision,
+            InboundDecision::Invoke {
+                agent_id: "researcher".to_owned()
+            }
+        );
     }
 }

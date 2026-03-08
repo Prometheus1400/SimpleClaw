@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod sandbox;
+pub mod sandbox_runtime;
 pub mod skill;
 
 use async_trait::async_trait;
@@ -17,13 +18,33 @@ use tracing::{Instrument, debug, info_span};
 
 use tokio::sync::mpsc;
 
-use crate::agent::AgentRuntimeConfig;
 use crate::channels::InboundMessage;
-use crate::config::{ExecContainerConfig, GatewayChannelKind, SandboxMode};
+use crate::config::{AgentSandboxConfig, GatewayChannelKind};
 use crate::error::FrameworkError;
-use crate::memory::MemoryStore;
+use crate::memory::DynMemory;
 use crate::providers::ToolDefinition;
-use crate::react::ReactLoop;
+
+#[derive(Debug, Clone)]
+pub struct AgentInvokeRequest {
+    pub target_agent_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerInvokeRequest {
+    pub current_agent_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub prompt: String,
+}
+
+#[async_trait]
+pub trait AgentInvoker: Send + Sync {
+    async fn invoke_agent(&self, request: AgentInvokeRequest) -> Result<String, FrameworkError>;
+    async fn invoke_worker(&self, request: WorkerInvokeRequest) -> Result<String, FrameworkError>;
+}
 
 #[derive(Debug, Clone)]
 pub struct CompletionRoute {
@@ -38,20 +59,14 @@ pub struct CompletionRoute {
 
 #[derive(Clone)]
 pub(crate) struct ToolExecEnv {
-    pub memory: MemoryStore,
-    pub sandbox: SandboxMode,
+    pub agent_id: String,
+    pub memory: DynMemory,
+    pub sandbox: AgentSandboxConfig,
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
-    pub exec_container: ExecContainerConfig,
     pub process_manager: Arc<ProcessManager>,
-    pub react_loop: Arc<ReactLoop>,
-    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
-    pub memories: Arc<HashMap<String, MemoryStore>>,
-    pub current_agent_id: String,
-    pub current_provider_key: String,
-    pub max_steps: u32,
-    pub enabled_tools: Vec<String>,
+    pub invoker: Arc<dyn AgentInvoker>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
 }
@@ -255,7 +270,6 @@ impl ProcessManager {
             started_at,
             finished_at: None,
             pid,
-            backend: ProcessBackend::Host,
             stdout_path,
             stderr_path,
             exit_code: None,
@@ -292,14 +306,14 @@ impl ProcessManager {
         }
     }
 
-    pub async fn spawn_podman(
+    pub async fn spawn_sandboxed(
         &self,
         command: &str,
         workspace_root: &std::path::Path,
-        cfg: &ExecContainerConfig,
+        sandbox: &AgentSandboxConfig,
     ) -> Result<(String, CompletionHandle), FrameworkError> {
-        builtin::exec::ensure_podman_available().await?;
-        builtin::exec::ensure_sandbox_image(cfg).await?;
+        let wrapped =
+            sandbox_runtime::wrap_command_for_exec(command, workspace_root, sandbox).await?;
 
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
@@ -308,77 +322,31 @@ impl ProcessManager {
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create temp dir: {e}")))?;
         let stdout_path = base.join(format!("{session_id}.stdout.log"));
         let stderr_path = base.join(format!("{session_id}.stderr.log"));
-        // Create the log files so the bind-mount targets exist.
-        File::create(&stdout_path)
+        let stdout_file = File::create(&stdout_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stdout log: {e}")))?;
-        File::create(&stderr_path)
+        let stderr_file = File::create(&stderr_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stderr log: {e}")))?;
-
         let workspace = sandbox::normalize_workspace_root(workspace_root)?;
-        let ws_mount = format!("type=bind,src={},target=/workspace", workspace.display());
-        let stdout_mount = format!(
-            "type=bind,src={},target=/tmp/_sc_stdout.log",
-            stdout_path.display()
-        );
-        let stderr_mount = format!(
-            "type=bind,src={},target=/tmp/_sc_stderr.log",
-            stderr_path.display()
-        );
-
-        let mut runner = Command::new("podman");
-        runner
-            .arg("run")
-            .arg("-d")
-            .arg("--entrypoint")
-            .arg("/bin/sh")
-            .arg("--workdir")
-            .arg("/workspace")
-            .arg("--mount")
-            .arg(&ws_mount)
-            .arg("--mount")
-            .arg(&stdout_mount)
-            .arg("--mount")
-            .arg(&stderr_mount)
-            .arg("--memory")
-            .arg(format!("{}m", cfg.memory_mb.max(64)))
-            .arg("--cpus")
-            .arg(builtin::exec::cpus_flag_value(cfg.cpus_milli.max(100)))
-            .arg("--pids-limit")
-            .arg(cfg.pids_limit.max(64).to_string());
-        if !cfg.network_enabled {
-            runner.arg("--network").arg("none");
-        }
-        runner.arg(&cfg.image).arg("-lc").arg(format!(
-            "cd /workspace && {{ {command} ; }} > /tmp/_sc_stdout.log 2> /tmp/_sc_stderr.log"
-        ));
-
-        let output = runner
-            .output()
-            .await
-            .map_err(|e| FrameworkError::Tool(format!("exec failed to start podman: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FrameworkError::Tool(format!(
-                "podman run -d failed: {}",
-                stderr.trim()
-            )));
-        }
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if container_id.is_empty() {
-            return Err(FrameworkError::Tool(
-                "podman run -d returned empty container id".to_owned(),
-            ));
-        }
+        let child = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(wrapped)
+            .current_dir(&workspace)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+            .map_err(|e| {
+                FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}"))
+            })?;
 
         let started_at = Utc::now();
-        let handle = CompletionHandle::Podman(container_id.clone());
+        let pid = Some(child.id());
+        let handle = CompletionHandle::Host(child);
         let entry = ProcessEntry {
             command: command.to_owned(),
             status: ProcessStatus::Running,
             started_at,
             finished_at: None,
-            pid: None,
-            backend: ProcessBackend::Podman { container_id },
+            pid,
             stdout_path,
             stderr_path,
             exit_code: None,
@@ -469,23 +437,6 @@ impl ProcessManager {
                             .and_then(|r| r.ok());
                         status.and_then(|s| s.code())
                     }
-                    CompletionHandle::Podman(container_id) => {
-                        let cid = container_id.clone();
-                        let output = tokio::task::spawn_blocking(move || {
-                            std::process::Command::new("podman")
-                                .args(["wait", &cid])
-                                .output()
-                        })
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
-                        output.and_then(|o| {
-                            String::from_utf8_lossy(&o.stdout)
-                                .trim()
-                                .parse::<i32>()
-                                .ok()
-                        })
-                    }
                 };
 
                 pm.mark_completed(&session_id, exit_code).await;
@@ -566,13 +517,6 @@ impl Default for ProcessManager {
 /// Handle passed to the completion watcher for event-driven (non-polling) wait.
 pub enum CompletionHandle {
     Host(std::process::Child),
-    Podman(String),
-}
-
-#[derive(Debug)]
-enum ProcessBackend {
-    Host,
-    Podman { container_id: String },
 }
 
 #[derive(Debug)]
@@ -582,7 +526,6 @@ struct ProcessEntry {
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     pid: Option<u32>,
-    backend: ProcessBackend,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     exit_code: Option<i32>,
@@ -603,91 +546,29 @@ struct ProcessEntryMeta {
 impl ProcessEntry {
     fn poll_completion(&mut self) {
         // Status is updated by the completion watcher via ProcessManager::mark_completed.
-        // For podman, we can also check on-demand as a fallback (e.g. for list/update calls
-        // before the watcher has run mark_completed).
         if self.status != ProcessStatus::Running {
             return;
         }
-        match &self.backend {
-            ProcessBackend::Host => {
-                // Host processes are tracked by the completion watcher which owns the Child.
-                // No on-demand poll is possible here.
-            }
-            ProcessBackend::Podman { container_id } => {
-                let output = std::process::Command::new("podman")
-                    .arg("inspect")
-                    .arg("--format")
-                    .arg("{{.State.Status}}|{{.State.ExitCode}}")
-                    .arg(container_id.as_str())
-                    .output();
-                match output {
-                    Ok(out) if out.status.success() => {
-                        let text = String::from_utf8_lossy(&out.stdout);
-                        let text = text.trim();
-                        if let Some((state, code_str)) = text.split_once('|')
-                            && state != "running"
-                        {
-                            self.exit_code = code_str.parse().ok();
-                            self.status = ProcessStatus::Completed;
-                            self.finished_at = Some(Utc::now());
-                        }
-                    }
-                    Ok(_out) => {
-                        tracing::warn!(
-                            status = "failed",
-                            error_kind = "podman_inspect",
-                            "process poll"
-                        );
-                        self.status = ProcessStatus::Completed;
-                        self.finished_at = Some(Utc::now());
-                    }
-                    Err(e) => {
-                        tracing::warn!(status = "failed", error_kind = "podman_inspect", error = %e, "process poll");
-                        self.status = ProcessStatus::Completed;
-                        self.finished_at = Some(Utc::now());
-                    }
-                }
-            }
-        }
+        // Host processes are tracked by the completion watcher which owns the Child.
+        // No on-demand poll is possible here.
     }
 
     async fn kill(&mut self) -> Result<(), FrameworkError> {
         if self.status != ProcessStatus::Running {
             return Ok(());
         }
-        match &self.backend {
-            ProcessBackend::Host => {
-                if let Some(pid) = self.pid {
-                    let output = Command::new("kill")
-                        .arg(pid.to_string())
-                        .output()
-                        .await
-                        .map_err(|e| {
-                            FrameworkError::Tool(format!("failed to kill process: {e}"))
-                        })?;
-                    if !output.status.success() {
-                        tracing::warn!(
-                            status = "failed",
-                            error_kind = "kill_process",
-                            "process kill"
-                        );
-                    }
-                }
-            }
-            ProcessBackend::Podman { container_id } => {
-                let output = Command::new("podman")
-                    .args(["stop", "-t", "5"])
-                    .arg(container_id.as_str())
-                    .output()
-                    .await
-                    .map_err(|e| FrameworkError::Tool(format!("failed to stop container: {e}")))?;
-                if !output.status.success() {
-                    tracing::warn!(
-                        status = "failed",
-                        error_kind = "podman_stop",
-                        "process kill"
-                    );
-                }
+        if let Some(pid) = self.pid {
+            let output = Command::new("kill")
+                .arg(pid.to_string())
+                .output()
+                .await
+                .map_err(|e| FrameworkError::Tool(format!("failed to kill process: {e}")))?;
+            if !output.status.success() {
+                tracing::warn!(
+                    status = "failed",
+                    error_kind = "kill_process",
+                    "process kill"
+                );
             }
         }
         self.status = ProcessStatus::Killed;
@@ -724,29 +605,15 @@ impl ProcessEntry {
         }
     }
 
-    /// Delete log files and remove podman container if applicable.
+    /// Delete log files.
     fn cleanup_files(self) {
         let _ = std::fs::remove_file(&self.stdout_path);
         let _ = std::fs::remove_file(&self.stderr_path);
-        if let ProcessBackend::Podman { container_id } = &self.backend {
-            let _ = std::process::Command::new("podman")
-                .args(["rm", "-f", container_id.as_str()])
-                .output();
-        }
     }
 }
 
 impl Drop for ProcessManager {
-    fn drop(&mut self) {
-        let sessions = self.sessions.get_mut();
-        for entry in sessions.values() {
-            if let ProcessBackend::Podman { container_id } = &entry.backend {
-                let _ = std::process::Command::new("podman")
-                    .args(["rm", "-f", container_id.as_str()])
-                    .output();
-            }
-        }
-    }
+    fn drop(&mut self) {}
 }
 
 fn read_process_output_tail(path: &std::path::Path, max_bytes: u64) -> String {

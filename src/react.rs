@@ -1,15 +1,14 @@
-use crate::dispatch::{DispatchAction, ToolDispatcher};
+use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
-use crate::providers::{Message, Provider, Role};
 use crate::providers::ProviderFactory;
+use crate::providers::{Message, Provider, Role};
 use crate::tools::skill::SkillFactory;
-use crate::tools::{CompletionRoute, ToolExecEnv, ToolFactory};
-use crate::{agent::AgentRuntimeConfig, channels::InboundMessage, memory::MemoryStore};
-use crate::{config::ExecContainerConfig, config::SandboxMode, tools::ProcessManager};
-use std::collections::HashMap;
-use tokio::sync::mpsc;
-use std::sync::Arc;
+use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
+use crate::{channels::InboundMessage, memory::DynMemory};
+use crate::{config::AgentSandboxConfig, tools::ProcessManager};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(test)]
@@ -19,6 +18,7 @@ pub struct ReactLoop {
     provider_factory: ProviderFactory,
     tool_factory: ToolFactory,
     skill_factory: SkillFactory,
+    invoker: OnceLock<Arc<dyn AgentInvoker>>,
 }
 
 pub struct RunParams<'a> {
@@ -28,19 +28,20 @@ pub struct RunParams<'a> {
     pub agent_id: &'a str,
     pub session_id: &'a str,
     pub max_steps: u32,
-    pub memory: MemoryStore,
-    pub sandbox: SandboxMode,
+    pub memory: DynMemory,
+    pub sandbox: AgentSandboxConfig,
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
-    pub exec_container: ExecContainerConfig,
     pub process_manager: Arc<ProcessManager>,
-    pub react_loop: Arc<ReactLoop>,
-    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
-    pub memories: Arc<HashMap<String, MemoryStore>>,
-    pub enabled_tools: Vec<String>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    pub reply: String,
+    pub tool_calls: Vec<ToolExecutionResult>,
 }
 
 impl ReactLoop {
@@ -53,6 +54,15 @@ impl ReactLoop {
             provider_factory,
             tool_factory,
             skill_factory,
+            invoker: OnceLock::new(),
+        }
+    }
+
+    /// Inject the agent invoker. Must be called exactly once after construction
+    /// and before the first call to [`run`](Self::run).
+    pub fn set_invoker(&self, invoker: Arc<dyn AgentInvoker>) {
+        if self.invoker.set(invoker).is_err() {
+            panic!("ReactLoop::set_invoker called more than once");
         }
     }
 
@@ -65,28 +75,23 @@ impl ReactLoop {
         &self,
         params: RunParams<'_>,
         mut history: Vec<Message>,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<RunOutcome, FrameworkError> {
         let provider = self.provider_factory.get(params.provider_key)?;
         let supports_native = self
             .provider_factory
             .supports_native_tools(params.provider_key);
         let dispatcher = resolve_dispatcher(supports_native);
         let skills = self.skill_factory.tools_for_agent(params.agent_id);
+        let invoker = Arc::clone(self.invoker.get().expect("invoker not initialized"));
         let tool_env = ToolExecEnv {
+            agent_id: params.agent_id.to_owned(),
             memory: params.memory.clone(),
-            sandbox: params.sandbox,
+            sandbox: params.sandbox.clone(),
             workspace_root: params.workspace_root.clone(),
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),
-            exec_container: params.exec_container.clone(),
             process_manager: Arc::clone(&params.process_manager),
-            react_loop: Arc::clone(&params.react_loop),
-            agent_configs: Arc::clone(&params.agent_configs),
-            memories: Arc::clone(&params.memories),
-            current_agent_id: params.agent_id.to_owned(),
-            current_provider_key: params.provider_key.to_owned(),
-            max_steps: params.max_steps,
-            enabled_tools: params.enabled_tools.clone(),
+            invoker,
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
         };
@@ -95,7 +100,7 @@ impl ReactLoop {
             .resolve_active(&params.agent_config.tools.enabled_tools, skills)?;
         run_loop(
             provider,
-            dispatcher.as_ref(),
+            dispatcher,
             params,
             &tool_env,
             &active_tools,
@@ -112,7 +117,7 @@ async fn run_loop(
     tool_env: &ToolExecEnv,
     active_tools: &crate::tools::ActiveTools,
     history: &mut Vec<Message>,
-) -> Result<String, FrameworkError> {
+) -> Result<RunOutcome, FrameworkError> {
     let definitions = active_tools.definitions();
     let run_started = Instant::now();
     let extra_instructions = dispatcher.prompt_instructions(&definitions);
@@ -129,6 +134,7 @@ async fn run_loop(
     };
 
     info!(status = "started", "react loop");
+    let mut executed_tool_calls: Vec<ToolExecutionResult> = Vec::new();
 
     for _ in 0..params.max_steps {
         let provider_started = Instant::now();
@@ -165,6 +171,7 @@ async fn run_loop(
                     .execute_tool_calls(&calls, active_tools, tool_env, params.session_id)
                     .instrument(turn_span.clone())
                     .await;
+                executed_tool_calls.extend(results.iter().cloned());
                 let messages = dispatcher.format_for_history(&calls, &results);
                 history.extend(messages);
                 continue;
@@ -176,7 +183,10 @@ async fn run_loop(
                     elapsed_ms = run_started.elapsed().as_millis() as u64,
                     "react loop"
                 );
-                return Ok(text);
+                return Ok(RunOutcome {
+                    reply: text,
+                    tool_calls: executed_tool_calls,
+                });
             }
             DispatchAction::Empty => {
                 warn!(parent: &turn_span, status = "empty", "provider response");
@@ -190,15 +200,16 @@ async fn run_loop(
         elapsed_ms = run_started.elapsed().as_millis() as u64,
         "react loop"
     );
-    Ok("max_steps reached without final response".to_owned())
+    Ok(RunOutcome {
+        reply: "max_steps reached without final response".to_owned(),
+        tool_calls: executed_tool_calls,
+    })
 }
 
-fn resolve_dispatcher(supports_native_tools: bool) -> Arc<dyn ToolDispatcher> {
-    if supports_native_tools {
-        Arc::new(crate::dispatch::NativeDispatcher)
-    } else {
-        Arc::new(crate::dispatch::XmlDispatcher)
-    }
+fn resolve_dispatcher(supports_native_tools: bool) -> &'static dyn ToolDispatcher {
+    static NATIVE: crate::dispatch::NativeDispatcher = crate::dispatch::NativeDispatcher;
+    static XML: crate::dispatch::XmlDispatcher = crate::dispatch::XmlDispatcher;
+    if supports_native_tools { &NATIVE } else { &XML }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

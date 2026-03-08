@@ -5,9 +5,38 @@ pub enum MemorizeResult {
     Duplicate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredRole {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl StoredRole {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+        }
+    }
+
+    pub fn from_db_str(raw: &str) -> Option<Self> {
+        match raw {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
-    pub role: String,
+    pub role: StoredRole,
     pub content: String,
     pub username: Option<String>,
 }

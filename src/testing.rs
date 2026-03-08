@@ -10,12 +10,9 @@ use color_eyre::eyre::WrapErr;
 use tokio::sync::Mutex;
 
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
-use crate::cli::Cli;
-use crate::config::{
-    AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig,
-};
+use crate::config::{AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig};
 use crate::error::FrameworkError;
-use crate::memory::MemoryStore;
+use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
 use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
 use crate::run::composition::{
@@ -124,6 +121,7 @@ pub async fn run_single_gateway_roundtrip(
         channel_factory: Arc::new(StaticChannelFactory {
             channel: channel.clone(),
         }),
+        ..RuntimeDependencies::default()
     };
 
     let workspace_dir = ephemeral_paths.workspace_dir.clone();
@@ -157,12 +155,7 @@ pub async fn run_single_gateway_roundtrip(
         pid_path: app_base_dir.join("run/service.pid"),
     };
 
-    let cli = Cli {
-        workspace: None,
-        max_steps: config.max_steps,
-        command: None,
-    };
-    let state = assemble_runtime_state(&cli, &loaded, &app_paths, &deps)
+    let (state, _inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
         .await
         .wrap_err("failed to assemble runtime state for integration harness")?;
 
@@ -329,7 +322,7 @@ impl MemoryFactory for EphemeralMemoryFactory {
         &self,
         _agent: &AgentEntryConfig,
         loaded: &LoadedConfig,
-    ) -> color_eyre::Result<MemoryStore> {
+    ) -> color_eyre::Result<DynMemory> {
         if let Some(parent) = self.short_term_path.parent() {
             fs::create_dir_all(parent).wrap_err("failed to create short-term db directory")?;
         }
@@ -343,6 +336,7 @@ impl MemoryFactory for EphemeralMemoryFactory {
             &loaded.global.database,
         )
         .await
+        .map(|memory| Arc::new(memory) as DynMemory)
         .map_err(color_eyre::Report::from)
     }
 }

@@ -11,7 +11,6 @@ use wasmtime_wasi::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
-use crate::config::SandboxMode;
 use crate::error::FrameworkError;
 
 use super::{Tool, ToolExecEnv};
@@ -34,18 +33,14 @@ pub async fn execute_tool_with_sandbox(
     args_json: &str,
     session_id: &str,
 ) -> Result<String, FrameworkError> {
-    match ctx.sandbox {
-        SandboxMode::Off => tool.execute(ctx, args_json, session_id).await,
-        SandboxMode::On => {
-            if SANDBOX_ENFORCED_TOOLS.contains(&tool.name()) && !tool.sandbox_aware() {
-                return Err(FrameworkError::Tool(format!(
-                    "tool '{}' is not available in sandbox mode",
-                    tool.name()
-                )));
-            }
-            tool.execute(ctx, args_json, session_id).await
-        }
+    if ctx.sandbox.enabled && SANDBOX_ENFORCED_TOOLS.contains(&tool.name()) && !tool.sandbox_aware()
+    {
+        return Err(FrameworkError::Tool(format!(
+            "tool '{}' is not available in sandbox mode",
+            tool.name()
+        )));
     }
+    tool.execute(ctx, args_json, session_id).await
 }
 
 pub async fn run_wasm_guest(
@@ -260,17 +255,14 @@ impl Drop for IsolatedTmpDir {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::AgentRuntimeConfig;
     use super::{execute_tool_with_sandbox, resolve_guest_artifact_path};
-    use crate::config::{DatabaseConfig, ExecContainerConfig, SandboxMode};
+    use crate::config::{AgentSandboxConfig, DatabaseConfig};
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
-    use crate::providers::ProviderFactory;
-    use crate::react::ReactLoop;
-    use crate::tools::skill::SkillFactory;
-    use crate::tools::{ProcessManager, Tool, ToolExecEnv, default_factory};
+    use crate::tools::{
+        AgentInvokeRequest, AgentInvoker, ProcessManager, Tool, ToolExecEnv, WorkerInvokeRequest,
+    };
     use async_trait::async_trait;
-    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -286,6 +278,25 @@ mod tests {
     struct DummyTool {
         name: &'static str,
         aware: bool,
+    }
+
+    struct NoopInvoker;
+
+    #[async_trait]
+    impl AgentInvoker for NoopInvoker {
+        async fn invoke_agent(
+            &self,
+            _request: AgentInvokeRequest,
+        ) -> Result<String, FrameworkError> {
+            Ok(String::new())
+        }
+
+        async fn invoke_worker(
+            &self,
+            _request: WorkerInvokeRequest,
+        ) -> Result<String, FrameworkError> {
+            Ok(String::new())
+        }
     }
 
     #[async_trait]
@@ -316,7 +327,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx(mode: SandboxMode) -> ToolExecEnv {
+    async fn test_ctx(enabled: bool) -> ToolExecEnv {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -328,26 +339,18 @@ mod tests {
         let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
             .await
             .expect("memory should initialize");
-        let react_loop = Arc::new(ReactLoop::new(
-            ProviderFactory::from_parts(HashMap::new()),
-            default_factory(),
-            SkillFactory::new(PathBuf::from(".")),
-        ));
         ToolExecEnv {
-            memory,
-            sandbox: mode,
+            agent_id: "test-agent".to_owned(),
+            memory: Arc::new(memory),
+            sandbox: AgentSandboxConfig {
+                enabled,
+                ..AgentSandboxConfig::default()
+            },
             workspace_root: PathBuf::from("."),
             user_id: "u".to_owned(),
             owner_ids: vec![],
-            exec_container: ExecContainerConfig::default(),
             process_manager: Arc::new(ProcessManager::new()),
-            react_loop,
-            agent_configs: Arc::new(HashMap::<String, AgentRuntimeConfig>::new()),
-            memories: Arc::new(HashMap::new()),
-            current_agent_id: "test".to_owned(),
-            current_provider_key: "default".to_owned(),
-            max_steps: 1,
-            enabled_tools: Vec::new(),
+            invoker: Arc::new(NoopInvoker),
             completion_tx: None,
             completion_route: None,
         }
@@ -355,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_mode_rejects_non_aware_tools() {
-        let ctx = test_ctx(SandboxMode::On).await;
+        let ctx = test_ctx(true).await;
         let err = execute_tool_with_sandbox(
             &DummyTool {
                 name: "read",
@@ -372,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_on_allows_non_enforced_non_aware_tools() {
-        let ctx = test_ctx(SandboxMode::On).await;
+        let ctx = test_ctx(true).await;
         let result = execute_tool_with_sandbox(
             &DummyTool {
                 name: "clock",
@@ -389,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_off_allows_non_aware_tools() {
-        let ctx = test_ctx(SandboxMode::Off).await;
+        let ctx = test_ctx(false).await;
         let result = execute_tool_with_sandbox(
             &DummyTool {
                 name: "read",
