@@ -11,6 +11,7 @@ use crate::agent::{
     AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext,
     load_system_prompt_for_workspace,
 };
+use crate::invoke::DirectAgentInvoker;
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
@@ -291,6 +292,14 @@ pub(crate) async fn assemble_runtime_state(
     }
 
     let process_manager = deps.process_manager_factory.create_process_manager();
+
+    let invoker: Arc<dyn crate::tools::AgentInvoker> = Arc::new(DirectAgentInvoker::new(
+        Arc::clone(&react_loop),
+        Arc::clone(&directory),
+        Arc::clone(&process_manager),
+    ));
+    react_loop.set_invoker(invoker);
+
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;

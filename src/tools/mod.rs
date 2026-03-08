@@ -59,6 +59,7 @@ pub struct CompletionRoute {
 
 #[derive(Clone)]
 pub(crate) struct ToolExecEnv {
+    pub agent_id: String,
     pub memory: DynMemory,
     pub sandbox: AgentSandboxConfig,
     pub workspace_root: PathBuf,

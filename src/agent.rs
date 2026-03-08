@@ -147,8 +147,6 @@ impl AgentRuntime {
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.runtime_config.owner_ids.clone(),
             process_manager: Arc::clone(&context.process_manager),
-            react_loop: Arc::clone(&context.react_loop),
-            agents: Arc::clone(&context.agents),
             completion_tx: Some(context.completion_tx.clone()),
             completion_route: Some(CompletionRoute {
                 trace_id: inbound.trace_id.clone(),

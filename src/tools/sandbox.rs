@@ -340,6 +340,7 @@ mod tests {
             .await
             .expect("memory should initialize");
         ToolExecEnv {
+            agent_id: "test-agent".to_owned(),
             memory: Arc::new(memory),
             sandbox: AgentSandboxConfig {
                 enabled,

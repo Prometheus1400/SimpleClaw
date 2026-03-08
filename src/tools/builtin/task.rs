@@ -33,13 +33,7 @@ impl Tool for TaskTool {
         let prompt = parse_task_args(args_json);
         ctx.invoker
             .invoke_worker(WorkerInvokeRequest {
-                current_agent_id: ctx
-                    .completion_route
-                    .as_ref()
-                    .map(|route| route.target_agent_id.clone())
-                    .ok_or_else(|| {
-                        FrameworkError::Tool("current agent context unavailable".to_owned())
-                    })?,
+                current_agent_id: ctx.agent_id.clone(),
                 session_id: session_id.to_owned(),
                 user_id: ctx.user_id.clone(),
                 prompt,

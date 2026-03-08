@@ -9,6 +9,7 @@ mod config;
 mod dispatch;
 mod error;
 mod gateway;
+mod invoke;
 mod memory;
 mod paths;
 mod prompt;
