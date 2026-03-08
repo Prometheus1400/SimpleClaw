@@ -7,7 +7,7 @@ use crate::tools::{
     AgentInvokeRequest, AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory,
     WorkerInvokeRequest,
 };
-use crate::{agent::AgentDirectory, channels::InboundMessage, memory::MemoryStore};
+use crate::{agent::AgentDirectory, channels::InboundMessage, memory::DynMemory};
 use crate::{config::AgentSandboxConfig, tools::ProcessManager};
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,7 +30,7 @@ pub struct RunParams<'a> {
     pub agent_id: &'a str,
     pub session_id: &'a str,
     pub max_steps: u32,
-    pub memory: MemoryStore,
+    pub memory: DynMemory,
     pub sandbox: AgentSandboxConfig,
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,

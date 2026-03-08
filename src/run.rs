@@ -151,12 +151,11 @@ pub(crate) async fn handle_inbound_once(
     Ok(())
 }
 
-pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
+pub async fn run_service() -> color_eyre::Result<()> {
     let app_paths = AppPaths::resolve().wrap_err("failed to resolve ~/.simpleclaw paths")?;
-    let loaded = LoadedConfig::load(cli.workspace.as_deref())
-        .wrap_err("failed to load global/workspace configuration")?;
+    let loaded = LoadedConfig::load(None).wrap_err("failed to load global configuration")?;
     let deps = RuntimeDependencies::default();
-    let (state, mut inbound_rx) = assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?;
+    let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps).await?;
     let state = Arc::new(state);
     let coordinator =
         SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));

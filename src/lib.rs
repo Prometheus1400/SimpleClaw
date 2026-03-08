@@ -42,7 +42,7 @@ pub async fn run() -> color_eyre::Result<()> {
     match &cli.command {
         Some(Command::System {
             action: SystemAction::Run,
-        }) => run::run_service(&cli).await?,
+        }) => run::run_service().await?,
         Some(Command::System {
             action: SystemAction::Start,
         }) => run::start_service()?,
@@ -71,7 +71,7 @@ pub async fn run() -> color_eyre::Result<()> {
                     limit,
                 },
         }) => run::show_agent_memory(&cli, agent, *memory, *limit).await?,
-        None => run::run_service(&cli).await?,
+        None => run::run_service().await?,
     }
     Ok(())
 }

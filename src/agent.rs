@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::channels::InboundMessage;
 use crate::config::{AgentConfig, RuntimeConfig};
 use crate::error::FrameworkError;
-use crate::memory::{MemoryHitStore, MemoryPreinjectHit, MemoryStore, StoredRole};
+use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunParams};
@@ -32,13 +32,13 @@ pub struct AgentRuntimeConfig {
 #[derive(Clone)]
 pub struct AgentDirectory {
     agent_configs: HashMap<String, AgentRuntimeConfig>,
-    memories: HashMap<String, MemoryStore>,
+    memories: HashMap<String, DynMemory>,
 }
 
 impl AgentDirectory {
     pub fn new(
         agent_configs: HashMap<String, AgentRuntimeConfig>,
-        memories: HashMap<String, MemoryStore>,
+        memories: HashMap<String, DynMemory>,
     ) -> Self {
         Self {
             agent_configs,
@@ -50,7 +50,7 @@ impl AgentDirectory {
         self.agent_configs.get(agent_id)
     }
 
-    pub fn memory(&self, agent_id: &str) -> Option<&MemoryStore> {
+    pub fn memory(&self, agent_id: &str) -> Option<&DynMemory> {
         self.memories.get(agent_id)
     }
 
@@ -211,7 +211,7 @@ impl AgentRuntime {
 
     async fn seeded_history(
         &self,
-        memory: &MemoryStore,
+        memory: &DynMemory,
         session_id: &str,
     ) -> Result<Vec<Message>, FrameworkError> {
         let history_limit = self.config.runtime_config.history_messages as usize;
@@ -241,7 +241,7 @@ impl AgentRuntime {
 
     async fn build_turn_system_prompt(
         &self,
-        memory: &MemoryStore,
+        memory: &DynMemory,
         session_id: &str,
         query: &str,
     ) -> String {

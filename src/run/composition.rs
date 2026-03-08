@@ -12,15 +12,14 @@ use crate::agent::{
     load_system_prompt_for_workspace,
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
-use crate::cli::Cli;
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
-use crate::memory::MemoryStore;
+use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
 use crate::providers::ProviderFactory;
 use crate::react::ReactLoop;
 use crate::tools::skill::SkillFactory;
-use crate::tools::{ProcessManager, default_factory};
+use crate::tools::{ProcessManager, ToolFactory, default_factory};
 
 #[async_trait]
 pub(crate) trait ProviderFactoryBuilder: Send + Sync {
@@ -36,7 +35,7 @@ pub(crate) trait MemoryFactory: Send + Sync {
         &self,
         agent: &AgentEntryConfig,
         loaded: &LoadedConfig,
-    ) -> color_eyre::Result<MemoryStore>;
+    ) -> color_eyre::Result<DynMemory>;
 }
 
 #[async_trait]
@@ -47,10 +46,35 @@ pub(crate) trait ChannelFactory: Send + Sync {
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>>;
 }
 
+pub(crate) trait ToolFactoryBuilder: Send + Sync {
+    fn create_tool_factory(&self) -> ToolFactory;
+}
+
+pub(crate) trait SkillFactoryBuilder: Send + Sync {
+    fn create_skill_factory(&self, app_paths: &AppPaths) -> SkillFactory;
+}
+
+pub(crate) trait ProcessManagerFactory: Send + Sync {
+    fn create_process_manager(&self) -> Arc<ProcessManager>;
+}
+
+pub(crate) trait ReactLoopFactory: Send + Sync {
+    fn create_react_loop(
+        &self,
+        provider_factory: ProviderFactory,
+        tool_factory: ToolFactory,
+        skill_factory: SkillFactory,
+    ) -> Arc<ReactLoop>;
+}
+
 pub(crate) struct RuntimeDependencies {
     pub provider_factory_builder: Arc<dyn ProviderFactoryBuilder>,
     pub memory_factory: Arc<dyn MemoryFactory>,
     pub channel_factory: Arc<dyn ChannelFactory>,
+    pub tool_factory_builder: Arc<dyn ToolFactoryBuilder>,
+    pub skill_factory_builder: Arc<dyn SkillFactoryBuilder>,
+    pub process_manager_factory: Arc<dyn ProcessManagerFactory>,
+    pub react_loop_factory: Arc<dyn ReactLoopFactory>,
 }
 
 impl Default for RuntimeDependencies {
@@ -59,6 +83,10 @@ impl Default for RuntimeDependencies {
             provider_factory_builder: Arc::new(DefaultProviderFactoryBuilder),
             memory_factory: Arc::new(DefaultMemoryFactory),
             channel_factory: Arc::new(DefaultChannelFactory),
+            tool_factory_builder: Arc::new(DefaultToolFactoryBuilder),
+            skill_factory_builder: Arc::new(DefaultSkillFactoryBuilder),
+            process_manager_factory: Arc::new(DefaultProcessManagerFactory),
+            react_loop_factory: Arc::new(DefaultReactLoopFactory),
         }
     }
 }
@@ -84,7 +112,7 @@ impl MemoryFactory for DefaultMemoryFactory {
         &self,
         agent: &AgentEntryConfig,
         loaded: &LoadedConfig,
-    ) -> color_eyre::Result<MemoryStore> {
+    ) -> color_eyre::Result<DynMemory> {
         let (memory_dir, short_term_path, long_term_path) =
             agent_workspace_memory_paths(&agent.workspace);
         fs::create_dir_all(&memory_dir).wrap_err_with(|| {
@@ -101,6 +129,7 @@ impl MemoryFactory for DefaultMemoryFactory {
             &loaded.global.embedding,
         )
         .await
+        .map(|memory| Arc::new(memory) as DynMemory)
         .wrap_err_with(|| {
             format!(
                 "failed to initialize sqlite memory store for agent '{}'",
@@ -133,6 +162,47 @@ impl ChannelFactory for DefaultChannelFactory {
     }
 }
 
+struct DefaultToolFactoryBuilder;
+
+impl ToolFactoryBuilder for DefaultToolFactoryBuilder {
+    fn create_tool_factory(&self) -> ToolFactory {
+        default_factory()
+    }
+}
+
+struct DefaultSkillFactoryBuilder;
+
+impl SkillFactoryBuilder for DefaultSkillFactoryBuilder {
+    fn create_skill_factory(&self, app_paths: &AppPaths) -> SkillFactory {
+        SkillFactory::new(app_paths.base_dir.clone())
+    }
+}
+
+struct DefaultProcessManagerFactory;
+
+impl ProcessManagerFactory for DefaultProcessManagerFactory {
+    fn create_process_manager(&self) -> Arc<ProcessManager> {
+        Arc::new(ProcessManager::new())
+    }
+}
+
+struct DefaultReactLoopFactory;
+
+impl ReactLoopFactory for DefaultReactLoopFactory {
+    fn create_react_loop(
+        &self,
+        provider_factory: ProviderFactory,
+        tool_factory: ToolFactory,
+        skill_factory: SkillFactory,
+    ) -> Arc<ReactLoop> {
+        Arc::new(ReactLoop::new(
+            provider_factory,
+            tool_factory,
+            skill_factory,
+        ))
+    }
+}
+
 pub(crate) struct RuntimeState {
     pub gateway: Gateway,
     pub runtimes: HashMap<String, AgentRuntime>,
@@ -140,7 +210,6 @@ pub(crate) struct RuntimeState {
 }
 
 pub(crate) async fn assemble_runtime_state(
-    cli: &Cli,
     loaded: &LoadedConfig,
     app_paths: &AppPaths,
     deps: &RuntimeDependencies,
@@ -150,14 +219,14 @@ pub(crate) async fn assemble_runtime_state(
         .create_provider_factory(loaded)
         .await?;
 
-    let mut memories_map: HashMap<String, MemoryStore> = HashMap::new();
+    let mut memories_map: HashMap<String, DynMemory> = HashMap::new();
     for agent in &loaded.global.agents.list {
         let memory = deps.memory_factory.create_memory(agent, loaded).await?;
         memories_map.insert(agent.id.clone(), memory);
     }
 
     let mut agent_configs_map: HashMap<String, AgentRuntimeConfig> = HashMap::new();
-    let mut skill_factory = SkillFactory::new(app_paths.base_dir.clone());
+    let mut skill_factory = deps.skill_factory_builder.create_skill_factory(app_paths);
 
     for agent in &loaded.global.agents.list {
         let agent_config = agent.runtime.clone();
@@ -205,17 +274,15 @@ pub(crate) async fn assemble_runtime_state(
                 workspace_root: agent.workspace.clone(),
                 app_base_dir: app_paths.base_dir.clone(),
                 system_prompt,
-                max_steps: cli.max_steps,
+                max_steps: loaded.global.runtime.max_steps,
             },
         );
     }
 
-    let tool_factory = default_factory();
-    let react_loop = Arc::new(ReactLoop::new(
-        provider_factory,
-        tool_factory,
-        skill_factory,
-    ));
+    let tool_factory = deps.tool_factory_builder.create_tool_factory();
+    let react_loop =
+        deps.react_loop_factory
+            .create_react_loop(provider_factory, tool_factory, skill_factory);
 
     let directory = Arc::new(AgentDirectory::new(agent_configs_map, memories_map));
     let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
@@ -223,7 +290,7 @@ pub(crate) async fn assemble_runtime_state(
         runtimes.insert(agent_id.clone(), AgentRuntime::new(config.clone()));
     }
 
-    let process_manager = Arc::new(ProcessManager::new());
+    let process_manager = deps.process_manager_factory.create_process_manager();
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;

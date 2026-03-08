@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Duration;
 use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
 use fastembed::{InitOptions, TextEmbedding};
@@ -24,6 +25,56 @@ pub use types::{
     LongTermFactSummary, LongTermForgetMatch, LongTermForgetResult, MemorizeResult, MemoryHitStore,
     MemoryPreinjectHit, StoredMessage, StoredRole,
 };
+
+pub type DynMemory = Arc<dyn Memory>;
+
+#[async_trait]
+pub trait Memory: Send + Sync {
+    async fn append_message(
+        &self,
+        session_id: &str,
+        role: StoredRole,
+        content: &str,
+        username: Option<&str>,
+    ) -> Result<(), FrameworkError>;
+    async fn semantic_query_combined(
+        &self,
+        session_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<String>, FrameworkError>;
+    async fn query_preinject_hits(
+        &self,
+        session_id: &str,
+        query: &str,
+        config: &MemoryPreinjectConfig,
+    ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError>;
+    async fn semantic_forget_long_term(
+        &self,
+        query: &str,
+        similarity_threshold: f32,
+        max_matches: usize,
+        kind_filter: Option<&str>,
+        commit: bool,
+    ) -> Result<LongTermForgetResult, FrameworkError>;
+    async fn recent_messages(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, FrameworkError>;
+    async fn memorize(
+        &self,
+        session_id: &str,
+        content: &str,
+        kind: &str,
+        importance: u8,
+    ) -> Result<MemorizeResult, FrameworkError>;
+    async fn list_long_term_facts(
+        &self,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LongTermFactSummary>, FrameworkError>;
+}
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -691,6 +742,82 @@ impl MemoryStore {
         .await
         .map_err(|e| FrameworkError::Config(e.to_string()))?
         .map_err(|e| FrameworkError::Config(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl Memory for MemoryStore {
+    async fn append_message(
+        &self,
+        session_id: &str,
+        role: StoredRole,
+        content: &str,
+        username: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        MemoryStore::append_message(self, session_id, role, content, username).await
+    }
+
+    async fn semantic_query_combined(
+        &self,
+        session_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<String>, FrameworkError> {
+        MemoryStore::semantic_query_combined(self, session_id, query, top_k).await
+    }
+
+    async fn query_preinject_hits(
+        &self,
+        session_id: &str,
+        query: &str,
+        config: &MemoryPreinjectConfig,
+    ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError> {
+        MemoryStore::query_preinject_hits(self, session_id, query, config).await
+    }
+
+    async fn semantic_forget_long_term(
+        &self,
+        query: &str,
+        similarity_threshold: f32,
+        max_matches: usize,
+        kind_filter: Option<&str>,
+        commit: bool,
+    ) -> Result<LongTermForgetResult, FrameworkError> {
+        MemoryStore::semantic_forget_long_term(
+            self,
+            query,
+            similarity_threshold,
+            max_matches,
+            kind_filter,
+            commit,
+        )
+        .await
+    }
+
+    async fn recent_messages(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, FrameworkError> {
+        MemoryStore::recent_messages(self, session_id, limit).await
+    }
+
+    async fn memorize(
+        &self,
+        session_id: &str,
+        content: &str,
+        kind: &str,
+        importance: u8,
+    ) -> Result<MemorizeResult, FrameworkError> {
+        MemoryStore::memorize(self, session_id, content, kind, importance).await
+    }
+
+    async fn list_long_term_facts(
+        &self,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LongTermFactSummary>, FrameworkError> {
+        MemoryStore::list_long_term_facts(self, kind_filter, limit).await
     }
 }
 

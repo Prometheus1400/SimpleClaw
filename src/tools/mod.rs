@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::channels::InboundMessage;
 use crate::config::{AgentSandboxConfig, GatewayChannelKind};
 use crate::error::FrameworkError;
-use crate::memory::MemoryStore;
+use crate::memory::DynMemory;
 use crate::providers::ToolDefinition;
 
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ pub struct CompletionRoute {
 
 #[derive(Clone)]
 pub(crate) struct ToolExecEnv {
-    pub memory: MemoryStore,
+    pub memory: DynMemory,
     pub sandbox: AgentSandboxConfig,
     pub workspace_root: PathBuf,
     pub user_id: String,
