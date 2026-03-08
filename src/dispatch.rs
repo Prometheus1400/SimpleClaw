@@ -26,6 +26,7 @@ pub(crate) struct ToolExecutionResult {
     pub success: bool,
     pub elapsed_ms: u64,
     pub tool_call_id: Option<String>,
+    pub nested_tool_calls: Vec<ToolExecutionResult>,
 }
 
 pub(crate) enum DispatchAction {
@@ -59,26 +60,28 @@ pub(crate) trait ToolDispatcher: Send + Sync {
             let _call_entered = call_span.enter();
             debug!(status = "started", "tool call");
 
-            let (observation, status) = match active_tools.get(call.name.as_str()) {
-                Some(tool) => match enforce_tool_authorization(call.name.as_str(), tool_ctx) {
-                    Ok(()) => match execute_tool_with_sandbox(
-                        tool.as_ref(),
-                        tool_ctx,
-                        &args_json,
-                        session_id,
-                    )
-                    .await
-                    {
-                        Ok(ok) => (ok, "ok"),
-                        Err(err) => (format!("tool_error: {err}"), "tool_error"),
+            let (observation, nested_tool_calls, status) =
+                match active_tools.get(call.name.as_str()) {
+                    Some(tool) => match enforce_tool_authorization(call.name.as_str(), tool_ctx) {
+                        Ok(()) => match execute_tool_with_sandbox(
+                            tool.as_ref(),
+                            tool_ctx,
+                            &args_json,
+                            session_id,
+                        )
+                        .await
+                        {
+                            Ok(ok) => (ok.output, ok.nested_tool_calls, "ok"),
+                            Err(err) => (format!("tool_error: {err}"), Vec::new(), "tool_error"),
+                        },
+                        Err(err) => (format!("tool_error: {err}"), Vec::new(), "tool_error"),
                     },
-                    Err(err) => (format!("tool_error: {err}"), "tool_error"),
-                },
-                None => (
-                    format!("tool_error: unknown tool: {}", call.name),
-                    "unknown",
-                ),
-            };
+                    None => (
+                        format!("tool_error: unknown tool: {}", call.name),
+                        Vec::new(),
+                        "unknown",
+                    ),
+                };
             let elapsed_ms = tool_started.elapsed().as_millis() as u64;
             let output_preview = preview_for_log(&observation, TOOL_OUTPUT_LOG_PREVIEW_CHARS);
 
@@ -110,6 +113,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                 success: status == "ok",
                 elapsed_ms,
                 tool_call_id: call.tool_call_id.clone(),
+                nested_tool_calls,
             });
         }
         results
@@ -427,6 +431,7 @@ mod tests {
             success: true,
             elapsed_ms: 8,
             tool_call_id: Some("c1".to_owned()),
+            nested_tool_calls: Vec::new(),
         }];
         let dispatcher = NativeDispatcher;
         let messages = dispatcher.format_for_history(&calls, &results);
@@ -539,6 +544,7 @@ mod tests {
             success: true,
             elapsed_ms: 2,
             tool_call_id: None,
+            nested_tool_calls: Vec::new(),
         }];
         let dispatcher = XmlDispatcher;
         let messages = dispatcher.format_for_history(&calls, &results);
@@ -601,6 +607,7 @@ mod tests {
             success: false,
             elapsed_ms: 3,
             tool_call_id: Some("c2".to_owned()),
+            nested_tool_calls: Vec::new(),
         }];
         let dispatcher = NativeDispatcher;
         let messages = dispatcher.format_for_history(&calls, &results);

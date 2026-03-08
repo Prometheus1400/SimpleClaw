@@ -13,7 +13,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 use crate::error::FrameworkError;
 
-use super::{Tool, ToolExecEnv};
+use super::{Tool, ToolExecEnv, ToolRunOutput};
 
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
@@ -32,7 +32,7 @@ pub async fn execute_tool_with_sandbox(
     ctx: &ToolExecEnv,
     args_json: &str,
     session_id: &str,
-) -> Result<String, FrameworkError> {
+) -> Result<ToolRunOutput, FrameworkError> {
     if ctx.sandbox.enabled && SANDBOX_ENFORCED_TOOLS.contains(&tool.name()) && !tool.sandbox_aware()
     {
         return Err(FrameworkError::Tool(format!(
@@ -40,7 +40,7 @@ pub async fn execute_tool_with_sandbox(
             tool.name()
         )));
     }
-    tool.execute(ctx, args_json, session_id).await
+    tool.execute_with_trace(ctx, args_json, session_id).await
 }
 
 pub async fn run_wasm_guest(
@@ -260,7 +260,8 @@ mod tests {
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
     use crate::tools::{
-        AgentInvokeRequest, AgentInvoker, ProcessManager, Tool, ToolExecEnv, WorkerInvokeRequest,
+        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, Tool, ToolExecEnv,
+        WorkerInvokeRequest,
     };
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
@@ -287,15 +288,21 @@ mod tests {
         async fn invoke_agent(
             &self,
             _request: AgentInvokeRequest,
-        ) -> Result<String, FrameworkError> {
-            Ok(String::new())
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Ok(InvokeOutcome {
+                reply: String::new(),
+                tool_calls: Vec::new(),
+            })
         }
 
         async fn invoke_worker(
             &self,
             _request: WorkerInvokeRequest,
-        ) -> Result<String, FrameworkError> {
-            Ok(String::new())
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Ok(InvokeOutcome {
+                reply: String::new(),
+                tool_calls: Vec::new(),
+            })
         }
     }
 
@@ -387,7 +394,8 @@ mod tests {
         )
         .await
         .expect("sandbox should allow non-enforced tools");
-        assert_eq!(result, "ok");
+        assert_eq!(result.output, "ok");
+        assert!(result.nested_tool_calls.is_empty());
     }
 
     #[tokio::test]
@@ -404,6 +412,7 @@ mod tests {
         )
         .await
         .expect("sandbox off should allow execution");
-        assert_eq!(result, "ok");
+        assert_eq!(result.output, "ok");
+        assert!(result.nested_tool_calls.is_empty());
     }
 }
