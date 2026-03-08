@@ -3,10 +3,12 @@ use crate::error::FrameworkError;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, Role};
 use crate::tools::skill::SkillFactory;
-use crate::tools::{CompletionRoute, ToolExecEnv, ToolFactory};
-use crate::{agent::AgentRuntimeConfig, channels::InboundMessage, memory::MemoryStore};
+use crate::tools::{
+    AgentInvokeRequest, AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory,
+    WorkerInvokeRequest,
+};
+use crate::{agent::AgentDirectory, channels::InboundMessage, memory::MemoryStore};
 use crate::{config::AgentSandboxConfig, tools::ProcessManager};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -35,11 +37,101 @@ pub struct RunParams<'a> {
     pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
     pub react_loop: Arc<ReactLoop>,
-    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
-    pub memories: Arc<HashMap<String, MemoryStore>>,
-    pub enabled_tools: Vec<String>,
+    pub agents: Arc<AgentDirectory>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
+}
+
+struct ReactAgentInvoker {
+    react_loop: Arc<ReactLoop>,
+    agents: Arc<AgentDirectory>,
+    process_manager: Arc<ProcessManager>,
+}
+
+#[async_trait::async_trait]
+impl AgentInvoker for ReactAgentInvoker {
+    async fn invoke_agent(&self, request: AgentInvokeRequest) -> Result<String, FrameworkError> {
+        let target_config = self
+            .agents
+            .config(&request.target_agent_id)
+            .ok_or_else(|| {
+                FrameworkError::Tool(format!("unknown agent: {}", request.target_agent_id))
+            })?;
+        let memory = self
+            .agents
+            .memory(&request.target_agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                FrameworkError::Tool(format!("no memory for agent: {}", request.target_agent_id))
+            })?;
+        let effective_max_steps = target_config
+            .max_steps
+            .min(target_config.runtime_config.max_steps);
+        let params = RunParams {
+            provider_key: &target_config.provider_key,
+            agent_config: &target_config.agent_config,
+            system_prompt: &target_config.system_prompt,
+            agent_id: &request.target_agent_id,
+            session_id: &request.session_id,
+            max_steps: effective_max_steps,
+            memory,
+            sandbox: target_config.agent_config.sandbox.clone(),
+            workspace_root: target_config.workspace_root.clone(),
+            user_id: request.user_id,
+            owner_ids: target_config.runtime_config.owner_ids.clone(),
+            process_manager: Arc::clone(&self.process_manager),
+            react_loop: Arc::clone(&self.react_loop),
+            agents: Arc::clone(&self.agents),
+            completion_tx: None,
+            completion_route: None,
+        };
+        self.react_loop
+            .run(params, vec![Message::text(Role::User, request.prompt)])
+            .await
+    }
+
+    async fn invoke_worker(&self, request: WorkerInvokeRequest) -> Result<String, FrameworkError> {
+        let current_config = self
+            .agents
+            .config(&request.current_agent_id)
+            .ok_or_else(|| FrameworkError::Tool("current agent config unavailable".to_owned()))?;
+        let memory = self
+            .agents
+            .memory(&request.current_agent_id)
+            .cloned()
+            .ok_or_else(|| FrameworkError::Tool("current agent memory unavailable".to_owned()))?;
+        let mut worker_agent_config = current_config.agent_config.clone();
+        worker_agent_config.tools.enabled_tools = worker_agent_config
+            .tools
+            .enabled_tools
+            .iter()
+            .filter(|name| !matches!(name.as_str(), "summon" | "task" | "memorize" | "forget"))
+            .cloned()
+            .collect();
+        let params = RunParams {
+            provider_key: &current_config.provider_key,
+            agent_config: &worker_agent_config,
+            system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
+            agent_id: "task-worker",
+            session_id: &request.session_id,
+            max_steps: current_config
+                .max_steps
+                .min(current_config.runtime_config.max_steps),
+            memory,
+            sandbox: current_config.agent_config.sandbox.clone(),
+            workspace_root: current_config.workspace_root.clone(),
+            user_id: request.user_id,
+            owner_ids: current_config.runtime_config.owner_ids.clone(),
+            process_manager: Arc::clone(&self.process_manager),
+            react_loop: Arc::clone(&self.react_loop),
+            agents: Arc::clone(&self.agents),
+            completion_tx: None,
+            completion_route: None,
+        };
+        self.react_loop
+            .run(params, vec![Message::text(Role::User, request.prompt)])
+            .await
+    }
 }
 
 impl ReactLoop {
@@ -71,6 +163,11 @@ impl ReactLoop {
             .supports_native_tools(params.provider_key);
         let dispatcher = resolve_dispatcher(supports_native);
         let skills = self.skill_factory.tools_for_agent(params.agent_id);
+        let invoker: Arc<dyn AgentInvoker> = Arc::new(ReactAgentInvoker {
+            react_loop: Arc::clone(&params.react_loop),
+            agents: Arc::clone(&params.agents),
+            process_manager: Arc::clone(&params.process_manager),
+        });
         let tool_env = ToolExecEnv {
             memory: params.memory.clone(),
             sandbox: params.sandbox.clone(),
@@ -78,13 +175,7 @@ impl ReactLoop {
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),
             process_manager: Arc::clone(&params.process_manager),
-            react_loop: Arc::clone(&params.react_loop),
-            agent_configs: Arc::clone(&params.agent_configs),
-            memories: Arc::clone(&params.memories),
-            current_agent_id: params.agent_id.to_owned(),
-            current_provider_key: params.provider_key.to_owned(),
-            max_steps: params.max_steps,
-            enabled_tools: params.enabled_tools.clone(),
+            invoker,
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
         };

@@ -857,7 +857,7 @@ impl InboundPolicyConfig {
 
     fn finalize(self, is_dm: bool) -> InboundPolicy {
         InboundPolicy {
-            agent: self.agent.unwrap_or_default(),
+            agent: self.agent.unwrap_or_else(default_agent_id),
             allow_from: self.allow_from,
             require_mentions: if is_dm {
                 false

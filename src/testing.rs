@@ -160,7 +160,7 @@ pub async fn run_single_gateway_roundtrip(
         max_steps: config.max_steps,
         command: None,
     };
-    let state = assemble_runtime_state(&cli, &loaded, &app_paths, &deps)
+    let (state, _inbound_rx) = assemble_runtime_state(&cli, &loaded, &app_paths, &deps)
         .await
         .wrap_err("failed to assemble runtime state for integration harness")?;
 

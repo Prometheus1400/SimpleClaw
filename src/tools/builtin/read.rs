@@ -257,8 +257,8 @@ mod tests {
         let workspace = unique_test_dir("workspace_relative");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let resolved = resolve_path_for_read("docs/file.txt", &workspace, true)
-            .expect("path should resolve");
+        let resolved =
+            resolve_path_for_read("docs/file.txt", &workspace, true).expect("path should resolve");
         assert_eq!(resolved, workspace.join("docs/file.txt"));
 
         let _ = fs::remove_dir_all(&workspace);
@@ -270,12 +270,8 @@ mod tests {
         fs::create_dir_all(&workspace).expect("should create workspace");
         let outside = unique_test_dir("outside_absolute").join("secrets.txt");
 
-        let err = resolve_path_for_read(
-            outside.to_string_lossy().as_ref(),
-            &workspace,
-            true,
-        )
-        .expect_err("outside path should be denied");
+        let err = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, true)
+            .expect_err("outside path should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
 
         let _ = fs::remove_dir_all(&workspace);
@@ -299,12 +295,8 @@ mod tests {
         fs::create_dir_all(&workspace).expect("should create workspace");
         let outside = unique_test_dir("outside_off").join("secrets.txt");
 
-        let resolved = resolve_path_for_read(
-            outside.to_string_lossy().as_ref(),
-            &workspace,
-            false,
-        )
-        .expect("outside path should resolve with sandbox off");
+        let resolved = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, false)
+            .expect("outside path should resolve with sandbox off");
         assert_eq!(resolved, outside);
 
         let _ = fs::remove_dir_all(&workspace);
@@ -338,12 +330,9 @@ mod tests {
             std::env::set_var("SIMPLECLAW_READ_TEST_DIR", &env_root);
         }
 
-        let resolved = resolve_path_for_read(
-            "$SIMPLECLAW_READ_TEST_DIR/token.txt",
-            &workspace,
-            false,
-        )
-        .expect("env path should resolve");
+        let resolved =
+            resolve_path_for_read("$SIMPLECLAW_READ_TEST_DIR/token.txt", &workspace, false)
+                .expect("env path should resolve");
         assert_eq!(resolved, env_root.join("token.txt"));
 
         let _ = fs::remove_dir_all(&workspace);

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
@@ -16,7 +16,6 @@ mod transport;
 
 pub struct Gateway {
     channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
-    inbound_rx: Mutex<mpsc::Receiver<InboundMessage>>,
 }
 
 impl Gateway {
@@ -24,7 +23,6 @@ impl Gateway {
         channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
         inbound_policy: InboundConfig,
         inbound_tx: mpsc::Sender<InboundMessage>,
-        inbound_rx: mpsc::Receiver<InboundMessage>,
     ) -> Self {
         for (kind, channel) in &channels {
             let kind = *kind;
@@ -80,17 +78,7 @@ impl Gateway {
             );
         }
 
-        Self {
-            channels,
-            inbound_rx: Mutex::new(inbound_rx),
-        }
-    }
-
-    pub async fn next_message(&self) -> Result<InboundMessage, FrameworkError> {
-        let mut rx = self.inbound_rx.lock().await;
-        rx.recv()
-            .await
-            .ok_or_else(|| FrameworkError::Config("gateway inbound channel closed".to_owned()))
+        Self { channels }
     }
 
     pub async fn send_message(
@@ -166,9 +154,9 @@ mod tests {
         });
         let mut channels = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
-        let (tx, rx) = mpsc::channel(1);
-        let gateway = Gateway::new(channels, InboundConfig::default(), tx, rx);
-        let next = tokio::time::timeout(Duration::from_secs(1), gateway.next_message())
+        let (tx, mut rx) = mpsc::channel(1);
+        let _gateway = Gateway::new(channels, InboundConfig::default(), tx);
+        let next = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("gateway should emit normalized inbound")
             .expect("inbound should decode");

@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
-use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::agent::{AgentRuntime, AgentRuntimeConfig, load_system_prompt_for_workspace};
+use crate::agent::{
+    AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext,
+    load_system_prompt_for_workspace,
+};
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::Cli;
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
@@ -133,13 +135,8 @@ impl ChannelFactory for DefaultChannelFactory {
 
 pub(crate) struct RuntimeState {
     pub gateway: Gateway,
-    pub react_loop: Arc<ReactLoop>,
     pub runtimes: HashMap<String, AgentRuntime>,
-    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
-    pub memories: Arc<HashMap<String, MemoryStore>>,
-    pub process_manager: Arc<ProcessManager>,
-    pub completion_tx: mpsc::Sender<InboundMessage>,
-    pub safe_error_reply: String,
+    pub context: Arc<RuntimeContext>,
 }
 
 pub(crate) async fn assemble_runtime_state(
@@ -147,7 +144,7 @@ pub(crate) async fn assemble_runtime_state(
     loaded: &LoadedConfig,
     app_paths: &AppPaths,
     deps: &RuntimeDependencies,
-) -> color_eyre::Result<RuntimeState> {
+) -> color_eyre::Result<(RuntimeState, tokio::sync::mpsc::Receiver<InboundMessage>)> {
     let provider_factory = deps
         .provider_factory_builder
         .create_provider_factory(loaded)
@@ -220,10 +217,9 @@ pub(crate) async fn assemble_runtime_state(
         skill_factory,
     ));
 
-    let agent_configs = Arc::new(agent_configs_map);
-    let memories = Arc::new(memories_map);
+    let directory = Arc::new(AgentDirectory::new(agent_configs_map, memories_map));
     let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
-    for (agent_id, config) in agent_configs.iter() {
+    for (agent_id, config) in directory.iter_configs() {
         runtimes.insert(agent_id.clone(), AgentRuntime::new(config.clone()));
     }
 
@@ -231,23 +227,24 @@ pub(crate) async fn assemble_runtime_state(
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Gateway::new(
-        channels,
-        loaded.global.inbound.clone(),
-        gateway_tx.clone(),
-        gateway_rx,
-    );
+    let gateway = Gateway::new(channels, loaded.global.inbound.clone(), gateway_tx.clone());
 
-    Ok(RuntimeState {
-        gateway,
+    let context = Arc::new(RuntimeContext {
         react_loop,
-        runtimes,
-        agent_configs,
-        memories,
+        agents: directory,
         process_manager,
         completion_tx: gateway_tx,
         safe_error_reply: loaded.global.runtime.safe_error_reply.clone(),
-    })
+    });
+
+    Ok((
+        RuntimeState {
+            gateway,
+            runtimes,
+            context,
+        },
+        gateway_rx,
+    ))
 }
 
 pub(crate) fn agent_workspace_memory_paths(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {

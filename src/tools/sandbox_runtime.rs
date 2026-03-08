@@ -65,10 +65,9 @@ fn wrap_command_for_exec_blocking(
         .build()
         .map_err(|e| FrameworkError::Tool(format!("failed to create sandbox runtime: {e}")))?;
     rt.block_on(async {
-        manager
-            .initialize(runtime_cfg)
-            .await
-            .map_err(|e| FrameworkError::Tool(format!("failed to initialize sandbox runtime: {e}")))?;
+        manager.initialize(runtime_cfg).await.map_err(|e| {
+            FrameworkError::Tool(format!("failed to initialize sandbox runtime: {e}"))
+        })?;
         manager
             .wrap_with_sandbox(user_command, Some("/bin/bash"), None)
             .await

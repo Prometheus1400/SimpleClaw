@@ -22,7 +22,7 @@ use preinject::{parse_memory_kind, rank_preinject_hits};
 use schema::register_sqlite_vec;
 pub use types::{
     LongTermFactSummary, LongTermForgetMatch, LongTermForgetResult, MemorizeResult, MemoryHitStore,
-    MemoryPreinjectHit, StoredMessage,
+    MemoryPreinjectHit, StoredMessage, StoredRole,
 };
 
 #[derive(Clone)]
@@ -196,7 +196,7 @@ impl MemoryStore {
     pub async fn append_message(
         &self,
         session_id: &str,
-        role: &str,
+        role: StoredRole,
         content: &str,
         username: Option<&str>,
     ) -> Result<(), FrameworkError> {
@@ -208,7 +208,7 @@ impl MemoryStore {
         let now = chrono::Utc::now().to_rfc3339();
         let session_for_sessions = session_id.to_owned();
         let session_for_messages = session_id.to_owned();
-        let role = role.to_owned();
+        let role = role.as_db_str().to_owned();
         let content_owned = content.to_owned();
         let username_owned = username
             .map(str::trim)
@@ -488,8 +488,16 @@ impl MemoryStore {
                      LIMIT ?2",
                 )?;
                 let mapped = stmt.query_map(params![session, limit as i64], |row| {
+                    let role_raw: String = row.get(0)?;
+                    let role = StoredRole::from_db_str(&role_raw).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            "invalid role".into(),
+                        )
+                    })?;
                     Ok::<StoredMessage, rusqlite::Error>(StoredMessage {
-                        role: row.get(0)?,
+                        role,
                         content: row.get(1)?,
                         username: row.get(2)?,
                     })

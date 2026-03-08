@@ -1,3 +1,4 @@
+use crate::channels::policy::InboundDecision;
 use crate::channels::{ChannelInbound, InboundMessage};
 use crate::config::{GatewayChannelKind, InboundConfig};
 
@@ -10,11 +11,11 @@ pub(super) fn route_inbound(
     inbound_policy: &InboundConfig,
 ) -> Option<InboundMessage> {
     let decision = evaluate_inbound_policy(kind, &inbound, inbound_policy);
-    if !decision.ingest_for_context {
-        return None;
-    }
-
-    let target_agent_id = decision.target_agent_id.clone();
+    let (target_agent_id, invoke) = match decision {
+        InboundDecision::Drop => return None,
+        InboundDecision::ContextOnly { agent_id } => (agent_id, false),
+        InboundDecision::Invoke { agent_id } => (agent_id, true),
+    };
 
     Some(InboundMessage {
         trace_id: crate::telemetry::next_trace_id(),
@@ -27,7 +28,7 @@ pub(super) fn route_inbound(
         user_id: inbound.user_id,
         username: inbound.username,
         mentioned_bot: inbound.mentioned_bot,
-        invoke: decision.allow_invoke,
+        invoke,
         content: inbound.content,
     })
 }

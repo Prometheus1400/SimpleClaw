@@ -18,13 +18,33 @@ use tracing::{Instrument, debug, info_span};
 
 use tokio::sync::mpsc;
 
-use crate::agent::AgentRuntimeConfig;
 use crate::channels::InboundMessage;
 use crate::config::{AgentSandboxConfig, GatewayChannelKind};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::providers::ToolDefinition;
-use crate::react::ReactLoop;
+
+#[derive(Debug, Clone)]
+pub struct AgentInvokeRequest {
+    pub target_agent_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerInvokeRequest {
+    pub current_agent_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub prompt: String,
+}
+
+#[async_trait]
+pub trait AgentInvoker: Send + Sync {
+    async fn invoke_agent(&self, request: AgentInvokeRequest) -> Result<String, FrameworkError>;
+    async fn invoke_worker(&self, request: WorkerInvokeRequest) -> Result<String, FrameworkError>;
+}
 
 #[derive(Debug, Clone)]
 pub struct CompletionRoute {
@@ -45,13 +65,7 @@ pub(crate) struct ToolExecEnv {
     pub user_id: String,
     pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
-    pub react_loop: Arc<ReactLoop>,
-    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
-    pub memories: Arc<HashMap<String, MemoryStore>>,
-    pub current_agent_id: String,
-    pub current_provider_key: String,
-    pub max_steps: u32,
-    pub enabled_tools: Vec<String>,
+    pub invoker: Arc<dyn AgentInvoker>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
 }

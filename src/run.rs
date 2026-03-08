@@ -78,7 +78,7 @@ pub(crate) async fn handle_inbound_once(
     if !inbound.invoke {
         tracing::debug!(status = "recording_context", "passive inbound");
         if let Err(err) = runtime
-            .record_context(&inbound, &memory_session_id, state.memories.as_ref())
+            .record_context(&inbound, &memory_session_id, state.context.agents.as_ref())
             .await
         {
             tracing::error!(
@@ -109,15 +109,7 @@ pub(crate) async fn handle_inbound_once(
     tracing::debug!(status = "dispatching", "invoke inbound");
 
     match runtime
-        .run(
-            &inbound,
-            &memory_session_id,
-            Arc::clone(&state.react_loop),
-            Arc::clone(&state.agent_configs),
-            Arc::clone(&state.memories),
-            Arc::clone(&state.process_manager),
-            Some(state.completion_tx.clone()),
-        )
+        .run(&inbound, &memory_session_id, state.context.as_ref())
         .await
     {
         Ok(reply) => {
@@ -139,7 +131,7 @@ pub(crate) async fn handle_inbound_once(
             );
             if let Err(send_err) = state
                 .gateway
-                .send_message(&inbound, &state.safe_error_reply)
+                .send_message(&inbound, &state.context.safe_error_reply)
                 .await
             {
                 tracing::error!(
@@ -164,7 +156,8 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
     let loaded = LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load global/workspace configuration")?;
     let deps = RuntimeDependencies::default();
-    let state = Arc::new(assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?);
+    let (state, mut inbound_rx) = assemble_runtime_state(cli, &loaded, &app_paths, &deps).await?;
+    let state = Arc::new(state);
     let coordinator =
         SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
     let handler: SessionHandler<InboundMessage> = {
@@ -183,12 +176,13 @@ pub async fn run_service(cli: &Cli) -> color_eyre::Result<()> {
     let _service_entered = service_span.enter();
     info!(status = "started", "service runtime initialized");
     loop {
-        let inbound = match state.gateway.next_message().await {
-            Ok(msg) => msg,
-            Err(err) => {
-                tracing::error!(status = "failed", error_kind = "gateway_listen", error = %err, "gateway listen failed");
-                continue;
-            }
+        let Some(inbound) = inbound_rx.recv().await else {
+            tracing::error!(
+                status = "failed",
+                error_kind = "gateway_listen",
+                "gateway inbound channel closed"
+            );
+            continue;
         };
         let key = inbound.session_key.clone();
         coordinator
