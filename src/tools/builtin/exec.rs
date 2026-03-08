@@ -6,7 +6,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::{ExecContainerConfig, SandboxMode};
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
 
@@ -35,7 +35,7 @@ impl Tool for ExecTool {
 
     async fn execute(
         &self,
-        ctx: &ToolCtx,
+        ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
@@ -47,7 +47,7 @@ impl Tool for ExecTool {
         }
 
         if args.background {
-            let session_id = if ctx.sandbox == SandboxMode::On {
+            let (session_id, handle) = if ctx.sandbox == SandboxMode::On {
                 ctx.process_manager
                     .spawn_podman(
                         args.command.trim(),
@@ -65,6 +65,7 @@ impl Tool for ExecTool {
             {
                 ctx.process_manager.spawn_completion_watcher(
                     session_id.clone(),
+                    handle,
                     tx.clone(),
                     route.clone(),
                 );

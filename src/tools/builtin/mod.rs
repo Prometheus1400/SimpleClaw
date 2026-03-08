@@ -12,19 +12,23 @@ mod task;
 mod web_fetch;
 mod web_search;
 
-use crate::tools::ToolRegistry;
+use std::sync::Arc;
 
-pub fn register_builtin_tools(registry: &mut ToolRegistry) {
-    registry.register(memory::MemoryTool::SemanticQuery);
-    registry.register(memorize::MemorizeTool::LongTermStore);
-    registry.register(forget::ForgetTool::LongTermSemanticPrune);
-    registry.register(summon::SummonTool::Handoff);
-    registry.register(task::TaskTool::Worker);
-    registry.register(web_search::WebSearchTool::DuckDuckGo);
-    registry.register(clock::ClockTool::UtcNow);
-    registry.register(web_fetch::WebFetchTool::HttpFetch);
-    registry.register(read::ReadTool::LocalFile);
-    registry.register(edit::EditTool::LocalFileEditor);
-    registry.register(exec::ExecTool::ShellCommand);
-    registry.register(process::ProcessTool::Lifecycle);
+use crate::tools::Tool;
+
+pub(crate) fn builtin_tools() -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(memory::MemoryTool::SemanticQuery),
+        Arc::new(memorize::MemorizeTool::LongTermStore),
+        Arc::new(forget::ForgetTool::LongTermSemanticPrune),
+        Arc::new(summon::SummonTool::Handoff),
+        Arc::new(task::TaskTool::Worker),
+        Arc::new(web_search::WebSearchTool::DuckDuckGo),
+        Arc::new(clock::ClockTool::UtcNow),
+        Arc::new(web_fetch::WebFetchTool::HttpFetch),
+        Arc::new(read::ReadTool::LocalFile),
+        Arc::new(edit::EditTool::LocalFileEditor),
+        Arc::new(exec::ExecTool::ShellCommand),
+        Arc::new(process::ProcessTool::Lifecycle),
+    ]
 }

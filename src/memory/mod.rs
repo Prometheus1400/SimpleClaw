@@ -1,17 +1,29 @@
-use std::cmp::Ordering;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use chrono::Duration;
 use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
 use fastembed::{InitOptions, TextEmbedding};
 use rusqlite::params;
 use tokio::sync::Mutex;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::config::{DatabaseConfig, EmbeddingConfig, MemoryPreinjectConfig};
 use crate::error::FrameworkError;
 use crate::paths::AppPaths;
+
+mod embedder;
+mod preinject;
+mod schema;
+mod types;
+
+use embedder::{embed_text, encode_f32_blob};
+use preinject::{parse_memory_kind, rank_preinject_hits};
+use schema::register_sqlite_vec;
+pub use types::{
+    LongTermFactSummary, LongTermForgetMatch, LongTermForgetResult, MemorizeResult, MemoryHitStore,
+    MemoryPreinjectHit, StoredMessage,
+};
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -21,70 +33,6 @@ pub struct MemoryStore {
 }
 
 const MEMORIZE_DEDUPE_WINDOW_SECS: i64 = 300;
-const ALLOWED_MEMORY_KINDS: [&str; 6] = [
-    "general",
-    "profile",
-    "preferences",
-    "project",
-    "task",
-    "constraint",
-];
-
-#[derive(Debug, Clone)]
-pub enum MemorizeResult {
-    Inserted,
-    Updated { superseded_content: String },
-    Duplicate,
-}
-
-#[derive(Debug, Clone)]
-pub struct StoredMessage {
-    pub role: String,
-    pub content: String,
-    pub username: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct LongTermFactSummary {
-    pub id: i64,
-    pub content: String,
-    pub kind: String,
-    pub importance: i64,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct LongTermForgetMatch {
-    pub id: i64,
-    pub content: String,
-    pub kind: String,
-    pub importance: i64,
-    pub similarity: f32,
-}
-
-#[derive(Debug, Clone)]
-pub struct LongTermForgetResult {
-    pub matches: Vec<LongTermForgetMatch>,
-    pub deleted_count: usize,
-    pub similarity_threshold: f32,
-    pub max_matches: usize,
-    pub kind_filter: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryHitStore {
-    LongTerm,
-}
-
-#[derive(Debug, Clone)]
-pub struct MemoryPreinjectHit {
-    pub store: MemoryHitStore,
-    pub content: String,
-    pub kind: Option<String>,
-    pub importance: Option<i64>,
-    pub raw_similarity: f32,
-    pub final_score: f32,
-}
 
 impl MemoryStore {
     pub async fn new(
@@ -255,15 +203,12 @@ impl MemoryStore {
         debug!(
             status = "started",
             session_id = %session_id,
-            role,
-            content_chars = content.chars().count(),
             "memory append_message"
         );
         let now = chrono::Utc::now().to_rfc3339();
         let session_for_sessions = session_id.to_owned();
         let session_for_messages = session_id.to_owned();
         let role = role.to_owned();
-        let role_for_log = role.clone();
         let content_owned = content.to_owned();
         let username_owned = username
             .map(str::trim)
@@ -299,7 +244,6 @@ impl MemoryStore {
         debug!(
             status = "completed",
             session_id = %session_id,
-            role = %role_for_log,
             "memory append_message"
         );
 
@@ -346,9 +290,6 @@ impl MemoryStore {
         debug!(
             status = "started",
             session_id = %session_id,
-            query_preview = %crate::telemetry::sanitize_preview(query, 120),
-            top_k = config.top_k,
-            min_score = config.min_score,
             "memory preinject query"
         );
         let config = config.normalized();
@@ -404,7 +345,6 @@ impl MemoryStore {
         debug!(
             status = "completed",
             session_id = %session_id,
-            selected_hits = hits.len(),
             elapsed_ms = started.elapsed().as_millis() as u64,
             "memory preinject query"
         );
@@ -567,8 +507,6 @@ impl MemoryStore {
         debug!(
             status = "completed",
             session_id = %session_id,
-            limit,
-            returned_rows = rows.len(),
             "memory recent_messages"
         );
         Ok(rows)
@@ -776,165 +714,11 @@ fn has_recent_long_term_fact(
     Ok(rows.next()?.is_some())
 }
 
-fn register_sqlite_vec() -> Result<(), FrameworkError> {
-    static RESULT: OnceLock<Result<(), i32>> = OnceLock::new();
-
-    let result = RESULT.get_or_init(|| unsafe {
-        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
-        if rc == rusqlite::ffi::SQLITE_OK {
-            Ok(())
-        } else {
-            Err(rc)
-        }
-    });
-
-    result.map_err(|rc| {
-        FrameworkError::Config(format!(
-            "failed to register bundled sqlite-vec extension (sqlite3_auto_extension rc={rc})"
-        ))
-    })
-}
-
-async fn embed_text(
-    embedder: &Arc<Mutex<TextEmbedding>>,
-    text: &str,
-) -> Result<Vec<f32>, FrameworkError> {
-    let mut model = embedder.lock().await;
-    let embeddings = model
-        .embed(vec![text.to_owned()], None)
-        .map_err(|e| FrameworkError::Config(format!("embedding failed: {e}")))?;
-    embeddings
-        .into_iter()
-        .next()
-        .ok_or_else(|| FrameworkError::Config("embedder returned no vector".to_owned()))
-}
-
-fn encode_f32_blob(values: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(values.len() * 4);
-    for value in values {
-        out.extend_from_slice(&value.to_le_bytes());
-    }
-    out
-}
-
-fn rank_preinject_hits(
-    mut candidates: Vec<MemoryPreinjectHit>,
-    config: &MemoryPreinjectConfig,
-) -> Vec<MemoryPreinjectHit> {
-    let normalized = config.normalized();
-    candidates.sort_by(|a, b| {
-        b.final_score
-            .partial_cmp(&a.final_score)
-            .unwrap_or(Ordering::Equal)
-    });
-
-    let mut dedupe = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for item in candidates {
-        if item.raw_similarity < normalized.min_score {
-            trace!(
-                store = %memory_store_name(item.store),
-                final_score = item.final_score,
-                raw_similarity = item.raw_similarity,
-                min_score = normalized.min_score,
-                "long-term memory pre-injection candidate filtered by raw_similarity min_score"
-            );
-            continue;
-        }
-        let key = normalize_memory_key(&item.content);
-        if key.is_empty() {
-            trace!(
-                store = %memory_store_name(item.store),
-                final_score = item.final_score,
-                "long-term memory pre-injection candidate filtered by empty content"
-            );
-            continue;
-        }
-        if !dedupe.insert(key) {
-            trace!(
-                store = %memory_store_name(item.store),
-                final_score = item.final_score,
-                raw_similarity = item.raw_similarity,
-                "long-term memory pre-injection candidate filtered by dedupe"
-            );
-            continue;
-        }
-        trace!(
-            store = %memory_store_name(item.store),
-            final_score = item.final_score,
-            raw_similarity = item.raw_similarity,
-            "long-term memory pre-injection candidate selected"
-        );
-        out.push(item);
-        if out.len() >= normalized.top_k as usize {
-            trace!(
-                top_k = normalized.top_k,
-                "long-term memory pre-injection reached top_k"
-            );
-            break;
-        }
-    }
-    out
-}
-
-fn memory_store_name(store: MemoryHitStore) -> &'static str {
-    match store {
-        MemoryHitStore::LongTerm => "long-term",
-    }
-}
-
-fn normalize_memory_key(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-pub(crate) fn normalize_memory_kind(value: &str) -> Option<String> {
-    let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
-    if normalized.is_empty() {
-        return None;
-    }
-    match normalized.as_str() {
-        "general" => Some("general".to_owned()),
-        "profile" => Some("profile".to_owned()),
-        "preferences" => Some("preferences".to_owned()),
-        "project" => Some("project".to_owned()),
-        "task" => Some("task".to_owned()),
-        "constraint" => Some("constraint".to_owned()),
-        _ => None,
-    }
-}
-
-fn parse_memory_kind(value: &str) -> Result<String, FrameworkError> {
-    normalize_memory_kind(value).ok_or_else(|| {
-        FrameworkError::Tool(format!(
-            "invalid memory kind '{value}'. allowed kinds: {}",
-            ALLOWED_MEMORY_KINDS.join("|")
-        ))
-    })
-}
 
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
-
-    use crate::config::MemoryPreinjectConfig;
-
-    use super::{
-        MemoryHitStore, MemoryPreinjectHit, has_recent_long_term_fact, normalize_memory_kind,
-        parse_memory_kind, rank_preinject_hits,
-    };
+    use super::has_recent_long_term_fact;
 
     #[test]
     fn long_term_duplicate_check_matches_recent_identical_fact() {
@@ -984,106 +768,4 @@ mod tests {
         assert!(!too_old);
     }
 
-    #[test]
-    fn rank_preinject_hits_applies_threshold_dedupe_and_limit() {
-        let config = MemoryPreinjectConfig {
-            enabled: true,
-            top_k: 2,
-            min_score: 0.75,
-            long_term_weight: 0.65,
-            max_chars: 1200,
-        };
-        let hits = vec![
-            MemoryPreinjectHit {
-                store: MemoryHitStore::LongTerm,
-                content: "Prefers short answers".to_owned(),
-                kind: Some("preferences".to_owned()),
-                importance: Some(5),
-                raw_similarity: 0.94,
-                final_score: 0.86,
-            },
-            MemoryPreinjectHit {
-                store: MemoryHitStore::LongTerm,
-                content: "Working in Rust project".to_owned(),
-                kind: Some("context".to_owned()),
-                importance: Some(3),
-                raw_similarity: 0.89,
-                final_score: 0.81,
-            },
-            MemoryPreinjectHit {
-                store: MemoryHitStore::LongTerm,
-                content: "Low confidence".to_owned(),
-                kind: Some("context".to_owned()),
-                importance: Some(1),
-                raw_similarity: 0.5,
-                final_score: 0.3,
-            },
-        ];
-
-        let ranked = rank_preinject_hits(hits, &config);
-        assert_eq!(ranked.len(), 2);
-        assert_eq!(ranked[0].content, "Prefers short answers");
-        assert_eq!(ranked[1].content, "Working in Rust project");
-        assert!(ranked.iter().all(|hit| hit.raw_similarity >= 0.75));
-    }
-
-    #[test]
-    fn rank_preinject_hits_filters_on_raw_similarity_not_final_score() {
-        let config = MemoryPreinjectConfig {
-            enabled: true,
-            top_k: 2,
-            min_score: 0.72,
-            long_term_weight: 0.65,
-            max_chars: 1200,
-        };
-        let hits = vec![
-            MemoryPreinjectHit {
-                store: MemoryHitStore::LongTerm,
-                content: "High weighted, low raw".to_owned(),
-                kind: Some("preferences".to_owned()),
-                importance: Some(5),
-                raw_similarity: 0.70,
-                final_score: 0.95,
-            },
-            MemoryPreinjectHit {
-                store: MemoryHitStore::LongTerm,
-                content: "Passes raw threshold".to_owned(),
-                kind: Some("context".to_owned()),
-                importance: Some(5),
-                raw_similarity: 0.90,
-                final_score: 0.60,
-            },
-            MemoryPreinjectHit {
-                store: MemoryHitStore::LongTerm,
-                content: "Also passes raw threshold".to_owned(),
-                kind: Some("context".to_owned()),
-                importance: Some(3),
-                raw_similarity: 0.88,
-                final_score: 0.58,
-            },
-        ];
-
-        let ranked = rank_preinject_hits(hits, &config);
-        assert_eq!(ranked.len(), 2);
-        assert_eq!(ranked[0].content, "Passes raw threshold");
-        assert_eq!(ranked[1].content, "Also passes raw threshold");
-        assert!(ranked.iter().all(|hit| hit.raw_similarity >= 0.72));
-    }
-
-    #[test]
-    fn normalize_memory_kind_accepts_only_canonical_values() {
-        assert_eq!(
-            normalize_memory_kind("preferences"),
-            Some("preferences".to_owned())
-        );
-        assert_eq!(normalize_memory_kind("task"), Some("task".to_owned()));
-        assert_eq!(normalize_memory_kind("prefs"), None);
-        assert_eq!(normalize_memory_kind(""), None);
-    }
-
-    #[test]
-    fn parse_memory_kind_returns_error_for_unknown_values() {
-        assert!(parse_memory_kind("project").is_ok());
-        assert!(parse_memory_kind("repo").is_err());
-    }
 }

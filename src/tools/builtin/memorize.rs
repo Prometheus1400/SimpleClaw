@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::error::FrameworkError;
 use crate::memory::MemorizeResult;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_memorize_args;
 
@@ -27,7 +27,7 @@ impl Tool for MemorizeTool {
 
     async fn execute(
         &self,
-        ctx: &ToolCtx,
+        ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
     ) -> Result<String, FrameworkError> {

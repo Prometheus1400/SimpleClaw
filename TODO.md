@@ -13,22 +13,6 @@
 - Extract PID/daemon management (`start_service`, `stop_service`, `read_pid`, `is_process_running`) into a `daemon.rs` module.
 - Keep `run_service` as a thin orchestrator that composes these pieces.
 
-### 2. `AgentRuntime::new` Takes 15 Parameters
-
-**Problem:** The constructor is suppressed with `#[allow(clippy::too_many_arguments)]`. This signals a struct that has accumulated responsibilities without refactoring.
-
-**Improvement:**
-- Introduce a builder pattern or a `AgentRuntimeConfig` struct that groups related parameters (e.g., `provider + provider_kind + dispatcher`, `memory + summon_memories`, `workspace_root + app_base_dir`).
-- Consider whether `summon_agents` and `summon_memories` belong on the runtime or should be resolved at call time through a service.
-
-### 3. `react::run_loop` Also Has Too Many Parameters
-
-**Problem:** `run_loop` takes 9 parameters including the provider, dispatcher, tool context, active tools, system prompt, agent ID, session ID, history, and max steps. Several of these could be grouped.
-
-**Improvement:**
-- Create a `ReactLoopContext` struct that bundles provider, dispatcher, tool_ctx, active_tools, and system_prompt.
-- Pass agent_id and session_id as part of the context or a separate identity struct.
-
 ### 4. Monomorphic Provider Implementation
 
 **Problem:** Only `GeminiProvider` exists. The `Provider` trait is well-designed but the runtime hardcodes `ProviderKind::Gemini` as the sole variant. Adding a new provider requires changes in `config.rs`, `lib.rs` (known_providers/known_models), and `run.rs` (factory match).

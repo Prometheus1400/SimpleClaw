@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::providers::{Message, Role};
+use crate::react::RunParams;
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_summon_args;
 
@@ -26,15 +28,53 @@ impl Tool for SummonTool {
 
     async fn execute(
         &self,
-        ctx: &ToolCtx,
+        ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
     ) -> Result<String, FrameworkError> {
         let (target, summary) = parse_summon_args(args_json);
-        let service = ctx
-            .summon_service
-            .as_ref()
-            .ok_or_else(|| FrameworkError::Tool("summon service unavailable".to_owned()))?;
-        service.summon(&target, &summary, session_id).await
+        let target_config = ctx
+            .agent_configs
+            .get(&target)
+            .ok_or_else(|| FrameworkError::Tool(format!("unknown agent: {target}")))?;
+        let memory = ctx
+            .memories
+            .get(&target)
+            .ok_or_else(|| FrameworkError::Tool(format!("no memory for agent: {target}")))?;
+        let handoff = if summary.trim().is_empty() {
+            format!(
+                "You were summoned as agent `{target}`. Continue from session context and produce a final answer."
+            )
+        } else {
+            format!("You were summoned as agent `{target}` with handoff summary:\n{summary}")
+        };
+
+        let effective_max_steps = target_config
+            .max_steps
+            .min(target_config.runtime_config.max_steps);
+        let params = RunParams {
+            provider_key: &target_config.provider_key,
+            agent_config: &target_config.agent_config,
+            system_prompt: &target_config.system_prompt,
+            agent_id: &target,
+            session_id,
+            max_steps: effective_max_steps,
+            memory: memory.clone(),
+            sandbox: target_config.agent_config.sandbox,
+            workspace_root: target_config.workspace_root.clone(),
+            user_id: ctx.user_id.clone(),
+            owner_ids: target_config.runtime_config.owner_ids.clone(),
+            exec_container: target_config.runtime_config.exec_container.clone(),
+            process_manager: ctx.process_manager.clone(),
+            react_loop: ctx.react_loop.clone(),
+            agent_configs: ctx.agent_configs.clone(),
+            memories: ctx.memories.clone(),
+            enabled_tools: target_config.agent_config.tools.enabled_tools.clone(),
+            completion_tx: None,
+            completion_route: None,
+        };
+        ctx.react_loop
+            .run(params, vec![Message::text(Role::User, handoff)])
+            .await
     }
 }

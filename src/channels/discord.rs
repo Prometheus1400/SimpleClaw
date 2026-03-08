@@ -51,7 +51,7 @@ impl DiscordChannel {
         tokio::spawn(async move {
             loop {
                 if let Err(err) = client.start_autosharded().await {
-                    tracing::error!(status = "retrying", error_kind = "gateway_exit", error = %err, backoff_ms = 5_000u64, "discord gateway exited");
+                    tracing::error!(status = "retrying", error_kind = "gateway_exit", error = %err, "discord gateway exited");
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -102,11 +102,6 @@ impl EventHandler for DiscordHandler {
 
         tracing::debug!(
             status = "received",
-            channel_id = %inbound.channel_id,
-            user_id = %inbound.user_id,
-            is_dm = inbound.is_dm,
-            mentioned_bot = inbound.mentioned_bot,
-            content_preview = %crate::telemetry::sanitize_preview(&inbound.content, 96),
             "discord inbound received"
         );
         if let Err(err) = self.inbound_tx.send(inbound).await {
@@ -121,15 +116,13 @@ impl Channel for DiscordChannel {
         let channel_id = parse_channel_id(channel_id)?;
         tracing::debug!(
             status = "sending",
-            channel_id = %channel_id.get(),
-            content_preview = %crate::telemetry::sanitize_preview(content, 96),
             "discord send"
         );
         channel_id
             .say(&self.http, content)
             .await
             .map_err(|e| FrameworkError::Config(format!("discord send failed: {e}")))?;
-        tracing::debug!(status = "completed", channel_id = %channel_id.get(), "discord send");
+        tracing::debug!(status = "completed", "discord send");
         Ok(())
     }
 
