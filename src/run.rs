@@ -19,6 +19,7 @@ pub(crate) mod composition;
 mod daemon;
 mod logging;
 mod session;
+mod transparency;
 
 pub use daemon::{start_service, stop_service};
 pub(crate) use logging::json_log_path;
@@ -112,8 +113,14 @@ pub(crate) async fn handle_inbound_once(
         .run(&inbound, &memory_session_id, state.context.as_ref())
         .await
     {
-        Ok(reply) => {
-            if let Err(err) = state.gateway.send_message(&inbound, &reply).await {
+        Ok(outcome) => {
+            let outbound = transparency::render_tool_call_transparency(
+                &outcome.reply,
+                &outcome.tool_calls,
+                state.context.tool_call_transparency,
+                inbound.source_channel,
+            );
+            if let Err(err) = state.gateway.send_message(&inbound, &outbound).await {
                 tracing::error!(
                     status = "failed",
                     error_kind = "channel_send",

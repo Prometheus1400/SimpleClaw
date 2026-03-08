@@ -520,6 +520,8 @@ pub struct RuntimeConfig {
     #[serde(default = "default_safe_error_reply")]
     pub safe_error_reply: String,
     #[serde(default)]
+    pub tool_call_transparency: ToolCallTransparency,
+    #[serde(default)]
     pub log_level: LogLevel,
     #[serde(default)]
     pub owner_ids: Vec<String>,
@@ -533,10 +535,20 @@ impl Default for RuntimeConfig {
             memory_preinject: MemoryPreinjectConfig::default(),
             summon_mode: SummonMode::default(),
             safe_error_reply: default_safe_error_reply(),
+            tool_call_transparency: ToolCallTransparency::default(),
             log_level: LogLevel::default(),
             owner_ids: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallTransparency {
+    #[default]
+    Off,
+    Concise,
+    Detailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1262,6 +1274,33 @@ memory_preinject:
         assert!((normalized.min_score - 1.0).abs() < f32::EPSILON);
         assert!((normalized.long_term_weight - 0.0).abs() < f32::EPSILON);
         assert_eq!(normalized.max_chars, 200);
+    }
+
+    #[test]
+    fn runtime_tool_call_transparency_defaults_off() {
+        let runtime = RuntimeConfig::default();
+        assert_eq!(runtime.tool_call_transparency, ToolCallTransparency::Off);
+    }
+
+    #[test]
+    fn runtime_tool_call_transparency_accepts_values() {
+        let yaml = r#"
+tool_call_transparency: detailed
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml).expect("valid yaml");
+        assert_eq!(
+            parsed.tool_call_transparency,
+            ToolCallTransparency::Detailed
+        );
+    }
+
+    #[test]
+    fn runtime_tool_call_transparency_rejects_unknown_value() {
+        let yaml = r#"
+tool_call_transparency: verbose
+"#;
+        let parsed = serde_yaml::from_str::<RuntimeConfig>(yaml);
+        assert!(parsed.is_err());
     }
 
     #[test]

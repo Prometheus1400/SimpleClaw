@@ -6,9 +6,7 @@ use crate::agent::AgentDirectory;
 use crate::error::FrameworkError;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunParams};
-use crate::tools::{
-    AgentInvokeRequest, AgentInvoker, ProcessManager, WorkerInvokeRequest,
-};
+use crate::tools::{AgentInvokeRequest, AgentInvoker, ProcessManager, WorkerInvokeRequest};
 
 /// Implements agent-to-agent invocation by looking up configs in the
 /// [`AgentDirectory`] and recursing through the [`ReactLoop`].
@@ -73,6 +71,7 @@ impl AgentInvoker for DirectAgentInvoker {
         self.react_loop
             .run(params, vec![Message::text(Role::User, request.prompt)])
             .await
+            .map(|outcome| outcome.reply)
     }
 
     async fn invoke_worker(&self, request: WorkerInvokeRequest) -> Result<String, FrameworkError> {
@@ -96,8 +95,7 @@ impl AgentInvoker for DirectAgentInvoker {
         let params = RunParams {
             provider_key: &current_config.provider_key,
             agent_config: &worker_agent_config,
-            system_prompt:
-                "You are a task worker. Complete the assigned task and return a concise result.",
+            system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
             agent_id: "task-worker",
             session_id: &request.session_id,
             max_steps: current_config
@@ -115,5 +113,6 @@ impl AgentInvoker for DirectAgentInvoker {
         self.react_loop
             .run(params, vec![Message::text(Role::User, request.prompt)])
             .await
+            .map(|outcome| outcome.reply)
     }
 }

@@ -7,12 +7,12 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentConfig, RuntimeConfig};
+use crate::config::{AgentConfig, RuntimeConfig, ToolCallTransparency};
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
-use crate::react::{ReactLoop, RunParams};
+use crate::react::{ReactLoop, RunOutcome, RunParams};
 use crate::tools::{CompletionRoute, ProcessManager};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
@@ -66,6 +66,7 @@ pub struct RuntimeContext {
     pub process_manager: Arc<ProcessManager>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
     pub safe_error_reply: String,
+    pub tool_call_transparency: ToolCallTransparency,
 }
 
 pub struct AgentRuntime {
@@ -96,7 +97,7 @@ impl AgentRuntime {
         inbound: &InboundMessage,
         memory_session_id: &str,
         context: &RuntimeContext,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<RunOutcome, FrameworkError> {
         let execution_started = Instant::now();
         info!(status = "started", "agent execution");
 
@@ -159,8 +160,8 @@ impl AgentRuntime {
             }),
         };
 
-        let reply = match context.react_loop.run(params, history).await {
-            Ok(reply) => reply,
+        let outcome = match context.react_loop.run(params, history).await {
+            Ok(outcome) => outcome,
             Err(err) => {
                 error!(
                     status = "failed",
@@ -174,14 +175,19 @@ impl AgentRuntime {
         };
 
         memory
-            .append_message(memory_session_id, StoredRole::Assistant, &reply, None)
+            .append_message(
+                memory_session_id,
+                StoredRole::Assistant,
+                &outcome.reply,
+                None,
+            )
             .await?;
         info!(
             status = "completed",
             elapsed_ms = execution_started.elapsed().as_millis() as u64,
             "agent execution"
         );
-        Ok(reply)
+        Ok(outcome)
     }
 
     pub async fn record_context(

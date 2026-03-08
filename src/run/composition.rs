@@ -11,10 +11,10 @@ use crate::agent::{
     AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext,
     load_system_prompt_for_workspace,
 };
-use crate::invoke::DirectAgentInvoker;
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
+use crate::invoke::DirectAgentInvoker;
 use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
 use crate::providers::ProviderFactory;
@@ -311,6 +311,7 @@ pub(crate) async fn assemble_runtime_state(
         process_manager,
         completion_tx: gateway_tx,
         safe_error_reply: loaded.global.runtime.safe_error_reply.clone(),
+        tool_call_transparency: loaded.global.runtime.tool_call_transparency,
     });
 
     Ok((

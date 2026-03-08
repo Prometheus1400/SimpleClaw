@@ -18,10 +18,13 @@ pub(crate) struct ParsedToolCall {
     pub tool_call_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct ToolExecutionResult {
     pub name: String,
+    pub args_json: String,
     pub output: String,
     pub success: bool,
+    pub elapsed_ms: u64,
     pub tool_call_id: Option<String>,
 }
 
@@ -102,8 +105,10 @@ pub(crate) trait ToolDispatcher: Send + Sync {
 
             results.push(ToolExecutionResult {
                 name: call.name.clone(),
+                args_json,
                 output: observation,
                 success: status == "ok",
+                elapsed_ms,
                 tool_call_id: call.tool_call_id.clone(),
             });
         }
@@ -417,8 +422,10 @@ mod tests {
         }];
         let results = vec![ToolExecutionResult {
             name: "clock".to_owned(),
+            args_json: r#"{"timezone":"UTC"}"#.to_owned(),
             output: "2026-03-06T12:00:00Z".to_owned(),
             success: true,
+            elapsed_ms: 8,
             tool_call_id: Some("c1".to_owned()),
         }];
         let dispatcher = NativeDispatcher;
@@ -527,8 +534,10 @@ mod tests {
         }];
         let results = vec![ToolExecutionResult {
             name: "clock".to_owned(),
+            args_json: "{}".to_owned(),
             output: "12:00".to_owned(),
             success: true,
+            elapsed_ms: 2,
             tool_call_id: None,
         }];
         let dispatcher = XmlDispatcher;
@@ -587,8 +596,10 @@ mod tests {
         }];
         let results = vec![ToolExecutionResult {
             name: "exec".to_owned(),
+            args_json: r#"{"command":"fail"}"#.to_owned(),
             output: "tool_error: command failed".to_owned(),
             success: false,
+            elapsed_ms: 3,
             tool_call_id: Some("c2".to_owned()),
         }];
         let dispatcher = NativeDispatcher;

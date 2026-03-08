@@ -1,4 +1,4 @@
-use crate::dispatch::{DispatchAction, ToolDispatcher};
+use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, Role};
@@ -38,6 +38,12 @@ pub struct RunParams<'a> {
     pub completion_route: Option<CompletionRoute>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    pub reply: String,
+    pub tool_calls: Vec<ToolExecutionResult>,
+}
+
 impl ReactLoop {
     pub fn new(
         provider_factory: ProviderFactory,
@@ -69,7 +75,7 @@ impl ReactLoop {
         &self,
         params: RunParams<'_>,
         mut history: Vec<Message>,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<RunOutcome, FrameworkError> {
         let provider = self.provider_factory.get(params.provider_key)?;
         let supports_native = self
             .provider_factory
@@ -111,7 +117,7 @@ async fn run_loop(
     tool_env: &ToolExecEnv,
     active_tools: &crate::tools::ActiveTools,
     history: &mut Vec<Message>,
-) -> Result<String, FrameworkError> {
+) -> Result<RunOutcome, FrameworkError> {
     let definitions = active_tools.definitions();
     let run_started = Instant::now();
     let extra_instructions = dispatcher.prompt_instructions(&definitions);
@@ -128,6 +134,7 @@ async fn run_loop(
     };
 
     info!(status = "started", "react loop");
+    let mut executed_tool_calls: Vec<ToolExecutionResult> = Vec::new();
 
     for _ in 0..params.max_steps {
         let provider_started = Instant::now();
@@ -164,6 +171,7 @@ async fn run_loop(
                     .execute_tool_calls(&calls, active_tools, tool_env, params.session_id)
                     .instrument(turn_span.clone())
                     .await;
+                executed_tool_calls.extend(results.iter().cloned());
                 let messages = dispatcher.format_for_history(&calls, &results);
                 history.extend(messages);
                 continue;
@@ -175,7 +183,10 @@ async fn run_loop(
                     elapsed_ms = run_started.elapsed().as_millis() as u64,
                     "react loop"
                 );
-                return Ok(text);
+                return Ok(RunOutcome {
+                    reply: text,
+                    tool_calls: executed_tool_calls,
+                });
             }
             DispatchAction::Empty => {
                 warn!(parent: &turn_span, status = "empty", "provider response");
@@ -189,7 +200,10 @@ async fn run_loop(
         elapsed_ms = run_started.elapsed().as_millis() as u64,
         "react loop"
     );
-    Ok("max_steps reached without final response".to_owned())
+    Ok(RunOutcome {
+        reply: "max_steps reached without final response".to_owned(),
+        tool_calls: executed_tool_calls,
+    })
 }
 
 fn resolve_dispatcher(supports_native_tools: bool) -> &'static dyn ToolDispatcher {
