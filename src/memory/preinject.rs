@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::config::MemoryPreinjectConfig;
 use crate::error::FrameworkError;
@@ -53,6 +53,15 @@ pub(super) fn rank_preinject_hits(
         if out.len() >= normalized_config.top_k as usize {
             trace!(status = "top_k_reached", "memory preinject candidate");
             break;
+        }
+    }
+    if let Some(weakest) = out.last() {
+        if weakest.final_score < 0.35 {
+            warn!(
+                weakest_final_score = weakest.final_score,
+                hit_count = out.len(),
+                "memory preinject includes low-confidence hits; consider raising min_score"
+            );
         }
     }
     out
