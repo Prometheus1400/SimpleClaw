@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use sandbox_runtime::{FilesystemConfig, NetworkConfig, SandboxManager, SandboxRuntimeConfig};
+use tokio::runtime::Builder;
 
 use crate::config::{AgentSandboxConfig, SandboxNetworkMode};
 use crate::error::FrameworkError;
@@ -11,18 +12,13 @@ pub async fn wrap_command_for_exec(
     sandbox: &AgentSandboxConfig,
 ) -> Result<String, FrameworkError> {
     let workspace = crate::tools::sandbox::normalize_workspace_root(workspace_root)?;
-    let runtime_cfg = build_runtime_config(&workspace, sandbox);
-    let manager = SandboxManager::new();
-    manager
-        .initialize(runtime_cfg)
-        .await
-        .map_err(|e| FrameworkError::Tool(format!("failed to initialize sandbox runtime: {e}")))?;
-    manager
-        .wrap_with_sandbox(user_command, Some("/bin/bash"), None)
-        .await
-        .map_err(|e| {
-            FrameworkError::Tool(format!("failed to wrap command in sandbox runtime: {e}"))
-        })
+    let command = user_command.to_owned();
+    let sandbox_cfg = sandbox.clone();
+    let join = tokio::task::spawn_blocking(move || {
+        wrap_command_for_exec_blocking(&command, &workspace, &sandbox_cfg)
+    });
+    join.await
+        .map_err(|e| FrameworkError::Tool(format!("sandbox runtime join failed: {e}")))?
 }
 
 fn build_runtime_config(
@@ -55,4 +51,29 @@ fn build_write_allow_paths(workspace_root: &Path, sandbox: &AgentSandboxConfig) 
     let mut allow = vec![workspace_root.display().to_string(), "/tmp".to_owned()];
     allow.extend(sandbox.filesystem.extra_writable_paths.iter().cloned());
     allow
+}
+
+fn wrap_command_for_exec_blocking(
+    user_command: &str,
+    workspace_root: &Path,
+    sandbox: &AgentSandboxConfig,
+) -> Result<String, FrameworkError> {
+    let runtime_cfg = build_runtime_config(workspace_root, sandbox);
+    let manager = SandboxManager::new();
+    let rt = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| FrameworkError::Tool(format!("failed to create sandbox runtime: {e}")))?;
+    rt.block_on(async {
+        manager
+            .initialize(runtime_cfg)
+            .await
+            .map_err(|e| FrameworkError::Tool(format!("failed to initialize sandbox runtime: {e}")))?;
+        manager
+            .wrap_with_sandbox(user_command, Some("/bin/bash"), None)
+            .await
+            .map_err(|e| {
+                FrameworkError::Tool(format!("failed to wrap command in sandbox runtime: {e}"))
+            })
+    })
 }
