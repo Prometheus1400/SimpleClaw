@@ -1,44 +1,128 @@
 use crate::dispatch::{DispatchAction, ToolDispatcher};
 use crate::error::FrameworkError;
 use crate::providers::{Message, Provider, Role};
-use crate::tools::{ActiveTools, ToolCtx};
+use crate::providers::ProviderFactory;
+use crate::tools::skill::SkillFactory;
+use crate::tools::{CompletionRoute, ToolExecEnv, ToolFactory};
+use crate::{agent::AgentRuntimeConfig, channels::InboundMessage, memory::MemoryStore};
+use crate::{config::ExecContainerConfig, config::SandboxMode, tools::ProcessManager};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(test)]
 const REDACTED: &str = "***REDACTED***";
 
-/// Bundles the dependencies and identity needed for a single ReAct loop execution.
-pub struct ReactContext<'a> {
-    pub provider: &'a dyn Provider,
-    pub dispatcher: &'a dyn ToolDispatcher,
-    pub tool_ctx: &'a ToolCtx,
-    pub active_tools: &'a ActiveTools,
+pub struct ReactLoop {
+    provider_factory: ProviderFactory,
+    tool_factory: ToolFactory,
+    skill_factory: SkillFactory,
+}
+
+pub struct RunParams<'a> {
+    pub provider_key: &'a str,
+    pub agent_config: &'a crate::config::AgentConfig,
     pub system_prompt: &'a str,
     pub agent_id: &'a str,
     pub session_id: &'a str,
     pub max_steps: u32,
+    pub memory: MemoryStore,
+    pub sandbox: SandboxMode,
+    pub workspace_root: std::path::PathBuf,
+    pub user_id: String,
+    pub owner_ids: Vec<String>,
+    pub exec_container: ExecContainerConfig,
+    pub process_manager: Arc<ProcessManager>,
+    pub react_loop: Arc<ReactLoop>,
+    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
+    pub memories: Arc<HashMap<String, MemoryStore>>,
+    pub enabled_tools: Vec<String>,
+    pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
+    pub completion_route: Option<CompletionRoute>,
 }
 
-#[tracing::instrument(
-    name = "react.loop",
-    skip(ctx, history),
-    fields(session_id = %ctx.session_id, agent_id = %ctx.agent_id)
-)]
-pub async fn run_loop(
-    ctx: &ReactContext<'_>,
-    mut history: Vec<Message>,
+impl ReactLoop {
+    pub fn new(
+        provider_factory: ProviderFactory,
+        tool_factory: ToolFactory,
+        skill_factory: SkillFactory,
+    ) -> Self {
+        Self {
+            provider_factory,
+            tool_factory,
+            skill_factory,
+        }
+    }
+
+    #[tracing::instrument(
+        name = "react.loop",
+        skip(self, params, history),
+        fields(session_id = %params.session_id, agent_id = %params.agent_id)
+    )]
+    pub async fn run(
+        &self,
+        params: RunParams<'_>,
+        mut history: Vec<Message>,
+    ) -> Result<String, FrameworkError> {
+        let provider = self.provider_factory.get(params.provider_key)?;
+        let supports_native = self
+            .provider_factory
+            .supports_native_tools(params.provider_key);
+        let dispatcher = resolve_dispatcher(supports_native);
+        let skills = self.skill_factory.tools_for_agent(params.agent_id);
+        let tool_env = ToolExecEnv {
+            memory: params.memory.clone(),
+            sandbox: params.sandbox,
+            workspace_root: params.workspace_root.clone(),
+            user_id: params.user_id.clone(),
+            owner_ids: params.owner_ids.clone(),
+            exec_container: params.exec_container.clone(),
+            process_manager: Arc::clone(&params.process_manager),
+            react_loop: Arc::clone(&params.react_loop),
+            agent_configs: Arc::clone(&params.agent_configs),
+            memories: Arc::clone(&params.memories),
+            current_agent_id: params.agent_id.to_owned(),
+            current_provider_key: params.provider_key.to_owned(),
+            max_steps: params.max_steps,
+            enabled_tools: params.enabled_tools.clone(),
+            completion_tx: params.completion_tx.clone(),
+            completion_route: params.completion_route.clone(),
+        };
+        let active_tools = self
+            .tool_factory
+            .resolve_active(&params.agent_config.tools.enabled_tools, skills)?;
+        run_loop(
+            provider,
+            dispatcher.as_ref(),
+            params,
+            &tool_env,
+            &active_tools,
+            &mut history,
+        )
+        .await
+    }
+}
+
+async fn run_loop(
+    provider: &dyn Provider,
+    dispatcher: &dyn ToolDispatcher,
+    params: RunParams<'_>,
+    tool_env: &ToolExecEnv,
+    active_tools: &crate::tools::ActiveTools,
+    history: &mut Vec<Message>,
 ) -> Result<String, FrameworkError> {
-    let definitions = ctx.active_tools.definitions();
+    let definitions = active_tools.definitions();
     let run_started = Instant::now();
-    let extra_instructions = ctx.dispatcher.prompt_instructions(&definitions);
+    let extra_instructions = dispatcher.prompt_instructions(&definitions);
     let effective_system_prompt = if extra_instructions.is_empty() {
-        ctx.system_prompt.to_owned()
+        params.system_prompt.to_owned()
     } else {
-        format!("{}{extra_instructions}", ctx.system_prompt)
+        format!("{}{extra_instructions}", params.system_prompt)
     };
 
-    let tool_specs = if ctx.dispatcher.should_send_tool_specs() {
+    let tool_specs = if dispatcher.should_send_tool_specs() {
         definitions
     } else {
         vec![]
@@ -46,12 +130,11 @@ pub async fn run_loop(
 
     info!(status = "started", "react loop");
 
-    for _ in 0..ctx.max_steps {
+    for _ in 0..params.max_steps {
         let provider_started = Instant::now();
         let turn_span = info_span!("provider.turn");
         debug!(parent: &turn_span, status = "started", "provider turn");
-        let response = match ctx
-            .provider
+        let response = match provider
             .generate(&effective_system_prompt, &history, &tool_specs)
             .instrument(turn_span.clone())
             .await
@@ -76,14 +159,13 @@ pub async fn run_loop(
             "provider turn"
         );
 
-        match ctx.dispatcher.parse_response(&response) {
+        match dispatcher.parse_response(&response) {
             DispatchAction::ToolCalls(calls) => {
-                let results = ctx
-                    .dispatcher
-                    .execute_tool_calls(&calls, ctx.active_tools, ctx.tool_ctx, ctx.session_id)
+                let results = dispatcher
+                    .execute_tool_calls(&calls, active_tools, tool_env, params.session_id)
                     .instrument(turn_span.clone())
                     .await;
-                let messages = ctx.dispatcher.format_for_history(&calls, &results);
+                let messages = dispatcher.format_for_history(&calls, &results);
                 history.extend(messages);
                 continue;
             }
@@ -111,6 +193,14 @@ pub async fn run_loop(
     Ok("max_steps reached without final response".to_owned())
 }
 
+fn resolve_dispatcher(supports_native_tools: bool) -> Arc<dyn ToolDispatcher> {
+    if supports_native_tools {
+        Arc::new(crate::dispatch::NativeDispatcher)
+    } else {
+        Arc::new(crate::dispatch::XmlDispatcher)
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
     crate::telemetry::sanitize_preview(text, max_chars)
@@ -118,24 +208,23 @@ pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::ToolConfig;
-    use crate::tools::default_registry;
+    use crate::tools::default_factory;
 
     use super::*;
 
     #[test]
     fn tool_definitions_only_include_enabled_tools() {
-        let config = ToolConfig {
-            enabled_tools: vec![
-                "memory".to_owned(),
-                "summon".to_owned(),
-                "clock".to_owned(),
-                "read".to_owned(),
-            ],
-        };
-        let registry = default_registry();
-        let active_tools = registry
-            .resolve_active(&config)
+        let factory = default_factory();
+        let active_tools = factory
+            .resolve_active(
+                &[
+                    "memory".to_owned(),
+                    "summon".to_owned(),
+                    "clock".to_owned(),
+                    "read".to_owned(),
+                ],
+                &[],
+            )
             .expect("enabled tools should resolve");
 
         let names: Vec<String> = active_tools
@@ -157,12 +246,9 @@ mod tests {
 
     #[test]
     fn tool_status_reports_unknown_tool_name() {
-        let config = ToolConfig {
-            enabled_tools: vec!["memory".to_owned()],
-        };
-        let registry = default_registry();
-        let active_tools = registry
-            .resolve_active(&config)
+        let factory = default_factory();
+        let active_tools = factory
+            .resolve_active(&["memory".to_owned()], &[])
             .expect("enabled tools should resolve");
 
         assert!(active_tools.get("memory").is_some());

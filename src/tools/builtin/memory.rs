@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::{MemoryAction, parse_memory_args};
 
@@ -26,7 +26,7 @@ impl Tool for MemoryTool {
 
     async fn execute(
         &self,
-        ctx: &ToolCtx,
+        ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
     ) -> Result<String, FrameworkError> {

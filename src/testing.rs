@@ -12,14 +12,14 @@ use tokio::sync::Mutex;
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
 use crate::cli::Cli;
 use crate::config::{
-    AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig, ProviderKind,
+    AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig,
 };
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::providers::{Message, Provider, ProviderResponse, ToolDefinition};
+use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
 use crate::run::composition::{
-    ChannelFactory, MemoryFactory, ProviderFactory, ProviderHandle, RuntimeDependencies,
+    ChannelFactory, MemoryFactory, ProviderFactoryBuilder, RuntimeDependencies,
     assemble_runtime_state,
 };
 use crate::run::handle_inbound_once;
@@ -114,7 +114,7 @@ pub async fn run_single_gateway_roundtrip(
     let provider = Arc::new(StaticMockProvider::new(config.mock_reply.clone()));
     let channel = Arc::new(CaptureChannel::new());
     let deps = RuntimeDependencies {
-        provider_factory: Arc::new(StaticProviderFactory {
+        provider_factory_builder: Arc::new(StaticProviderFactory {
             provider: provider.clone(),
         }),
         memory_factory: Arc::new(EphemeralMemoryFactory {
@@ -137,6 +137,7 @@ pub async fn run_single_gateway_roundtrip(
         id: config.agent_id.clone(),
         name: config.agent_name.clone(),
         workspace: workspace_dir.clone(),
+        runtime: crate::config::AgentConfig::default(),
     }];
     global.gateway.channels = vec![GatewayChannelKind::Discord];
     let loaded = LoadedConfig { global };
@@ -284,22 +285,36 @@ struct StaticProviderFactory {
 }
 
 #[async_trait]
-impl ProviderFactory for StaticProviderFactory {
-    async fn create_providers(
+impl ProviderFactoryBuilder for StaticProviderFactory {
+    async fn create_provider_factory(
         &self,
         _loaded: &LoadedConfig,
-    ) -> color_eyre::Result<HashMap<String, ProviderHandle>> {
-        Ok(HashMap::from([(
+    ) -> color_eyre::Result<ProviderFactory> {
+        Ok(ProviderFactory::from_parts(HashMap::from([(
             "default".to_owned(),
-            ProviderHandle {
-                provider: Arc::clone(&self.provider),
-                metadata: crate::providers::ProviderMetadata {
-                    kind: ProviderKind::Gemini,
-                    supports_native_tools: true,
-                    known_models: &[],
-                },
-            },
-        )]))
+            (
+                Box::new(ForwardProvider {
+                    inner: Arc::clone(&self.provider),
+                }) as Box<dyn Provider>,
+                true,
+            ),
+        )])))
+    }
+}
+
+struct ForwardProvider {
+    inner: Arc<dyn Provider>,
+}
+
+#[async_trait]
+impl Provider for ForwardProvider {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        history: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderResponse, FrameworkError> {
+        self.inner.generate(system_prompt, history, tools).await
     }
 }
 

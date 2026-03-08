@@ -92,11 +92,18 @@ mod tests {
                 agent: Some("default".to_owned()),
                 ..InboundPolicyConfig::default()
             },
-            dm: InboundPolicyConfig {
-                agent: Some("default".to_owned()),
-                allow_from: Some(vec!["7".to_owned()]),
-                require_mentions: Some(false),
-            },
+            channels: HashMap::from([(
+                GatewayChannelKind::Discord,
+                ChannelInboundConfig {
+                    policy: InboundPolicyConfig::default(),
+                    dm: InboundPolicyConfig {
+                        agent: Some("default".to_owned()),
+                        allow_from: Some(vec!["7".to_owned()]),
+                        require_mentions: Some(false),
+                    },
+                    workspaces: HashMap::new(),
+                },
+            )]),
             ..InboundConfig::default()
         };
 
@@ -151,11 +158,18 @@ mod tests {
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            dm: InboundPolicyConfig {
-                agent: Some("default".to_owned()),
-                allow_from: Some(vec!["7".to_owned()]),
-                require_mentions: Some(true),
-            },
+            channels: HashMap::from([(
+                GatewayChannelKind::Discord,
+                ChannelInboundConfig {
+                    policy: InboundPolicyConfig::default(),
+                    dm: InboundPolicyConfig {
+                        agent: Some("default".to_owned()),
+                        allow_from: Some(vec!["7".to_owned()]),
+                        require_mentions: Some(true),
+                    },
+                    workspaces: HashMap::new(),
+                },
+            )]),
             ..InboundConfig::default()
         };
 
@@ -180,6 +194,7 @@ mod tests {
                         allow_from: Some(vec!["2".to_owned()]),
                         require_mentions: Some(true),
                     },
+                    dm: InboundPolicyConfig::default(),
                     workspaces: HashMap::from([(
                         "10".to_owned(),
                         WorkspaceInboundConfig {

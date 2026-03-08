@@ -14,7 +14,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 use crate::config::SandboxMode;
 use crate::error::FrameworkError;
 
-use super::{Tool, ToolCtx};
+use super::{Tool, ToolExecEnv};
 
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
@@ -30,7 +30,7 @@ pub struct WasmGuestOutput {
 
 pub async fn execute_tool_with_sandbox(
     tool: &dyn Tool,
-    ctx: &ToolCtx,
+    ctx: &ToolExecEnv,
     args_json: &str,
     session_id: &str,
 ) -> Result<String, FrameworkError> {
@@ -260,12 +260,17 @@ impl Drop for IsolatedTmpDir {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent::AgentRuntimeConfig;
     use super::{execute_tool_with_sandbox, resolve_guest_artifact_path};
     use crate::config::{DatabaseConfig, ExecContainerConfig, SandboxMode};
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
-    use crate::tools::{ProcessManager, Tool, ToolCtx};
+    use crate::providers::ProviderFactory;
+    use crate::react::ReactLoop;
+    use crate::tools::skill::SkillFactory;
+    use crate::tools::{ProcessManager, Tool, ToolExecEnv, default_factory};
     use async_trait::async_trait;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -303,7 +308,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _ctx: &ToolCtx,
+            _ctx: &ToolExecEnv,
             _args_json: &str,
             _session_id: &str,
         ) -> Result<String, FrameworkError> {
@@ -311,7 +316,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx(mode: SandboxMode) -> ToolCtx {
+    async fn test_ctx(mode: SandboxMode) -> ToolExecEnv {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -323,7 +328,12 @@ mod tests {
         let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
             .await
             .expect("memory should initialize");
-        ToolCtx {
+        let react_loop = Arc::new(ReactLoop::new(
+            ProviderFactory::from_parts(HashMap::new()),
+            default_factory(),
+            SkillFactory::new(PathBuf::from(".")),
+        ));
+        ToolExecEnv {
             memory,
             sandbox: mode,
             workspace_root: PathBuf::from("."),
@@ -331,8 +341,13 @@ mod tests {
             owner_ids: vec![],
             exec_container: ExecContainerConfig::default(),
             process_manager: Arc::new(ProcessManager::new()),
-            summon_service: None,
-            task_service: None,
+            react_loop,
+            agent_configs: Arc::new(HashMap::<String, AgentRuntimeConfig>::new()),
+            memories: Arc::new(HashMap::new()),
+            current_agent_id: "test".to_owned(),
+            current_provider_key: "default".to_owned(),
+            max_steps: 1,
+            enabled_tools: Vec::new(),
             completion_tx: None,
             completion_route: None,
         }

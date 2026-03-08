@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::config::SandboxMode;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::run_wasm_guest;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::read::resolve_path_for_read;
 
@@ -36,7 +36,7 @@ impl Tool for EditTool {
 
     async fn execute(
         &self,
-        ctx: &ToolCtx,
+        ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {

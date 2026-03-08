@@ -6,39 +6,39 @@ use tracing::{debug, info_span, warn};
 use crate::error::FrameworkError;
 use crate::providers::{Message, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
 use crate::tools::sandbox::execute_tool_with_sandbox;
-use crate::tools::{ActiveTools, ToolCtx};
+use crate::tools::{ActiveTools, ToolExecEnv};
 
 const OWNER_RESTRICTED_TOOLS: &[&str] =
     &["exec", "process", "forget", "summon", "edit", "memorize"];
 
-pub struct ParsedToolCall {
+pub(crate) struct ParsedToolCall {
     pub name: String,
     pub arguments: Value,
     pub tool_call_id: Option<String>,
 }
 
-pub struct ToolExecutionResult {
+pub(crate) struct ToolExecutionResult {
     pub name: String,
     pub output: String,
     pub success: bool,
     pub tool_call_id: Option<String>,
 }
 
-pub enum DispatchAction {
+pub(crate) enum DispatchAction {
     ToolCalls(Vec<ParsedToolCall>),
     FinalResponse(String),
     Empty,
 }
 
 #[async_trait]
-pub trait ToolDispatcher: Send + Sync {
+pub(crate) trait ToolDispatcher: Send + Sync {
     fn parse_response(&self, response: &ProviderResponse) -> DispatchAction;
 
     async fn execute_tool_calls(
         &self,
         calls: &[ParsedToolCall],
         active_tools: &ActiveTools,
-        tool_ctx: &ToolCtx,
+        tool_ctx: &ToolExecEnv,
         session_id: &str,
     ) -> Vec<ToolExecutionResult> {
         let mut results = Vec::with_capacity(calls.len());
@@ -117,7 +117,10 @@ pub trait ToolDispatcher: Send + Sync {
     fn should_send_tool_specs(&self) -> bool;
 }
 
-fn enforce_tool_authorization(tool_name: &str, tool_ctx: &ToolCtx) -> Result<(), FrameworkError> {
+fn enforce_tool_authorization(
+    tool_name: &str,
+    tool_ctx: &ToolExecEnv,
+) -> Result<(), FrameworkError> {
     if !OWNER_RESTRICTED_TOOLS.contains(&tool_name) {
         return Ok(());
     }
@@ -149,7 +152,7 @@ fn enforce_tool_authorization_for_identity(
             "owner restriction misconfigured: runtime.owner_ids is empty".to_owned(),
         ));
     }
-    if crate::tools::ToolCtx::owner_allowed(user_id, owner_ids) {
+    if crate::tools::ToolExecEnv::owner_allowed(user_id, owner_ids) {
         Ok(())
     } else {
         Err(FrameworkError::Tool(
@@ -160,7 +163,7 @@ fn enforce_tool_authorization_for_identity(
 
 // --- NativeDispatcher ---
 
-pub struct NativeDispatcher;
+pub(crate) struct NativeDispatcher;
 
 impl NativeDispatcher {
     fn parsed_from_provider_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
@@ -233,7 +236,7 @@ impl ToolDispatcher for NativeDispatcher {
 
 // --- XmlDispatcher ---
 
-pub struct XmlDispatcher;
+pub(crate) struct XmlDispatcher;
 
 impl XmlDispatcher {
     fn parse_tool_calls_from_text(text: &str) -> Vec<ParsedToolCall> {

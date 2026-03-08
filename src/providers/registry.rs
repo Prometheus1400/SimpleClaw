@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::config::ProvidersConfig;
 use crate::config::{ProviderEntryConfig, ProviderKind};
 use crate::error::FrameworkError;
 
@@ -15,7 +16,7 @@ pub struct ProviderMetadata {
 
 pub trait ProviderAdapter: Send + Sync {
     fn metadata(&self) -> ProviderMetadata;
-    fn create(&self, entry: &ProviderEntryConfig) -> Result<Arc<dyn Provider>, FrameworkError>;
+    fn create(&self, entry: &ProviderEntryConfig) -> Result<Box<dyn Provider>, FrameworkError>;
 }
 
 pub struct ProviderRegistry {
@@ -32,7 +33,7 @@ impl ProviderRegistry {
     pub fn create_provider(
         &self,
         entry: &ProviderEntryConfig,
-    ) -> Result<Arc<dyn Provider>, FrameworkError> {
+    ) -> Result<Box<dyn Provider>, FrameworkError> {
         let kind = entry.kind();
         let Some(adapter) = self.adapters.get(&kind) else {
             return Err(FrameworkError::Config(format!(
@@ -57,6 +58,66 @@ impl ProviderRegistry {
     }
 }
 
+pub struct ProviderFactory {
+    entries: HashMap<String, ProviderEntry>,
+}
+
+pub struct ProviderEntry {
+    provider: Box<dyn Provider>,
+    supports_native_tools: bool,
+}
+
+impl ProviderFactory {
+    pub fn from_config(config: &ProvidersConfig) -> Result<Self, FrameworkError> {
+        let registry = ProviderRegistry::new();
+        let mut entries = HashMap::new();
+        for (key, entry) in &config.entries {
+            let provider = registry.create_provider(entry)?;
+            let metadata = registry.metadata_for_kind(entry.kind())?;
+            entries.insert(
+                key.clone(),
+                ProviderEntry {
+                    provider,
+                    supports_native_tools: metadata.supports_native_tools,
+                },
+            );
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn from_parts(entries: HashMap<String, (Box<dyn Provider>, bool)>) -> Self {
+        let entries = entries
+            .into_iter()
+            .map(|(key, (provider, supports_native_tools))| {
+                (
+                    key,
+                    ProviderEntry {
+                        provider,
+                        supports_native_tools,
+                    },
+                )
+            })
+            .collect();
+        Self { entries }
+    }
+
+    pub fn get(&self, key: &str) -> Result<&dyn Provider, FrameworkError> {
+        let Some(entry) = self.entries.get(key) else {
+            return Err(FrameworkError::Config(format!(
+                "unknown provider key '{key}'"
+            )));
+        };
+        Ok(entry.provider.as_ref())
+    }
+
+    pub fn supports_native_tools(&self, key: &str) -> bool {
+        self.entries
+            .get(key)
+            .map(|entry| entry.supports_native_tools)
+            .unwrap_or(false)
+    }
+}
+
 struct GeminiProviderAdapter;
 
 impl ProviderAdapter for GeminiProviderAdapter {
@@ -73,8 +134,8 @@ impl ProviderAdapter for GeminiProviderAdapter {
         }
     }
 
-    fn create(&self, entry: &ProviderEntryConfig) -> Result<Arc<dyn Provider>, FrameworkError> {
+    fn create(&self, entry: &ProviderEntryConfig) -> Result<Box<dyn Provider>, FrameworkError> {
         let provider = GeminiProvider::from_entry(entry)?;
-        Ok(Arc::new(provider))
+        Ok(Box::new(provider))
     }
 }

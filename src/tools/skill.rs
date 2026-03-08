@@ -1,12 +1,14 @@
 use async_trait::async_trait;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::warn;
 
+use crate::config::AgentConfig;
 use crate::config::SkillsConfig;
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SkillToolLoadStats {
@@ -19,8 +21,51 @@ pub struct SkillToolLoadStats {
 #[derive(Debug, Clone)]
 pub struct LoadedSkillTools {
     pub tools: Vec<DynamicSkillTool>,
-    pub tool_names: Vec<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub stats: SkillToolLoadStats,
+}
+
+pub(crate) struct SkillFactory {
+    app_base_dir: PathBuf,
+    tools_by_agent: HashMap<String, Vec<Arc<dyn Tool>>>,
+}
+
+impl SkillFactory {
+    pub(crate) fn new(app_base_dir: PathBuf) -> Self {
+        Self {
+            app_base_dir,
+            tools_by_agent: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn load_for_agent(
+        &self,
+        agent_id: &str,
+        config: &AgentConfig,
+        workspace: &Path,
+    ) -> Result<Vec<Arc<dyn Tool>>, FrameworkError> {
+        let loaded = load_skill_tools(agent_id, &config.skills, workspace, &self.app_base_dir)?;
+        Ok(loaded
+            .tools
+            .into_iter()
+            .map(|tool| Arc::new(tool) as Arc<dyn Tool>)
+            .collect())
+    }
+
+    pub(crate) fn insert_agent_tools(
+        &mut self,
+        agent_id: impl Into<String>,
+        tools: Vec<Arc<dyn Tool>>,
+    ) {
+        self.tools_by_agent.insert(agent_id.into(), tools);
+    }
+
+    pub(crate) fn tools_for_agent(&self, agent_id: &str) -> &[Arc<dyn Tool>] {
+        self.tools_by_agent
+            .get(agent_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +110,7 @@ impl Tool for DynamicSkillTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolCtx,
+        _ctx: &ToolExecEnv,
         _args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
@@ -87,7 +132,6 @@ pub fn load_skill_tools(
         skipped_empty: 0,
     };
     let mut tools = Vec::new();
-    let mut tool_names = Vec::new();
 
     for skill_id in skill_ids {
         let resolved = resolve_skill_path(agent_workspace, app_base_dir, &skill_id);
@@ -114,16 +158,11 @@ pub fn load_skill_tools(
         }
 
         let tool = DynamicSkillTool::new(&skill_id, content, source_scope);
-        tool_names.push(tool.name().to_owned());
         tools.push(tool);
         stats.loaded += 1;
     }
 
-    Ok(LoadedSkillTools {
-        tools,
-        tool_names,
-        stats,
-    })
+    Ok(LoadedSkillTools { tools, stats })
 }
 
 /// Extract description from YAML frontmatter in SKILL.md content.
@@ -221,7 +260,12 @@ mod tests {
         let loaded =
             load_skill_tools("planner", &skills, &workspace, &base_dir).expect("load skills");
 
-        assert_eq!(loaded.tool_names, vec!["skill_research".to_owned()]);
+        let names: Vec<String> = loaded
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        assert_eq!(names, vec!["skill_research".to_owned()]);
         assert_eq!(
             loaded.stats,
             SkillToolLoadStats {
@@ -258,7 +302,12 @@ mod tests {
         let loaded =
             load_skill_tools("planner", &skills, &base_dir, &base_dir).expect("load skills");
 
-        assert_eq!(loaded.tool_names, vec!["skill_ok".to_owned()]);
+        let names: Vec<String> = loaded
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        assert_eq!(names, vec!["skill_ok".to_owned()]);
         assert_eq!(
             loaded.stats,
             SkillToolLoadStats {

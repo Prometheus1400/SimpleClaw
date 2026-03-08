@@ -17,26 +17,13 @@ use tracing::{Instrument, debug, info_span};
 
 use tokio::sync::mpsc;
 
+use crate::agent::AgentRuntimeConfig;
 use crate::channels::InboundMessage;
-use crate::config::{ExecContainerConfig, GatewayChannelKind, SandboxMode, ToolConfig};
+use crate::config::{ExecContainerConfig, GatewayChannelKind, SandboxMode};
 use crate::error::FrameworkError;
 use crate::memory::MemoryStore;
 use crate::providers::ToolDefinition;
-
-#[async_trait]
-pub trait SummonService: Send + Sync {
-    async fn summon(
-        &self,
-        target_agent: &str,
-        summary: &str,
-        session_id: &str,
-    ) -> Result<String, FrameworkError>;
-}
-
-#[async_trait]
-pub trait TaskService: Send + Sync {
-    async fn run_task(&self, prompt: &str, session_id: &str) -> Result<String, FrameworkError>;
-}
+use crate::react::ReactLoop;
 
 #[derive(Debug, Clone)]
 pub struct CompletionRoute {
@@ -50,7 +37,7 @@ pub struct CompletionRoute {
 }
 
 #[derive(Clone)]
-pub struct ToolCtx {
+pub(crate) struct ToolExecEnv {
     pub memory: MemoryStore,
     pub sandbox: SandboxMode,
     pub workspace_root: PathBuf,
@@ -58,13 +45,18 @@ pub struct ToolCtx {
     pub owner_ids: Vec<String>,
     pub exec_container: ExecContainerConfig,
     pub process_manager: Arc<ProcessManager>,
-    pub summon_service: Option<Arc<dyn SummonService>>,
-    pub task_service: Option<Arc<dyn TaskService>>,
+    pub react_loop: Arc<ReactLoop>,
+    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
+    pub memories: Arc<HashMap<String, MemoryStore>>,
+    pub current_agent_id: String,
+    pub current_provider_key: String,
+    pub max_steps: u32,
+    pub enabled_tools: Vec<String>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
 }
 
-impl ToolCtx {
+impl ToolExecEnv {
     pub fn owner_allowed(user_id: &str, owner_ids: &[String]) -> bool {
         !owner_ids.is_empty() && owner_ids.iter().any(|owner_id| owner_id == user_id)
     }
@@ -75,7 +67,7 @@ impl ToolCtx {
 }
 
 #[async_trait]
-pub trait Tool: Send + Sync {
+pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema_json(&self) -> &str;
@@ -85,7 +77,7 @@ pub trait Tool: Send + Sync {
 
     async fn execute(
         &self,
-        ctx: &ToolCtx,
+        ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
     ) -> Result<String, FrameworkError>;
@@ -100,43 +92,40 @@ pub trait Tool: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct ToolRegistry {
-    ordered: Vec<Arc<dyn Tool>>,
+pub(crate) struct ToolFactory {
+    builtins: Vec<Arc<dyn Tool>>,
     by_name: HashMap<String, Arc<dyn Tool>>,
 }
 
-impl ToolRegistry {
-    pub fn new() -> Self {
+impl ToolFactory {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn register<T>(&mut self, tool: T)
-    where
-        T: Tool + 'static,
-    {
-        self.register_arc(Arc::new(tool));
-    }
-
-    pub fn register_arc(&mut self, tool: Arc<dyn Tool>) {
+    pub(crate) fn register_builtin(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_owned();
         if let Some(existing_idx) = self
-            .ordered
+            .builtins
             .iter()
             .position(|candidate| candidate.name() == name)
         {
-            self.ordered[existing_idx] = Arc::clone(&tool);
+            self.builtins[existing_idx] = Arc::clone(&tool);
         } else {
-            self.ordered.push(Arc::clone(&tool));
+            self.builtins.push(Arc::clone(&tool));
         }
         self.by_name.insert(name, tool);
     }
 
-    pub fn resolve_active(&self, config: &ToolConfig) -> Result<ActiveTools, FrameworkError> {
+    pub(crate) fn resolve_active(
+        &self,
+        enabled_builtin: &[String],
+        skill_tools: &[Arc<dyn Tool>],
+    ) -> Result<ActiveTools, FrameworkError> {
         let mut ordered = Vec::new();
         let mut by_name = HashMap::new();
         let mut seen = HashSet::new();
 
-        for name in &config.enabled_tools {
+        for name in enabled_builtin {
             if !seen.insert(name.clone()) {
                 continue;
             }
@@ -149,33 +138,40 @@ impl ToolRegistry {
             by_name.insert(name.clone(), Arc::clone(tool));
         }
 
+        for tool in skill_tools {
+            let name = tool.name().to_owned();
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            ordered.push(Arc::clone(tool));
+            by_name.insert(name, Arc::clone(tool));
+        }
+
         Ok(ActiveTools { ordered, by_name })
     }
 }
 
-pub struct ActiveTools {
+pub(crate) struct ActiveTools {
     ordered: Vec<Arc<dyn Tool>>,
     by_name: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ActiveTools {
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
+    pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
         self.ordered.iter().map(|tool| tool.definition()).collect()
     }
 
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
+    pub(crate) fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.by_name.get(name)
-    }
-
-    pub fn names(&self) -> Vec<&str> {
-        self.ordered.iter().map(|tool| tool.name()).collect()
     }
 }
 
-pub fn default_registry() -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-    builtin::register_builtin_tools(&mut registry);
-    registry
+pub(crate) fn default_factory() -> ToolFactory {
+    let mut factory = ToolFactory::new();
+    for tool in builtin::builtin_tools() {
+        factory.register_builtin(tool);
+    }
+    factory
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -773,6 +769,7 @@ fn read_process_output_tail(path: &std::path::Path, max_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     struct FakeToolA;
     struct FakeToolB;
@@ -793,7 +790,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _ctx: &ToolCtx,
+            _ctx: &ToolExecEnv,
             _args_json: &str,
             _session_id: &str,
         ) -> Result<String, FrameworkError> {
@@ -817,7 +814,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _ctx: &ToolCtx,
+            _ctx: &ToolExecEnv,
             _args_json: &str,
             _session_id: &str,
         ) -> Result<String, FrameworkError> {
@@ -827,25 +824,19 @@ mod tests {
 
     #[test]
     fn resolve_active_rejects_unknown_tool_names() {
-        let registry = default_registry();
-        let config = ToolConfig {
-            enabled_tools: vec!["not_real".to_owned()],
-        };
-
-        let result = registry.resolve_active(&config);
+        let factory = default_factory();
+        let result = factory.resolve_active(&["not_real".to_owned()], &[]);
         assert!(result.is_err());
     }
 
     #[test]
     fn register_overwrites_existing_tool_by_name() {
-        let mut registry = ToolRegistry::new();
-        registry.register(FakeToolA);
-        registry.register(FakeToolB);
+        let mut factory = ToolFactory::new();
+        factory.register_builtin(Arc::new(FakeToolA));
+        factory.register_builtin(Arc::new(FakeToolB));
 
-        let active = registry
-            .resolve_active(&ToolConfig {
-                enabled_tools: vec!["fake".to_owned()],
-            })
+        let active = factory
+            .resolve_active(&["fake".to_owned()], &[])
             .expect("fake tool should resolve");
         let definitions = active.definitions();
         assert_eq!(definitions.len(), 1);
@@ -854,18 +845,18 @@ mod tests {
 
     #[test]
     fn tool_ctx_owner_allowed_when_owner_ids_empty_is_false() {
-        assert!(!ToolCtx::owner_allowed("user-1", &[]));
+        assert!(!ToolExecEnv::owner_allowed("user-1", &[]));
     }
 
     #[test]
     fn tool_ctx_owner_allowed_when_user_matches() {
         let owner_ids = vec!["owner-1".to_owned(), "owner-2".to_owned()];
-        assert!(ToolCtx::owner_allowed("owner-2", &owner_ids));
+        assert!(ToolExecEnv::owner_allowed("owner-2", &owner_ids));
     }
 
     #[test]
     fn tool_ctx_owner_allowed_when_user_missing() {
         let owner_ids = vec!["owner-1".to_owned(), "owner-2".to_owned()];
-        assert!(!ToolCtx::owner_allowed("user-3", &owner_ids));
+        assert!(!ToolExecEnv::owner_allowed("user-3", &owner_ids));
     }
 }

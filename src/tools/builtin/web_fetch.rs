@@ -4,7 +4,7 @@ use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGEN
 use scraper::{Html, Selector};
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_simple_text_arg;
 
@@ -29,7 +29,7 @@ impl Tool for WebFetchTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolCtx,
+        _ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {

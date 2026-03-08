@@ -34,9 +34,13 @@ pub(super) fn route_inbound(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::route_inbound;
     use crate::channels::ChannelInbound;
-    use crate::config::{GatewayChannelKind, InboundConfig, InboundPolicyConfig};
+    use crate::config::{
+        ChannelInboundConfig, GatewayChannelKind, InboundConfig, InboundPolicyConfig,
+    };
 
     #[test]
     fn route_inbound_sets_policy_and_session_fields() {
@@ -72,10 +76,17 @@ mod tests {
             content: "hello".to_owned(),
         };
         let policy = InboundConfig {
-            dm: InboundPolicyConfig {
-                allow_from: Some(vec!["999".to_owned()]),
-                ..InboundPolicyConfig::default()
-            },
+            channels: HashMap::from([(
+                GatewayChannelKind::Discord,
+                ChannelInboundConfig {
+                    policy: InboundPolicyConfig::default(),
+                    dm: InboundPolicyConfig {
+                        allow_from: Some(vec!["999".to_owned()]),
+                        ..InboundPolicyConfig::default()
+                    },
+                    workspaces: HashMap::new(),
+                },
+            )]),
             ..InboundConfig::default()
         };
         let message = route_inbound(GatewayChannelKind::Discord, inbound, &policy);

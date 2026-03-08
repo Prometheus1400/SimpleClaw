@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockTool {
@@ -25,7 +25,7 @@ impl Tool for ClockTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolCtx,
+        _ctx: &ToolExecEnv,
         _args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {

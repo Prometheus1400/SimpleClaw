@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
+use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::agent::{
-    AgentRuntime, AgentRuntimeConfig, build_tool_registry_for_agent,
-    load_agent_config_for_workspace, load_system_prompt_for_workspace,
+    AgentRuntime, AgentRuntimeConfig, load_system_prompt_for_workspace,
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::cli::Cli;
@@ -17,19 +17,17 @@ use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
 use crate::memory::MemoryStore;
 use crate::paths::AppPaths;
-use crate::providers::{Provider, ProviderMetadata, ProviderRegistry};
+use crate::providers::ProviderFactory;
+use crate::react::ReactLoop;
+use crate::tools::skill::SkillFactory;
+use crate::tools::{ProcessManager, default_factory};
 
 #[async_trait]
-pub(crate) trait ProviderFactory: Send + Sync {
-    async fn create_providers(
+pub(crate) trait ProviderFactoryBuilder: Send + Sync {
+    async fn create_provider_factory(
         &self,
         loaded: &LoadedConfig,
-    ) -> color_eyre::Result<HashMap<String, ProviderHandle>>;
-}
-
-pub(crate) struct ProviderHandle {
-    pub provider: Arc<dyn Provider>,
-    pub metadata: ProviderMetadata,
+    ) -> color_eyre::Result<ProviderFactory>;
 }
 
 #[async_trait]
@@ -50,7 +48,7 @@ pub(crate) trait ChannelFactory: Send + Sync {
 }
 
 pub(crate) struct RuntimeDependencies {
-    pub provider_factory: Arc<dyn ProviderFactory>,
+    pub provider_factory_builder: Arc<dyn ProviderFactoryBuilder>,
     pub memory_factory: Arc<dyn MemoryFactory>,
     pub channel_factory: Arc<dyn ChannelFactory>,
 }
@@ -58,33 +56,23 @@ pub(crate) struct RuntimeDependencies {
 impl Default for RuntimeDependencies {
     fn default() -> Self {
         Self {
-            provider_factory: Arc::new(DefaultProviderFactory),
+            provider_factory_builder: Arc::new(DefaultProviderFactoryBuilder),
             memory_factory: Arc::new(DefaultMemoryFactory),
             channel_factory: Arc::new(DefaultChannelFactory),
         }
     }
 }
 
-struct DefaultProviderFactory;
+struct DefaultProviderFactoryBuilder;
 
 #[async_trait]
-impl ProviderFactory for DefaultProviderFactory {
-    async fn create_providers(
+impl ProviderFactoryBuilder for DefaultProviderFactoryBuilder {
+    async fn create_provider_factory(
         &self,
         loaded: &LoadedConfig,
-    ) -> color_eyre::Result<HashMap<String, ProviderHandle>> {
-        let registry = ProviderRegistry::new();
-        let mut providers = HashMap::new();
-        for (key, entry) in &loaded.global.providers.entries {
-            let provider = registry
-                .create_provider(entry)
-                .wrap_err_with(|| format!("failed to initialize provider '{key}'"))?;
-            let metadata = registry
-                .metadata_for_kind(entry.kind())
-                .wrap_err_with(|| format!("failed to read metadata for provider '{key}'"))?;
-            providers.insert(key.clone(), ProviderHandle { provider, metadata });
-        }
-        Ok(providers)
+    ) -> color_eyre::Result<ProviderFactory> {
+        ProviderFactory::from_config(&loaded.global.providers)
+            .wrap_err("failed to initialize provider factory")
     }
 }
 
@@ -147,7 +135,12 @@ impl ChannelFactory for DefaultChannelFactory {
 
 pub(crate) struct RuntimeState {
     pub gateway: Gateway,
+    pub react_loop: Arc<ReactLoop>,
     pub runtimes: HashMap<String, AgentRuntime>,
+    pub agent_configs: Arc<HashMap<String, AgentRuntimeConfig>>,
+    pub memories: Arc<HashMap<String, MemoryStore>>,
+    pub process_manager: Arc<ProcessManager>,
+    pub completion_tx: mpsc::Sender<InboundMessage>,
     pub safe_error_reply: String,
 }
 
@@ -157,98 +150,101 @@ pub(crate) async fn assemble_runtime_state(
     app_paths: &AppPaths,
     deps: &RuntimeDependencies,
 ) -> color_eyre::Result<RuntimeState> {
-    let providers_by_key = deps.provider_factory.create_providers(loaded).await?;
+    let provider_factory = deps
+        .provider_factory_builder
+        .create_provider_factory(loaded)
+        .await?;
 
-    let mut memory_by_agent: HashMap<String, MemoryStore> = HashMap::new();
+    let mut memories_map: HashMap<String, MemoryStore> = HashMap::new();
     for agent in &loaded.global.agents.list {
         let memory = deps.memory_factory.create_memory(agent, loaded).await?;
-        memory_by_agent.insert(agent.id.clone(), memory);
+        memories_map.insert(agent.id.clone(), memory);
     }
 
-    let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
+    let mut agent_configs_map: HashMap<String, AgentRuntimeConfig> = HashMap::new();
+    let mut skill_factory = SkillFactory::new(app_paths.base_dir.clone());
 
-    let summon_agents: HashMap<String, PathBuf> = loaded
-        .global
-        .agents
-        .list
-        .iter()
-        .map(|agent| (agent.id.clone(), agent.workspace.clone()))
-        .collect();
-    let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
     for agent in &loaded.global.agents.list {
-        let memory = memory_by_agent.get(&agent.id).cloned().ok_or_else(|| {
-            color_eyre::eyre::eyre!("missing memory store for configured agent '{}'", agent.id)
-        })?;
-        let agent_config = load_agent_config_for_workspace(&agent.workspace)
-            .wrap_err_with(|| format!("failed to load agent.yaml for agent '{}'", agent.id))?;
+        let agent_config = agent.runtime.clone();
         let provider_key = agent_config
             .provider
             .as_deref()
-            .unwrap_or(loaded.global.providers.default.as_str());
-        if provider_key.trim().is_empty() {
+            .unwrap_or(loaded.global.providers.default.as_str())
+            .trim()
+            .to_owned();
+        if provider_key.is_empty() {
             return Err(color_eyre::eyre::eyre!(
-                "agent '{}' has an empty provider key in agent.yaml",
+                "agent '{}' has an empty provider key in config.yaml",
                 agent.id
             ));
         }
-        let provider_handle = providers_by_key.get(provider_key).ok_or_else(|| {
-            color_eyre::eyre::eyre!(
-                "agent '{}' references unknown provider key '{}'",
-                agent.id,
-                provider_key
-            )
-        })?;
+        provider_factory.get(&provider_key).map_err(color_eyre::Report::from)?;
+
         let system_prompt = load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
             format!(
                 "failed to assemble layered system prompt for agent '{}'",
                 agent.id
             )
         })?;
-        let tooling = build_tool_registry_for_agent(
-            &agent.id,
-            &agent_config,
-            &agent.workspace,
-            &app_paths.base_dir,
-        )
-        .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
+        let skill_tools = skill_factory
+            .load_for_agent(&agent.id, &agent_config, &agent.workspace)
+            .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
         info!(
             agent_id = %agent.id,
+            loaded_skill_tools = skill_tools.len(),
             status = "loaded",
             "agent skill tools loaded"
         );
-        runtimes.insert(
+
+        skill_factory.insert_agent_tools(agent.id.clone(), skill_tools);
+        agent_configs_map.insert(
             agent.id.clone(),
-            AgentRuntime::new(AgentRuntimeConfig {
+            AgentRuntimeConfig {
                 agent_id: agent.id.clone(),
+                provider_key,
                 runtime_config: loaded.global.runtime.clone(),
-                agent_config: agent_config.clone(),
-                provider: Arc::clone(&provider_handle.provider),
-                provider_supports_native_tools: provider_handle.metadata.supports_native_tools,
-                memory,
-                summon_agents: summon_agents.clone(),
-                summon_memories: memory_by_agent.clone(),
+                agent_config,
                 workspace_root: agent.workspace.clone(),
                 app_base_dir: app_paths.base_dir.clone(),
                 system_prompt,
-                tool_registry: tooling.tool_registry,
-                skill_tool_names: tooling.skill_tool_names,
                 max_steps: cli.max_steps,
-                completion_tx: Some(gateway_tx.clone()),
-            }),
+            },
         );
     }
+
+    let tool_factory = default_factory();
+    let react_loop = Arc::new(ReactLoop::new(
+        provider_factory,
+        tool_factory,
+        skill_factory,
+    ));
+
+    let agent_configs = Arc::new(agent_configs_map);
+    let memories = Arc::new(memories_map);
+    let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
+    for (agent_id, config) in agent_configs.iter() {
+        runtimes.insert(agent_id.clone(), AgentRuntime::new(config.clone()));
+    }
+
+    let process_manager = Arc::new(ProcessManager::new());
+    let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
     let gateway = Gateway::new(
         channels,
         loaded.global.inbound.clone(),
-        gateway_tx,
+        gateway_tx.clone(),
         gateway_rx,
     );
 
     Ok(RuntimeState {
         gateway,
+        react_loop,
         runtimes,
+        agent_configs,
+        memories,
+        process_manager,
+        completion_tx: gateway_tx,
         safe_error_reply: loaded.global.runtime.safe_error_reply.clone(),
     })
 }

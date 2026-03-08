@@ -77,7 +77,10 @@ pub(crate) async fn handle_inbound_once(
 
     if !inbound.invoke {
         tracing::debug!(status = "recording_context", "passive inbound");
-        if let Err(err) = runtime.record_context(&inbound, &memory_session_id).await {
+        if let Err(err) = runtime
+            .record_context(&inbound, &memory_session_id, state.memories.as_ref())
+            .await
+        {
             tracing::error!(
                 status = "failed",
                 error_kind = "memory_write",
@@ -105,7 +108,18 @@ pub(crate) async fn handle_inbound_once(
     }
     tracing::debug!(status = "dispatching", "invoke inbound");
 
-    match runtime.run(&inbound, &memory_session_id).await {
+    match runtime
+        .run(
+            &inbound,
+            &memory_session_id,
+            Arc::clone(&state.react_loop),
+            Arc::clone(&state.agent_configs),
+            Arc::clone(&state.memories),
+            Arc::clone(&state.process_manager),
+            Some(state.completion_tx.clone()),
+        )
+        .await
+    {
         Ok(reply) => {
             if let Err(err) = state.gateway.send_message(&inbound, &reply).await {
                 tracing::error!(

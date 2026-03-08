@@ -29,7 +29,7 @@ pub struct GlobalConfig {
     pub embedding: EmbeddingConfig,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -107,6 +107,7 @@ fn normalize_agents_workspace_paths(agents: &mut AgentsConfig) {
             id: agent.id.clone(),
             name: agent.name.clone(),
             workspace: normalize_workspace_path(&agent.workspace),
+            runtime: agent.runtime.clone(),
         })
         .collect();
 }
@@ -219,11 +220,14 @@ fn validate_inbound_config(inbound: &InboundConfig) -> Result<(), FrameworkError
         ));
     }
     validate_optional_policy_agent("inbound.defaults", &inbound.defaults)?;
-    validate_optional_policy_agent("inbound.dm", &inbound.dm)?;
     for (kind, channel) in &inbound.channels {
         validate_optional_policy_agent(
             &format!("inbound.channels.{}", kind.as_str()),
             &channel.policy,
+        )?;
+        validate_optional_policy_agent(
+            &format!("inbound.channels.{}.dm", kind.as_str()),
+            &channel.dm,
         )?;
         for (workspace_id, workspace) in &channel.workspaces {
             validate_optional_policy_agent(
@@ -644,6 +648,8 @@ pub struct AgentEntryConfig {
     pub id: String,
     pub name: String,
     pub workspace: PathBuf,
+    #[serde(flatten)]
+    pub runtime: AgentConfig,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -732,7 +738,6 @@ impl DiscordConfig {
 pub struct InboundConfig {
     pub defaults: InboundPolicyConfig,
     pub channels: HashMap<GatewayChannelKind, ChannelInboundConfig>,
-    pub dm: InboundPolicyConfig,
 }
 
 impl Default for InboundConfig {
@@ -743,7 +748,6 @@ impl Default for InboundConfig {
                 ..InboundPolicyConfig::default()
             },
             channels: HashMap::new(),
-            dm: InboundPolicyConfig::default(),
         }
     }
 }
@@ -753,6 +757,8 @@ impl Default for InboundConfig {
 pub struct ChannelInboundConfig {
     #[serde(flatten)]
     pub policy: InboundPolicyConfig,
+    #[serde(default)]
+    pub dm: InboundPolicyConfig,
     #[serde(default)]
     pub workspaces: HashMap<String, WorkspaceInboundConfig>,
 }
@@ -796,6 +802,10 @@ impl InboundConfig {
 
         if let Some(channel_scope) = self.channels.get(&source_channel) {
             effective.apply_override(&channel_scope.policy);
+            if is_dm {
+                effective.apply_override(&channel_scope.dm);
+                return effective.finalize(true);
+            }
             if !is_dm
                 && let Some(workspace) =
                     workspace_id.and_then(|id| channel_scope.workspaces.get(id))
@@ -808,7 +818,6 @@ impl InboundConfig {
         }
 
         if is_dm {
-            effective.apply_override(&self.dm);
             return effective.finalize(true);
         }
 
@@ -865,7 +874,7 @@ impl Default for EmbeddingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolConfig {
     pub enabled_tools: Vec<String>,
@@ -879,7 +888,7 @@ impl Default for ToolConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SkillsConfig {
     pub enabled_skills: Vec<String>,
@@ -963,6 +972,7 @@ fn default_agents_list() -> Vec<AgentEntryConfig> {
         id: default_agent_id(),
         name: "Default".to_owned(),
         workspace: PathBuf::from("./workspace"),
+        runtime: AgentConfig::default(),
     }]
 }
 fn default_gateway_channels() -> Vec<GatewayChannelKind> {
@@ -1043,6 +1053,7 @@ mod tests {
                     allow_from: None,
                     require_mentions: None,
                 },
+                dm: InboundPolicyConfig::default(),
                 workspaces: HashMap::from([(
                     "100".to_owned(),
                     WorkspaceInboundConfig {
@@ -1082,6 +1093,7 @@ mod tests {
                     allow_from: None,
                     require_mentions: None,
                 },
+                dm: InboundPolicyConfig::default(),
                 workspaces: HashMap::from([(
                     "100".to_owned(),
                     WorkspaceInboundConfig {
@@ -1120,19 +1132,26 @@ mod tests {
 
     #[test]
     fn dm_scope_overrides_defaults_and_forces_mentions_off() {
-        let inbound = InboundConfig {
+        let mut inbound = InboundConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            dm: InboundPolicyConfig {
-                agent: Some("dm".to_owned()),
-                allow_from: Some(vec!["11".to_owned()]),
-                require_mentions: Some(true),
-            },
             ..InboundConfig::default()
         };
+        inbound.channels.insert(
+            GatewayChannelKind::Discord,
+            ChannelInboundConfig {
+                policy: InboundPolicyConfig::default(),
+                dm: InboundPolicyConfig {
+                    agent: Some("dm".to_owned()),
+                    allow_from: Some(vec!["11".to_owned()]),
+                    require_mentions: Some(true),
+                },
+                workspaces: HashMap::new(),
+            },
+        );
 
         let policy = inbound.resolve(GatewayChannelKind::Discord, None, "321", true);
         assert_eq!(policy.agent, "dm");
@@ -1155,11 +1174,6 @@ mod tests {
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            dm: InboundPolicyConfig {
-                agent: Some("dm".to_owned()),
-                allow_from: Some(vec!["5".to_owned()]),
-                require_mentions: Some(true),
-            },
             ..InboundConfig::default()
         };
 
@@ -1170,6 +1184,11 @@ mod tests {
                     agent: Some("server".to_owned()),
                     allow_from: Some(vec!["2".to_owned()]),
                     require_mentions: None,
+                },
+                dm: InboundPolicyConfig {
+                    agent: Some("dm".to_owned()),
+                    allow_from: Some(vec!["5".to_owned()]),
+                    require_mentions: Some(true),
                 },
                 workspaces: HashMap::new(),
             },
@@ -1591,11 +1610,13 @@ routing:
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
                     workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/default"),
+                    runtime: AgentConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "researcher".to_owned(),
                     name: "Researcher".to_owned(),
                     workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/research"),
+                    runtime: AgentConfig::default(),
                 },
             ],
         };
@@ -1620,7 +1641,8 @@ routing:
             &AgentEntryConfig {
                 id: "researcher".to_owned(),
                 name: "Researcher".to_owned(),
-                workspace: PathBuf::from("/tmp/simpleclaw-summon-root/research")
+                workspace: PathBuf::from("/tmp/simpleclaw-summon-root/research"),
+                runtime: AgentConfig::default()
             }
         );
 
@@ -1638,11 +1660,13 @@ routing:
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
                     workspace: PathBuf::from("./workspace"),
+                    runtime: AgentConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "default".to_owned(),
                     name: "Duplicate".to_owned(),
                     workspace: PathBuf::from("./other"),
+                    runtime: AgentConfig::default(),
                 },
             ],
         };
@@ -1657,6 +1681,7 @@ routing:
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
                 workspace: PathBuf::from("./workspace"),
+                runtime: AgentConfig::default(),
             }],
         };
         assert!(validate_agents_config(&agents).is_err());
@@ -1671,6 +1696,7 @@ routing:
                 id: "researcher".to_owned(),
                 name: "Researcher".to_owned(),
                 workspace: PathBuf::from("./workspace"),
+                runtime: AgentConfig::default(),
             }],
         };
 
@@ -1688,11 +1714,13 @@ routing:
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
                     workspace: PathBuf::from("./workspace"),
+                    runtime: AgentConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "researcher".to_owned(),
                     name: "Researcher".to_owned(),
                     workspace: PathBuf::from("./workspace-researcher"),
+                    runtime: AgentConfig::default(),
                 },
             ],
         };

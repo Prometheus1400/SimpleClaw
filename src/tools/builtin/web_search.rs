@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolCtx};
+use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_simple_text_arg;
 
@@ -28,7 +28,7 @@ impl Tool for WebSearchTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolCtx,
+        _ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
