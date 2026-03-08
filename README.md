@@ -1,250 +1,253 @@
 # SimpleClaw
 
-A lightweight, multi-agent agentic framework built in Rust. SimpleClaw connects AI agents to Discord with local SQLite-backed memory, WASM-sandboxed tool execution, and a modular prompt composition system.
+SimpleClaw is a Rust multi-agent runtime that connects channel events (currently Discord) to agent execution loops with:
 
-## Architecture Overview
+- layered prompt assembly
+- short-term and long-term SQLite memory
+- provider-native or XML tool calling
+- tool sandbox controls (`read`/`edit` WASM, `exec` host or podman)
+- per-session concurrency control
 
-```
-                         +-------------------+
-                         |       CLI         |
-                         | (clap, tracing)   |
-                         +---------+---------+
-                                   |
-                         +---------v---------+
-                         |   LoadedConfig    |
-                         | (config.yaml +    |
-                         |  secrets.yaml)    |
-                         +---------+---------+
-                                   |
-               +-------------------v-------------------+
-               |          Runtime Assembly             |
-               |  (run.rs: assemble_runtime_state)     |
-               +---+----------+----------+----------+--+
-                   |          |          |          |
-          +--------v--+  +---v----+  +--v---+  +--v---------+
-          | Provider  |  |Gateway |  |Memory|  |ToolRegistry|
-          | (Gemini)  |  |        |  |Store |  |            |
-          +--------+--+  +---+----+  +--+---+  +--+---------+
-                   |          |         |          |
-                   |   +------v------+  |          |
-                   |   |  Channels   |  |          |
-                   |   | +--------+  |  |          |
-                   |   | |Discord |  |  |          |
-                   |   | +--------+  |  |          |
-                   |   +------+------+  |          |
-                   |          |         |          |
-               +---v----------v---------v----------v---+
-               |           AgentRuntime                |
-               | (per-agent: config, prompt, memory,   |
-               |  tools, skills, process manager)      |
-               +-------------------+-------------------+
-                                   |
-                         +---------v---------+
-                         |   ReAct Loop      |
-                         | (react::run_loop) |
-                         +---------+---------+
-                                   |
-                    +--------------+--------------+
-                    |              |              |
-             +------v---+  +------v---+  +------v---+
-             |Tool Calls|  |  Final   |  |  Empty   |
-             |(dispatch)|  | Response |  |(continue)|
-             +------+---+  +----------+  +----------+
-                    |
-         +----------v-----------+
-         |   Tool Dispatcher    |
-         | +------------------+ |
-         | | NativeDispatcher | | <-- Provider supports function calling
-         | +------------------+ |
-         | | XmlDispatcher    | | <-- Fallback XML-based tool protocol
-         | +------------------+ |
-         +----------+-----------+
-                    |
-    +---------------+---------------+
-    |       |       |       |       |
-  +--v-+ +--v-+ +--v-+ +--v-+  +--v-+
-  |exec| |read| |edit| |mem | |fetch|
-  +----+ +----+ +----+ +----+ +-----+
-  (12 builtin tools + dynamic skill tools)
+This README is an implementation-level architecture deep dive, focused on message lifecycle.
+
+## Runtime Architecture
+
+```mermaid
+flowchart LR
+    CLI["CLI (src/lib.rs, src/cli.rs)"]
+    CFG["LoadedConfig (src/config.rs)"]
+    COMP["assemble_runtime_state (src/run/composition.rs)"]
+    GW["Gateway (src/gateway/mod.rs)"]
+    CH["Channel impls (src/channels/*)"]
+    SW["SessionWorkerCoordinator (src/run/session.rs)"]
+    INB["handle_inbound_once (src/run.rs)"]
+    AR["AgentRuntime (src/agent.rs)"]
+    RL["ReactLoop (src/react.rs)"]
+    DISP["ToolDispatcher (src/dispatch.rs)"]
+    TOOLS["ToolFactory + ActiveTools (src/tools/mod.rs)"]
+    PROV["ProviderFactory -> Provider (src/providers/*)"]
+    MEM["MemoryStore (src/memory/mod.rs)"]
+
+    CLI --> CFG --> COMP
+    COMP --> GW
+    COMP --> RL
+    COMP --> AR
+    COMP --> MEM
+    CH --> GW
+    GW --> SW --> INB --> AR --> RL
+    RL --> PROV
+    RL --> DISP --> TOOLS
+    AR --> MEM
+    INB --> GW
 ```
 
-## Data Flow: Message Lifecycle
+## Important Runtime Types
 
+### Ingress and routing
+- `Channel` trait (`src/channels/mod.rs`): `listen`, `send_message`, `broadcast_typing`.
+- `DiscordChannel` (`src/channels/discord.rs`): maps Serenity events to `ChannelInbound`.
+- `Gateway` (`src/gateway/mod.rs`): spins one listener task per channel, normalizes inbound, owns the inbound queue.
+- `InboundMessage` (`src/channels/types.rs`): canonical message envelope used by the runtime.
+
+### Inbound policy and session identity
+- `InboundConfig::resolve` (`src/config.rs`): hierarchical policy resolution (global -> channel-kind -> workspace -> channel; DM override path).
+- `classify_inbound` (`src/channels/policy.rs`): computes `ingest_for_context`, `allow_invoke`, `target_agent_id`.
+- `build_session_key` (`src/gateway/session.rs`):
+  - DM: `agent:<agent_id>:main`
+  - non-DM Discord: `agent:<agent_id>:discord:<channel_id>`
+
+### Orchestration
+- `SessionWorkerCoordinator<T>` (`src/run/session.rs`): guarantees serialized processing per `session_key` and concurrency across different keys.
+- `handle_inbound_once` (`src/run.rs`): top-level turn handler, including passive-ingest vs invoke behavior.
+- `AgentRuntime` (`src/agent.rs`): persists inbound user message, builds history and system prompt, invokes `ReactLoop`, persists assistant reply.
+- `ReactLoop` (`src/react.rs`): iterative provider/tool loop up to `max_steps`.
+
+### Tooling
+- `ToolFactory` + `ActiveTools` (`src/tools/mod.rs`): resolves enabled built-ins plus dynamic skill tools.
+- `ToolDispatcher` (`src/dispatch.rs`):
+  - `NativeDispatcher`: consumes provider-native function/tool calls.
+  - `XmlDispatcher`: fallback protocol using `<tool_call>` blocks in text.
+- `ToolExecEnv` (`src/tools/mod.rs`): execution context passed to tools (identity, sandbox mode, memory, process manager, completion route).
+- `ProcessManager` (`src/tools/mod.rs`): background process lifecycle + completion watcher that re-injects synthetic inbound events.
+
+### Provider and memory
+- `ProviderFactory` / `ProviderRegistry` (`src/providers/registry.rs`): provider instantiation from config (Gemini currently).
+- `GeminiProvider` (`src/providers/gemini.rs`): `generateContent` adapter, including function declarations and parsing tool calls.
+- `MemoryStore` (`src/memory/mod.rs`):
+  - short-term DB: `sessions`, `messages`
+  - long-term DB: `ltm_facts`, `ltm_facts_vec`
+  - semantic preinject query path and long-term memory tools.
+
+## Message Lifecycle (Step-by-Step)
+
+```mermaid
+sequenceDiagram
+    participant U as User (Discord)
+    participant DC as DiscordChannel
+    participant GW as Gateway
+    participant SW as SessionWorkerCoordinator
+    participant IN as handle_inbound_once
+    participant AR as AgentRuntime
+    participant RL as ReactLoop
+    participant P as Provider
+    participant TD as ToolDispatcher
+    participant T as Tool(s)
+    participant M as MemoryStore
+
+    U->>DC: MessageCreate
+    DC->>GW: ChannelInbound
+    GW->>GW: evaluate policy + build_session_key
+    GW->>SW: dispatch(session_key, InboundMessage)
+    SW->>IN: serialized handler for key
+
+    alt invoke == false
+        IN->>AR: record_context(...)
+        AR->>M: append_message(role=user)
+        IN-->>GW: no outbound reply
+    else invoke == true
+        IN->>GW: broadcast_typing (non-system users)
+        IN->>AR: run(...)
+        AR->>M: append user message
+        AR->>M: recent_messages + preinject query
+        AR->>RL: run(params, history)
+        loop up to max_steps
+            RL->>P: generate(system_prompt, history, tool_specs)
+            P-->>RL: ProviderResponse
+            alt Tool calls
+                RL->>TD: parse + execute_tool_calls
+                TD->>T: execute(...)
+                T-->>TD: tool output
+                TD-->>RL: history messages (calls/results)
+            else Final text
+                RL-->>AR: final reply
+            else Empty
+                RL->>RL: continue
+            end
+        end
+        AR->>M: append assistant reply
+        AR-->>IN: final reply text
+        IN->>GW: send_message(channel_id, reply)
+    end
 ```
-  User sends message (Discord)
-          |
-          v
-  Channel.listen() -> InboundMessage
-          |
-          v
-  Gateway.next_message() (mpsc aggregation)
-          |
-          v
-  SessionWorkerCoordinator.dispatch(session_key, msg)
-          |
-          +-- per-session unbounded channel
-          |   (sequential processing per session,
-          |    concurrent across sessions)
-          v
-  handle_inbound_once(state, inbound)
-          |
-          +-- !invoke? -> record_context() (passive observation)
-          |
-          +-- invoke? -> AgentRuntime.run()
-                |
-                +-- append user message to short-term memory
-                +-- load seeded history (recent_messages)
-                +-- build turn system prompt (+ memory pre-injection)
-                +-- inject caller context (user identity)
-                +-- resolve active tools (registry + skills)
-                |
-                v
-          react::run_loop (up to max_steps iterations)
-                |
-                +-- Provider.generate(system_prompt, history, tools)
-                +-- ToolDispatcher.parse_response()
-                |     |
-                |     +-- ToolCalls -> execute each -> append to history -> continue
-                |     +-- FinalResponse -> return text
-                |     +-- Empty -> continue
-                |
-                v
-          append assistant reply to short-term memory
-                |
-                v
-          Gateway.send_message() -> Channel.send_message()
+
+## Lifecycle Nuances That Matter
+
+### 1) Ingest vs invoke split
+- `ingest_for_context=false`: message is dropped before queueing.
+- `ingest_for_context=true, invoke=false`: message is stored as context only (no model run, no reply).
+- In DMs, ingest follows invoke (`ingest_for_context = allow_invoke`), so denied DMs are dropped entirely.
+
+### 2) Ordering guarantees
+- Per-session ordering is strict because one worker processes one session key sequentially.
+- Different session keys run concurrently.
+- Workers expire after idle timeout (5 minutes), then respawn on next message.
+
+### 3) Prompt construction per turn
+- Base prompt: concatenated workspace files in this order:
+  - `IDENTITY.md`, `AGENT.md`, `USER.md`, `MEMORY.md`, `SOUL.md`
+- Optional memory preinject appends a scored long-term context section.
+- Caller context is always injected (`CURRENT SPEAKER` with user id/name).
+
+### 4) Tool execution security controls
+- Owner-restricted tools: `exec`, `process`, `forget`, `summon`, `edit`, `memorize`.
+- If `runtime.owner_ids` is empty, these tools fail as misconfigured.
+- Sandbox gate (`tools/sandbox.rs`) enforces sandbox-aware tools when `sandbox=on`.
+
+### 5) Background process completion is an inbound event
+- `exec` with `background=true` registers a completion watcher.
+- On completion, watcher sends a synthetic `InboundMessage` with:
+  - `user_id="system"`
+  - `invoke=true`
+  - content: `[background process completed] ...`
+- This re-enters the same session pipeline and can trigger follow-up model behavior.
+
+## Tooling Architecture
+
+```mermaid
+flowchart TD
+    A["Provider response"] --> B{"DispatchAction"}
+    B -->|"ToolCalls"| C["execute_tool_calls"]
+    B -->|"FinalResponse"| D["Return assistant text"]
+    B -->|"Empty"| E["Next loop iteration"]
+
+    C --> F{"Tool known?"}
+    F -->|"No"| G["tool_error: unknown tool"]
+    F -->|"Yes"| H{"Owner restricted?"}
+    H -->|"Denied"| I["tool_error: permission denied"]
+    H -->|"Allowed"| J["execute_tool_with_sandbox"]
+    J --> K["Tool output"]
+    G --> L["append tool result to history"]
+    I --> L
+    K --> L
+    L --> M["Next provider turn"]
 ```
 
-## Module Architecture
+Built-in tools are registered in `src/tools/builtin/mod.rs`:
+- `memory`, `memorize`, `forget`
+- `summon`, `task`
+- `web_search`, `web_fetch`, `clock`
+- `read`, `edit`, `exec`, `process`
 
-### Core Modules
+Skill tools are loaded from `skills/<skill_id>/SKILL.md` (agent workspace first, then global `~/.simpleclaw/skills`).
 
-| Module | File | Responsibility |
-|--------|------|----------------|
-| **lib** | `src/lib.rs` | Crate root, CLI dispatch, tracing init |
-| **cli** | `src/cli.rs` | Argument parsing (clap): system, logs, status, providers, models, agent memory |
-| **config** | `src/config.rs` | Two-tier YAML config (global `~/.simpleclaw/config.yaml` + per-agent `agent.yaml`), validation, secret resolution |
-| **paths** | `src/paths.rs` | `~/.simpleclaw/` directory layout resolution |
-| **secrets** | `src/secrets.rs` | Secret resolution: `${secret:<name>}` references resolved from env vars then `secrets.yaml` |
-| **error** | `src/error.rs` | `FrameworkError` enum (Io, Yaml, Db, Provider, Tool, Config) via `thiserror` |
+## Configuration Model (Current)
 
-### Runtime & Orchestration
+There is a single global config file: `~/.simpleclaw/config.yaml`.
 
-| Module | File | Responsibility |
-|--------|------|----------------|
-| **run** | `src/run.rs` | Service lifecycle (start/stop/restart as daemon), runtime assembly, session worker coordinator, log rotation, agent memory inspection |
-| **agent** | `src/agent.rs` | `AgentRuntime` struct -- per-agent execution context. Owns provider, memory, tools, prompt, skill tools. Orchestrates `RuntimeSummonService` and `RuntimeTaskService` |
-| **gateway** | `src/gateway.rs` | Multi-channel message aggregation via mpsc. Routes inbound messages and dispatches outbound replies |
-| **channels** | `src/channels/` | `Channel` trait + `DiscordChannel` (serenity). Discord inbound policy (per-server, per-channel, DM rules, mention requirements) |
-| **react** | `src/react.rs` | Core ReAct loop: iterates provider calls and tool executions up to `max_steps`. Log sanitization and secret redaction |
-| **dispatch** | `src/dispatch.rs` | `ToolDispatcher` trait with two strategies: `NativeDispatcher` (provider-native function calling) and `XmlDispatcher` (XML-in-text fallback). Owner-restricted tool authorization |
+Agent-specific behavior is embedded in `agents.list[*]` entries:
+- workspace path
+- provider override
+- sandbox mode
+- enabled tools
+- enabled skills
 
-### Memory & Prompt
+Secrets in config must be `${secret:<name>}` and resolve from:
+1. environment variable `<name>`
+2. `~/.simpleclaw/secrets.yaml`
 
-| Module | File | Responsibility |
-|--------|------|----------------|
-| **memory** | `src/memory.rs` | Dual-database SQLite memory: short-term (sessions/messages) and long-term (facts with embeddings). Uses `fastembed` for local embeddings, `sqlite-vec` for vector similarity. Supports memorize (with dedup + supersede), semantic query, semantic forget |
-| **prompt** | `src/prompt.rs` | Layered prompt assembly from markdown files: `IDENTITY.md`, `AGENT.md`, `USER.md`, `MEMORY.md`, `SOUL.md` |
+## Storage Layout
 
-### Tools
+- Runtime state: `~/.simpleclaw/`
+- Logs:
+  - `~/.simpleclaw/logs/service.log`
+  - `~/.simpleclaw/logs/service.jsonl`
+- PID file: `~/.simpleclaw/run/service.pid`
+- Prompt files: inside each agent workspace
+- Memory databases per agent workspace:
+  - `<workspace>/.simpleclaw/memory/lraf.db`
+  - `<workspace>/.simpleclaw/memory/lraf_long_term.db`
 
-| Module | File | Responsibility |
-|--------|------|----------------|
-| **tools** | `src/tools/mod.rs` | `Tool` trait, `ToolRegistry`, `ActiveTools`, `ToolCtx` (execution context), `ProcessManager` (background process lifecycle with host + podman backends) |
-| **tools/builtin** | `src/tools/builtin/` | 12 builtin tools: `memory`, `memorize`, `forget`, `summon`, `task`, `exec`, `process`, `read`, `edit`, `web_search`, `web_fetch`, `clock` |
-| **tools/sandbox** | `src/tools/sandbox.rs` | WASM sandbox via `wasmtime` + WASI preview 1. Runs `read_tool` and `edit_tool` as sandboxed WASM guests with workspace and tmp mounts |
-| **tools/skill** | `src/tools/skill.rs` | Dynamic skill tools loaded from `skills/<id>/SKILL.md` files (agent-scoped or global-scoped). Exposed as callable tools that return raw markdown |
-| **tools/builtin/common** | `src/tools/builtin/common.rs` | Shared argument parsing for tools (exec, memory, summon, task, memorize, forget, process) |
-
-### Testing
-
-| Module | File | Responsibility |
-|--------|------|----------------|
-| **testing** | `src/testing.rs` | Public e2e test harness: `run_single_gateway_roundtrip()` with mock provider, capture channel, ephemeral SQLite databases. Exercises full runtime assembly through `handle_inbound_once` |
-
-## Key Design Decisions
-
-### Dual Tool Dispatch Strategy
-Providers that support native function calling (e.g., Gemini) use `NativeDispatcher` which passes tool definitions as structured specs. For providers that don't, `XmlDispatcher` injects tool definitions into the system prompt and parses `<tool_call>` XML from response text.
-
-### Dual-Database Memory Architecture
-Short-term memory (session messages) and long-term memory (semantic facts with embeddings) are stored in separate SQLite databases. Long-term facts use `sqlite-vec` for cosine similarity search. The `memorize` tool deduplicates within a time window and supersedes semantically similar facts (>= 0.92 similarity).
-
-### Memory Pre-injection
-On each turn, the system optionally queries long-term memory with the user's message, ranks hits by a weighted similarity score (factoring in importance), and injects relevant context into the system prompt before the LLM call.
-
-### WASM Sandboxing
-The `read` and `edit` tools can run as WASM guests via `wasmtime` with WASI preview 1, providing filesystem isolation through preopened directory mounts. The sandbox mode is configured per-agent.
-
-### Sandbox Limitations
-- Sandbox-aware tools: `read`, `edit`, and `exec`. In `sandbox: on`, tools that are not sandbox-aware are rejected by the centralized sandbox gate.
-- Network tools (`web_search`, `web_fetch`) are not sandboxed and are currently outside the local filesystem sandbox boundary.
-- Podman sandboxed `exec` uses a read-write bind mount for `/workspace`.
-
-### Process Management
-The `exec` tool supports both foreground and background execution. Background processes can run on the host or in podman containers (when sandbox mode is on). A completion watcher monitors background processes and re-injects completion events back into the gateway.
-
-### Session Worker Coordination
-Inbound messages are dispatched to per-session workers via `SessionWorkerCoordinator`. Messages within the same session are processed sequentially (preserving conversation order), while different sessions execute concurrently. Workers idle-timeout after 5 minutes.
-
-### Owner-Restricted Tools
-Sensitive tools (`exec`, `process`, `forget`, `summon`, `edit`, `memorize`) are restricted to configured owner user IDs, preventing unauthorized users from executing destructive operations.
-
-## Configuration
-
-### Global Config (`~/.simpleclaw/config.yaml`)
-
-Defines provider, runtime, gateway, agents, discord, database, and embedding settings.
-
-### Per-Agent Config (`<workspace>/agent.yaml`)
-
-Defines per-agent model override, sandbox mode, enabled tools, and enabled skills.
-
-### Prompt Layers (`<workspace>/`)
-
-| File | Purpose |
-|------|---------|
-| `IDENTITY.md` | Who the agent is (persona, name, role) |
-| `AGENT.md` | How the agent operates (instructions, guidelines) |
-| `USER.md` | Context about the primary user |
-| `MEMORY.md` | Persistent goals or static long-term context |
-| `SOUL.md` | Deep personality, ethical boundaries, "vibe" |
-
-### Secrets (`~/.simpleclaw/secrets.yaml`)
-
-Secrets are referenced via `${secret:<name>}` syntax in config. Resolved from environment variables first, then the secrets file.
-
-## Common Commands
+## Operational Commands
 
 ```bash
-cargo build                    # Build the project
-cargo run                      # Run the service (foreground)
-cargo test                     # Run tests
-cargo fmt --all                # Format all code
-simpleclaw system start        # Start as background daemon
-simpleclaw system stop         # Stop the daemon
-simpleclaw status              # Show service status
-simpleclaw logs --follow       # Tail service logs
-simpleclaw providers list      # List available providers
-simpleclaw models list         # List available models
-simpleclaw agent memory \
-  --agent <id> --memory long \
-  --limit 20                   # Inspect agent memory
+cargo build
+cargo test
+
+cargo run
+cargo run -- system run
+cargo run -- system start
+cargo run -- system stop
+cargo run -- status
+cargo run -- logs --follow
+
+cargo run -- providers list
+cargo run -- models list
+cargo run -- agent memory --agent <id> --memory both --limit 20
 ```
 
-## WASM Artifacts
+## Sandbox Artifacts
 
-Build the sandboxed tool WASM guests:
+Build WASM guests for sandboxed `read`/`edit`:
 
 ```bash
 cargo build --package read_tool --package edit_tool --target wasm32-wasip1 --release
 ```
 
-## Install / Uninstall
+Install/uninstall helpers:
 
 ```bash
-./scripts/install.sh           # Install binary + WASM assets to ~/.cargo
-./scripts/install.sh --debug   # Install debug build
-./scripts/uninstall.sh         # Remove installed artifacts
-./scripts/uninstall.sh --stop  # Stop service and uninstall
+./scripts/install.sh
+./scripts/install.sh --debug
+./scripts/uninstall.sh
+./scripts/uninstall.sh --stop
 ```
