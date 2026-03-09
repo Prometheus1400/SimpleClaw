@@ -26,8 +26,15 @@ pub(super) fn parse_simple_text_arg(args_json: &str) -> String {
 
 #[derive(Debug)]
 pub(super) enum MemoryAction {
-    Query { query: String, top_k: Option<usize> },
-    List { kind: Option<String>, limit: usize },
+    Query {
+        query: String,
+        top_k: Option<usize>,
+        store: Option<String>,
+    },
+    List {
+        kind: Option<String>,
+        limit: usize,
+    },
 }
 
 pub(super) fn parse_memory_args(args_json: &str) -> MemoryAction {
@@ -51,21 +58,30 @@ pub(super) fn parse_memory_args(args_json: &str) -> MemoryAction {
                 .get("top_k")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
+            let store = value
+                .get("store")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned);
             return MemoryAction::Query {
                 query: query.to_owned(),
                 top_k,
+                store,
             };
         }
         if let Some(s) = value.as_str() {
             return MemoryAction::Query {
                 query: s.to_owned(),
                 top_k: None,
+                store: None,
             };
         }
     }
     MemoryAction::Query {
         query: args_json.trim_matches('"').to_owned(),
         top_k: None,
+        store: None,
     }
 }
 

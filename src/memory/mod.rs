@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -7,7 +8,7 @@ use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
 use fastembed::{InitOptions, TextEmbedding};
 use rusqlite::params;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::config::{DatabaseConfig, EmbeddingConfig, MemoryRecallConfig};
 use crate::error::FrameworkError;
@@ -23,7 +24,7 @@ use recall::{parse_memory_kind, rank_recall_hits};
 use schema::register_sqlite_vec;
 pub use types::{
     LongTermFactSummary, LongTermForgetMatch, LongTermForgetResult, MemorizeResult, MemoryHitStore,
-    MemoryRecallHit, StoredMessage, StoredRole,
+    MemoryRecallHit, MemoryStoreScope, StoredMessage, StoredRole,
 };
 
 pub type DynMemory = Arc<dyn Memory>;
@@ -42,12 +43,17 @@ pub trait Memory: Send + Sync {
         session_id: &str,
         query: &str,
         top_k: usize,
+        history_window: usize,
+        scope: MemoryStoreScope,
     ) -> Result<Vec<String>, FrameworkError>;
     async fn query_recall_hits(
         &self,
         session_id: &str,
         query: &str,
         config: &MemoryRecallConfig,
+        history_window: usize,
+        scope: MemoryStoreScope,
+        prefer_long_term: bool,
     ) -> Result<Vec<MemoryRecallHit>, FrameworkError>;
     async fn semantic_forget_long_term(
         &self,
@@ -191,6 +197,11 @@ impl MemoryStore {
                     username TEXT,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_vec USING vec0(
+                    message_id INTEGER PRIMARY KEY,
+                    embedding float[384]
+                );
                 "#,
             )?;
 
@@ -259,6 +270,7 @@ impl MemoryStore {
         let now = chrono::Utc::now().to_rfc3339();
         let session_for_sessions = session_id.to_owned();
         let session_for_messages = session_id.to_owned();
+        let should_index_short_term = matches!(role, StoredRole::User | StoredRole::Assistant);
         let role = role.as_db_str().to_owned();
         let content_owned = content.to_owned();
         let username_owned = username
@@ -267,6 +279,25 @@ impl MemoryStore {
             .map(str::to_owned);
         let now_for_session = now.clone();
         let now_for_message = now;
+        let message_embedding = if should_index_short_term {
+            match self.embedder.as_ref() {
+                Some(embedder) => match embed_text(embedder, content).await {
+                    Ok(values) => Some(encode_f32_blob(&values)),
+                    Err(err) => {
+                        warn!(
+                            status = "degraded",
+                            session_id = %session_id,
+                            error = %err,
+                            "memory short-term embedding failed; continuing without vector index"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
 
         let conn = self
             .pool
@@ -288,6 +319,13 @@ impl MemoryStore {
                     now_for_message
                 ],
             )?;
+            if let Some(embedding) = message_embedding {
+                let row_id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT OR REPLACE INTO messages_vec (message_id, embedding) VALUES (?1, ?2)",
+                    params![row_id, embedding],
+                )?;
+            }
             Ok::<(), rusqlite::Error>(())
         })
         .await
@@ -306,6 +344,8 @@ impl MemoryStore {
         session_id: &str,
         query: &str,
         top_k: usize,
+        history_window: usize,
+        scope: MemoryStoreScope,
     ) -> Result<Vec<String>, FrameworkError> {
         let top_k = top_k.max(1);
         let top_k_u32 = u32::try_from(top_k).unwrap_or(u32::MAX);
@@ -316,13 +356,20 @@ impl MemoryStore {
             long_term_weight: 1.0,
             max_chars: 4000,
         };
-        let hits = self.query_recall_hits(session_id, query, &config).await?;
+        let hits = self
+            .query_recall_hits(session_id, query, &config, history_window, scope, false)
+            .await?;
         Ok(hits
             .into_iter()
             .map(|hit| match hit.store {
                 MemoryHitStore::LongTerm => format!(
                     "[long-term/{}] {}",
                     hit.kind.as_deref().unwrap_or("general"),
+                    hit.content
+                ),
+                MemoryHitStore::ShortTerm => format!(
+                    "[short-term/{}] {}",
+                    hit.kind.as_deref().unwrap_or("message"),
                     hit.content
                 ),
             })
@@ -334,6 +381,9 @@ impl MemoryStore {
         session_id: &str,
         query: &str,
         config: &MemoryRecallConfig,
+        history_window: usize,
+        scope: MemoryStoreScope,
+        prefer_long_term: bool,
     ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
         let started = std::time::Instant::now();
         debug!(
@@ -343,15 +393,65 @@ impl MemoryStore {
         );
         let config = config.normalized();
         let query_embedding = embed_text(self.embedder_ref()?, query).await?;
-
-        let sql_limit = (config.top_k * 3).max(1) as i64;
+        let sql_limit = (config.top_k * 5).max(1) as i64;
         let query_blob = encode_f32_blob(&query_embedding);
+        let mut long_term_hits = Vec::new();
+        let mut short_term_hits = Vec::new();
+
+        if matches!(
+            scope,
+            MemoryStoreScope::Combined | MemoryStoreScope::LongTerm
+        ) {
+            long_term_hits = self
+                .fetch_long_term_candidates(query_blob.clone(), sql_limit, config.long_term_weight)
+                .await?;
+        }
+        if matches!(
+            scope,
+            MemoryStoreScope::Combined | MemoryStoreScope::ShortTerm
+        ) {
+            short_term_hits = self
+                .fetch_short_term_candidates(session_id, query_blob, sql_limit, history_window)
+                .await?;
+        }
+
+        let hits = if prefer_long_term && matches!(scope, MemoryStoreScope::Combined) {
+            let mut out = Vec::new();
+            let mut ranked_long = rank_recall_hits(long_term_hits, &config);
+            let mut ranked_short = rank_recall_hits(short_term_hits, &config);
+            out.append(&mut ranked_long);
+            if out.len() < config.top_k as usize {
+                let remaining = config.top_k as usize - out.len();
+                out.extend(ranked_short.drain(..remaining.min(ranked_short.len())));
+            }
+            out
+        } else {
+            let mut candidates = Vec::with_capacity(long_term_hits.len() + short_term_hits.len());
+            candidates.extend(long_term_hits);
+            candidates.extend(short_term_hits);
+            rank_recall_hits(candidates, &config)
+        };
+        debug!(
+            status = "completed",
+            session_id = %session_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "memory recall query"
+        );
+        Ok(hits)
+    }
+
+    async fn fetch_long_term_candidates(
+        &self,
+        query_blob: Vec<u8>,
+        sql_limit: i64,
+        long_term_weight: f32,
+    ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
         let long_term_conn = self
             .long_term_pool
             .get()
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))?;
-        let candidates = long_term_conn
+        long_term_conn
             .interact(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT f.content, f.kind, f.importance, v.distance
@@ -359,8 +459,7 @@ impl MemoryStore {
                      JOIN ltm_facts f ON f.id = v.fact_id
                      WHERE v.embedding MATCH ?1
                        AND v.k = ?2
-                     ORDER BY v.distance
-                    ",
+                     ORDER BY v.distance",
                 )?;
                 let mapped = stmt.query_map(params![query_blob, sql_limit], |row| {
                     let content: String = row.get(0)?;
@@ -369,10 +468,10 @@ impl MemoryStore {
                     let distance: f32 = row.get(3)?;
                     Ok((content, kind, importance, distance))
                 })?;
+
                 let mut out = Vec::new();
                 for row in mapped {
                     let (content, kind, importance, distance) = row?;
-                    // Convert L2 distance to cosine similarity (vectors are normalized)
                     let similarity = 1.0 - (distance * distance / 2.0);
                     let imp = (importance as f32).clamp(1.0, 5.0);
                     let with_importance = similarity * (1.0 + (imp - 1.0) * 0.1);
@@ -382,22 +481,80 @@ impl MemoryStore {
                         kind: Some(kind),
                         importance: Some(importance),
                         raw_similarity: similarity,
-                        final_score: with_importance * config.long_term_weight,
+                        final_score: with_importance * long_term_weight,
                     });
                 }
                 Ok::<Vec<MemoryRecallHit>, rusqlite::Error>(out)
             })
             .await
-            .map_err(|e| FrameworkError::Config(e.to_string()))??;
+            .map_err(|e| FrameworkError::Config(e.to_string()))?
+            .map_err(|e| FrameworkError::Config(e.to_string()))
+    }
 
-        let hits = rank_recall_hits(candidates, &config);
-        debug!(
-            status = "completed",
-            session_id = %session_id,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "memory recall query"
-        );
-        Ok(hits)
+    async fn fetch_short_term_candidates(
+        &self,
+        session_id: &str,
+        query_blob: Vec<u8>,
+        sql_limit: i64,
+        history_window: usize,
+    ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+        let session = session_id.to_owned();
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| FrameworkError::Config(e.to_string()))?;
+        conn.interact(move |conn| {
+            let excluded = fetch_recent_short_term_ids(conn, &session, history_window)?;
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.role, m.content, m.username, v.distance
+                 FROM messages_vec v
+                 JOIN messages m ON m.id = v.message_id
+                 WHERE m.session_id = ?1
+                   AND (m.role = 'user' OR m.role = 'assistant')
+                   AND v.embedding MATCH ?2
+                   AND v.k = ?3
+                 ORDER BY v.distance",
+            )?;
+            let mapped = stmt.query_map(params![session, query_blob, sql_limit], |row| {
+                let id: i64 = row.get(0)?;
+                let role: String = row.get(1)?;
+                let content: String = row.get(2)?;
+                let username: Option<String> = row.get(3)?;
+                let distance: f32 = row.get(4)?;
+                Ok((id, role, content, username, distance))
+            })?;
+
+            let mut out = Vec::new();
+            for row in mapped {
+                let (id, role, content, username, distance) = row?;
+                if excluded.contains(&id) {
+                    continue;
+                }
+                let similarity = 1.0 - (distance * distance / 2.0);
+                let rendered_content = if role == "user" {
+                    username
+                        .map(|name| name.trim().to_owned())
+                        .filter(|name| !name.is_empty())
+                        .map(|name| format!("[{name}] {content}"))
+                        .unwrap_or(content)
+                } else {
+                    content
+                };
+                out.push(MemoryRecallHit {
+                    store: MemoryHitStore::ShortTerm,
+                    content: rendered_content,
+                    kind: Some(role),
+                    importance: None,
+                    raw_similarity: similarity,
+                    final_score: similarity,
+                });
+            }
+            Ok::<Vec<MemoryRecallHit>, rusqlite::Error>(out)
+        })
+        .await
+        .map_err(|e| FrameworkError::Config(e.to_string()))?
+        .map_err(|e| FrameworkError::Config(e.to_string()))
     }
 
     pub async fn semantic_forget_long_term(
@@ -760,8 +917,11 @@ impl Memory for MemoryStore {
         session_id: &str,
         query: &str,
         top_k: usize,
+        history_window: usize,
+        scope: MemoryStoreScope,
     ) -> Result<Vec<String>, FrameworkError> {
-        MemoryStore::semantic_query_combined(self, session_id, query, top_k).await
+        MemoryStore::semantic_query_combined(self, session_id, query, top_k, history_window, scope)
+            .await
     }
 
     async fn query_recall_hits(
@@ -769,8 +929,20 @@ impl Memory for MemoryStore {
         session_id: &str,
         query: &str,
         config: &MemoryRecallConfig,
+        history_window: usize,
+        scope: MemoryStoreScope,
+        prefer_long_term: bool,
     ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
-        MemoryStore::query_recall_hits(self, session_id, query, config).await
+        MemoryStore::query_recall_hits(
+            self,
+            session_id,
+            query,
+            config,
+            history_window,
+            scope,
+            prefer_long_term,
+        )
+        .await
     }
 
     async fn semantic_forget_long_term(
@@ -847,9 +1019,33 @@ fn has_recent_long_term_fact(
     Ok(rows.next()?.is_some())
 }
 
+fn fetch_recent_short_term_ids(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    history_window: usize,
+) -> Result<HashSet<i64>, rusqlite::Error> {
+    if history_window == 0 {
+        return Ok(HashSet::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id
+         FROM messages
+         WHERE session_id = ?1
+           AND (role = 'user' OR role = 'assistant')
+         ORDER BY id DESC
+         LIMIT ?2",
+    )?;
+    let mapped = stmt.query_map(params![session_id, history_window as i64], |row| row.get(0))?;
+    let mut ids = HashSet::new();
+    for row in mapped {
+        ids.insert(row?);
+    }
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::has_recent_long_term_fact;
+    use super::{fetch_recent_short_term_ids, has_recent_long_term_fact};
     use rusqlite::Connection;
 
     #[test]
@@ -898,5 +1094,49 @@ mod tests {
         )
         .expect("query should succeed");
         assert!(!too_old);
+    }
+
+    #[test]
+    fn recent_short_term_ids_returns_newest_user_and_assistant_only() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                username TEXT,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("messages table should be created");
+
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','user','one','u','t')",
+            [],
+        )
+        .expect("insert should succeed");
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','tool','ignore',NULL,'t')",
+            [],
+        )
+        .expect("insert should succeed");
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','assistant','two',NULL,'t')",
+            [],
+        )
+        .expect("insert should succeed");
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','user','three','u','t')",
+            [],
+        )
+        .expect("insert should succeed");
+
+        let ids = fetch_recent_short_term_ids(&conn, "s1", 2).expect("query should succeed");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&4));
+        assert!(ids.contains(&3));
     }
 }

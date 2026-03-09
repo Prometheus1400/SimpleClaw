@@ -62,6 +62,7 @@ impl AgentInvoker for DirectAgentInvoker {
             agent_id: &request.target_agent_id,
             session_id: &request.session_id,
             max_steps: effective_max_steps,
+            history_messages: target_config.effective_execution.history_messages as usize,
             memory,
             workspace_root: target_config.workspace_root.clone(),
             user_id: request.user_id,
@@ -107,6 +108,7 @@ impl AgentInvoker for DirectAgentInvoker {
             max_steps: request
                 .max_steps_override
                 .unwrap_or(current_config.effective_execution.max_steps),
+            history_messages: current_config.effective_execution.history_messages as usize,
             memory,
             workspace_root: current_config.workspace_root.clone(),
             user_id: request.user_id,

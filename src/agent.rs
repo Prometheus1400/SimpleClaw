@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::channels::InboundMessage;
 use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, TransparencyConfig};
 use crate::error::FrameworkError;
+use crate::memory::MemoryStoreScope;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryRecallHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
@@ -142,6 +143,7 @@ impl AgentRuntime {
             agent_id: &self.config.agent_id,
             session_id: memory_session_id,
             max_steps: effective_max_steps,
+            history_messages: self.config.effective_execution.history_messages as usize,
             memory: memory.clone(),
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
@@ -265,7 +267,14 @@ impl AgentRuntime {
         }
 
         let hits = match memory
-            .query_recall_hits(session_id, trimmed_query, &config)
+            .query_recall_hits(
+                session_id,
+                trimmed_query,
+                &config,
+                self.config.effective_execution.history_messages as usize,
+                MemoryStoreScope::Combined,
+                true,
+            )
             .await
         {
             Ok(items) => items,
@@ -351,6 +360,9 @@ fn memory_hit_label(hit: &MemoryRecallHit) -> String {
     match hit.store {
         MemoryHitStore::LongTerm => {
             format!("long-term/{}", hit.kind.as_deref().unwrap_or("general"))
+        }
+        MemoryHitStore::ShortTerm => {
+            format!("short-term/{}", hit.kind.as_deref().unwrap_or("message"))
         }
     }
 }

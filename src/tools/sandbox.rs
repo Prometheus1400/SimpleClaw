@@ -337,6 +337,7 @@ mod tests {
         ToolExecEnv {
             agent_id: "test-agent".to_owned(),
             memory: Arc::new(memory),
+            history_messages: 10,
             workspace_root: PathBuf::from("."),
             user_id: "u".to_owned(),
             owner_ids: vec![],

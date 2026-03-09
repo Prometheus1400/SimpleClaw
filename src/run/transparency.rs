@@ -324,11 +324,8 @@ mod tests {
             }],
             memory_hits: None,
         };
-        let rendered = render_for_style(
-            "base reply",
-            &summary,
-            TransparencyRenderStyle::PlainFooter,
-        );
+        let rendered =
+            render_for_style("base reply", &summary, TransparencyRenderStyle::PlainFooter);
         assert_eq!(rendered, "base reply\n---\ntools: [clock ok×1]");
     }
 

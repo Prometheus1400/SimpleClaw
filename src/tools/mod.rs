@@ -93,6 +93,7 @@ pub struct CompletionRoute {
 pub(crate) struct ToolExecEnv {
     pub agent_id: String,
     pub memory: DynMemory,
+    pub history_messages: usize,
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
