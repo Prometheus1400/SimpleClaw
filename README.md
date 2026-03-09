@@ -71,8 +71,9 @@ flowchart LR
 - `ProcessManager` (`src/tools/mod.rs`): background process lifecycle + completion watcher that re-injects synthetic inbound events.
 
 ### Provider and memory
-- `ProviderFactory` / `ProviderRegistry` (`src/providers/registry.rs`): provider instantiation from config (Gemini currently).
-- `GeminiProvider` (`src/providers/gemini.rs`): `generateContent` adapter, including function declarations and parsing tool calls.
+- `ProviderFactory` / `ProviderRegistry` (`src/providers/registry.rs`): provider instantiation from config (`gemini`, `moonshot`).
+- `GeminiProvider` (`src/providers/gemini.rs`): `generateContent` adapter.
+- `MoonshotCompatibleProvider` (`src/providers/moonshot_compatible.rs`): `chat/completions` adapter used by `moonshot`.
 - `MemoryStore` (`src/memory/mod.rs`):
   - short-term DB: `sessions`, `messages`
   - long-term DB: `ltm_facts`, `ltm_facts_vec`
@@ -206,6 +207,24 @@ Agent-specific behavior is embedded in `agents.list[*]` entries:
 Secrets in config must be `${secret:<name>}` and resolve from:
 1. environment variable `<name>`
 2. `~/.simpleclaw/secrets.yaml`
+
+Provider entries support auth `mode`:
+- `mode: api_key` (default): requires `api_key: "${secret:<name>}"`
+- `mode: oauth`: reserved for future providers (currently not supported by moonshot).
+
+Example provider entries:
+
+```yaml
+providers:
+  default: moonshot_primary
+  entries:
+    moonshot_primary:
+      kind: moonshot
+      model: kimi-k2
+      api_base: https://api.moonshot.ai/v1
+      mode: api_key
+      api_key: "${secret:moonshot_api_key}"
+```
 
 ## Storage Layout
 

@@ -30,7 +30,10 @@ pub use execution::{AgentExecutionOverrides, MemoryRecallOverrides};
 #[allow(unused_imports)]
 pub use execution::{ExecutionConfig, LogLevel, MemoryRecallConfig, TransparencyConfig};
 pub use gateway::{ChannelConfig, ChannelOutputMode, GatewayChannelKind, GatewayConfig};
-pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, ProvidersConfig};
+pub use providers::{
+    GeminiProviderConfig, MoonshotProviderConfig, OAuthProviderConfig, ProviderAuthMode,
+    ProviderEntryConfig, ProviderKind, ProvidersConfig,
+};
 #[allow(unused_imports)]
 pub use routing::RoutingConfig;
 #[allow(unused_imports)]
@@ -920,7 +923,7 @@ routing:
                 .api_key
                 .as_ref()
                 .and_then(|secret| secret.exposed()),
-            None => None,
+            _ => None,
         };
         assert_eq!(api_key, Some("provider-secret"));
         let channel = global

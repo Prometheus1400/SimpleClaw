@@ -29,7 +29,11 @@ impl GeminiProvider {
     }
 
     pub fn from_entry(entry: &ProviderEntryConfig) -> Result<Self, FrameworkError> {
-        let ProviderEntryConfig::Gemini(config) = entry;
+        let ProviderEntryConfig::Gemini(config) = entry else {
+            return Err(FrameworkError::Config(
+                "gemini provider received wrong provider config variant".to_owned(),
+            ));
+        };
         Ok(Self::from_config(config.clone()))
     }
 
