@@ -511,14 +511,29 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::{
-        INBOUND_ACK_REACTION, dispatch_inbound_with_ack, query_long_memory, query_short_memory,
+        INBOUND_ACK_REACTION, dispatch_inbound_with_ack, handle_inbound_once, query_long_memory,
+        query_short_memory,
     };
+    use crate::agent::{AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext};
     use crate::channels::{Channel, ChannelInbound, InboundMessage};
-    use crate::config::{GatewayChannelKind, RoutingConfig};
+    use crate::config::{
+        AgentInnerConfig, ExecutionDefaultsConfig, GatewayChannelKind, MemoryRecallConfig,
+        RoutingConfig,
+    };
     use crate::error::FrameworkError;
     use crate::gateway::Gateway;
+    use crate::memory::{
+        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory, MemoryRecallHit,
+        MemoryStoreScope, StoredMessage, StoredRole,
+    };
+    use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
+    use crate::react::ReactLoop;
+    use crate::tools::skill::SkillFactory;
     use crate::run::session::{SessionHandler, SessionWorkerCoordinator};
     use crate::telemetry::next_trace_id;
+    use crate::tools::{AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory};
+
+    use super::composition::RuntimeState;
 
     fn temp_db_path(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -625,6 +640,247 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeMemory {
+        appended: Mutex<Vec<(String, StoredRole, String, Option<String>)>>,
+    }
+
+    impl FakeMemory {
+        async fn appended(&self) -> Vec<(String, StoredRole, String, Option<String>)> {
+            self.appended.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl Memory for FakeMemory {
+        async fn append_message(
+            &self,
+            session_id: &str,
+            role: StoredRole,
+            content: &str,
+            username: Option<&str>,
+        ) -> Result<(), FrameworkError> {
+            self.appended.lock().await.push((
+                session_id.to_owned(),
+                role,
+                content.to_owned(),
+                username.map(str::to_owned),
+            ));
+            Ok(())
+        }
+
+        async fn semantic_query_combined(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _top_k: usize,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+        ) -> Result<Vec<String>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn query_recall_hits(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _config: &MemoryRecallConfig,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+            _prefer_long_term: bool,
+        ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn semantic_forget_long_term(
+            &self,
+            _query: &str,
+            _similarity_threshold: f32,
+            _max_matches: usize,
+            _kind_filter: Option<&str>,
+            _commit: bool,
+        ) -> Result<LongTermForgetResult, FrameworkError> {
+            Ok(LongTermForgetResult {
+                matches: Vec::new(),
+                deleted_count: 0,
+                similarity_threshold: 0.0,
+                max_matches: 0,
+                kind_filter: None,
+            })
+        }
+
+        async fn recent_messages(
+            &self,
+            _session_id: &str,
+            _limit: usize,
+        ) -> Result<Vec<StoredMessage>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn memorize(
+            &self,
+            _session_id: &str,
+            _content: &str,
+            _kind: &str,
+            _importance: u8,
+        ) -> Result<MemorizeResult, FrameworkError> {
+            Ok(MemorizeResult::Inserted)
+        }
+
+        async fn list_long_term_facts(
+            &self,
+            _kind_filter: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<LongTermFactSummary>, FrameworkError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StaticProvider {
+        reply: Option<String>,
+        error: Option<String>,
+    }
+
+    impl StaticProvider {
+        fn ok(reply: impl Into<String>) -> Self {
+            Self {
+                reply: Some(reply.into()),
+                error: None,
+            }
+        }
+
+        fn err(message: impl Into<String>) -> Self {
+            Self {
+                reply: None,
+                error: Some(message.into()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for StaticProvider {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _history: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            if let Some(err) = &self.error {
+                return Err(FrameworkError::Provider(err.clone()));
+            }
+            Ok(ProviderResponse {
+                output_text: self.reply.clone(),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    struct ForwardProvider {
+        inner: Arc<dyn Provider>,
+    }
+
+    #[async_trait]
+    impl Provider for ForwardProvider {
+        async fn generate(
+            &self,
+            system_prompt: &str,
+            history: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            self.inner.generate(system_prompt, history, tools).await
+        }
+    }
+
+    struct NoopInvoker;
+
+    #[async_trait]
+    impl AgentInvoker for NoopInvoker {
+        async fn invoke_agent(
+            &self,
+            _request: AgentInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Err(FrameworkError::Tool("unexpected invoke_agent".to_owned()))
+        }
+
+        async fn invoke_worker(
+            &self,
+            _request: crate::tools::WorkerInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Err(FrameworkError::Tool("unexpected invoke_worker".to_owned()))
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleChannel {
+        outbound: Mutex<Vec<(String, String)>>,
+        typing_events: Mutex<Vec<String>>,
+        fail_typing: AtomicBool,
+        fail_send: AtomicBool,
+    }
+
+    impl LifecycleChannel {
+        fn with_typing_failure() -> Self {
+            Self {
+                fail_typing: AtomicBool::new(true),
+                ..Default::default()
+            }
+        }
+
+        fn with_send_failure() -> Self {
+            Self {
+                fail_send: AtomicBool::new(true),
+                ..Default::default()
+            }
+        }
+
+        async fn outbound(&self) -> Vec<(String, String)> {
+            self.outbound.lock().await.clone()
+        }
+
+        async fn typing_events(&self) -> Vec<String> {
+            self.typing_events.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl Channel for LifecycleChannel {
+        async fn send_message(
+            &self,
+            channel_id: &str,
+            content: &str,
+        ) -> Result<(), FrameworkError> {
+            self.outbound
+                .lock()
+                .await
+                .push((channel_id.to_owned(), content.to_owned()));
+            if self.fail_send.load(Ordering::Relaxed) {
+                return Err(FrameworkError::Tool("simulated send failure".to_owned()));
+            }
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn broadcast_typing(&self, channel_id: &str) -> Result<(), FrameworkError> {
+            self.typing_events.lock().await.push(channel_id.to_owned());
+            if self.fail_typing.load(Ordering::Relaxed) {
+                return Err(FrameworkError::Tool("simulated typing failure".to_owned()));
+            }
+            Ok(())
+        }
+
+        async fn listen(&self) -> Result<ChannelInbound, FrameworkError> {
+            pending::<Result<ChannelInbound, FrameworkError>>().await
+        }
+    }
+
     #[async_trait]
     impl Channel for AckCaptureChannel {
         async fn send_message(
@@ -686,6 +942,66 @@ mod tests {
         channels.insert(GatewayChannelKind::Discord, channel);
         let (tx, _rx) = mpsc::channel(4);
         Gateway::new(channels, RoutingConfig::default(), tx)
+    }
+
+    fn lifecycle_runtime_state(
+        channel: Arc<LifecycleChannel>,
+        provider: Arc<dyn Provider>,
+        memory: DynMemory,
+    ) -> RuntimeState {
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, channel);
+        let (gateway_tx, _gateway_rx) = mpsc::channel(4);
+        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default(), gateway_tx.clone()));
+        let mut agent_config = AgentInnerConfig::default();
+        agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
+        let runtime_config = AgentRuntimeConfig {
+            agent_id: "default".to_owned(),
+            provider_key: "default".to_owned(),
+            effective_execution: ExecutionDefaultsConfig::default(),
+            owner_ids: vec!["user-1".to_owned()],
+            agent_config,
+            workspace_root: PathBuf::from("/tmp/simpleclaw-run-test"),
+            app_base_dir: PathBuf::from("/tmp/simpleclaw-run-test-app"),
+            system_prompt: "base prompt".to_owned(),
+        };
+        let react_loop = Arc::new(ReactLoop::new(
+            ProviderFactory::from_parts(HashMap::from([(
+                "default".to_owned(),
+                (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
+            )])),
+            default_factory(),
+            SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
+        ));
+        react_loop.set_invoker(Arc::new(NoopInvoker));
+
+        let agents = Arc::new(AgentDirectory::new(
+            HashMap::from([("default".to_owned(), runtime_config.clone())]),
+            HashMap::from([("default".to_owned(), memory)]),
+        ));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        let cron_path = std::env::temp_dir().join(format!("simpleclaw_run_cron_{nanos}.db"));
+        let context = Arc::new(RuntimeContext {
+            react_loop,
+            gateway: Arc::clone(&gateway),
+            agents,
+            process_manager: Arc::new(ProcessManager::new()),
+            cron_store: Arc::new(std::sync::Mutex::new(
+                crate::tools::builtin::cron::CronStore::open(&cron_path)
+                    .expect("cron store should open"),
+            )),
+            completion_tx: gateway_tx,
+            safe_error_reply: "safe fallback".to_owned(),
+        });
+
+        RuntimeState {
+            gateway,
+            runtimes: HashMap::from([("default".to_owned(), AgentRuntime::new(runtime_config))]),
+            context,
+        }
     }
 
     fn test_handler() -> (
@@ -775,5 +1091,119 @@ mod tests {
             .await
             .expect("message should still be processed");
         assert_eq!(channel.reactions().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_sends_config_error_for_unknown_agent() {
+        let channel = Arc::new(LifecycleChannel::default());
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, channel.clone());
+        let (gateway_tx, _gateway_rx) = mpsc::channel(4);
+        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default(), gateway_tx.clone()));
+        let context = Arc::new(RuntimeContext {
+            react_loop: Arc::new(ReactLoop::new(
+                ProviderFactory::from_parts(HashMap::new()),
+                default_factory(),
+                SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
+            )),
+            gateway: Arc::clone(&gateway),
+            agents: Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
+            process_manager: Arc::new(ProcessManager::new()),
+            cron_store: Arc::new(std::sync::Mutex::new(
+                crate::tools::builtin::cron::CronStore::open(
+                    &std::env::temp_dir().join("simpleclaw_run_unknown_agent_cron.db"),
+                )
+                .expect("cron store should open"),
+            )),
+            completion_tx: gateway_tx,
+            safe_error_reply: "safe fallback".to_owned(),
+        });
+        let state = RuntimeState {
+            gateway,
+            runtimes: HashMap::new(),
+            context,
+        };
+        let inbound = inbound_message();
+
+        handle_inbound_once(&state, inbound).await.expect("handler should not fail");
+
+        let outbound = channel.outbound().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(
+            outbound[0].1,
+            "I couldn't route that message due to a configuration error."
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_records_passive_context_without_outbound_reply() {
+        let channel = Arc::new(LifecycleChannel::default());
+        let memory_impl = Arc::new(FakeMemory::default());
+        let memory: DynMemory = memory_impl.clone();
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("unused"));
+        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+        let mut inbound = inbound_message();
+        inbound.invoke = false;
+
+        handle_inbound_once(&state, inbound.clone())
+            .await
+            .expect("handler should succeed");
+
+        let appended = memory_impl.appended().await;
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].1, StoredRole::User);
+        assert_eq!(appended[0].2, inbound.content);
+        assert!(channel.outbound().await.is_empty());
+        assert!(channel.typing_events().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_continues_after_typing_failure_and_sends_reply() {
+        let channel = Arc::new(LifecycleChannel::with_typing_failure());
+        let memory_impl = Arc::new(FakeMemory::default());
+        let memory: DynMemory = memory_impl.clone();
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("hello back"));
+        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed");
+
+        assert_eq!(channel.typing_events().await.len(), 1);
+        let outbound = channel.outbound().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].1, "hello back");
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_sends_safe_reply_when_runtime_fails() {
+        let channel = Arc::new(LifecycleChannel::default());
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::err("boom"));
+        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should swallow runtime failure");
+
+        let outbound = channel.outbound().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].1, "safe fallback");
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_swallows_channel_send_failure_after_successful_run() {
+        let channel = Arc::new(LifecycleChannel::with_send_failure());
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("reply"));
+        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed despite send failure");
+
+        let outbound = channel.outbound().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].1, "reply");
     }
 }
