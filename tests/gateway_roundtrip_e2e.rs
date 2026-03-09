@@ -385,7 +385,6 @@ async fn gateway_listener_roundtrip_invokes_dm_without_requiring_mention() {
 }
 
 #[tokio::test]
-#[ignore = "background completion follow-up is not currently reaching the integration harness queue"]
 async fn gateway_roundtrip_processes_background_completion_followup() {
     let config = TestHarnessConfig {
         additional_inbounds_to_process: 1,
