@@ -1,0 +1,35 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use super::defaults::{default_agent_id, default_agents_list};
+use super::execution::AgentConfig;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfig {
+    #[serde(default = "default_agent_id")]
+    pub default: String,
+    #[serde(default = "default_agents_list")]
+    pub list: Vec<AgentEntryConfig>,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            default: default_agent_id(),
+            list: default_agents_list(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEntryConfig {
+    pub id: String,
+    pub name: String,
+    pub workspace: PathBuf,
+    #[serde(flatten)]
+    pub runtime: AgentConfig,
+}
+

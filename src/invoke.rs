@@ -54,9 +54,7 @@ impl AgentInvoker for DirectAgentInvoker {
             .ok_or_else(|| {
                 FrameworkError::Tool(format!("no memory for agent: {}", request.target_agent_id))
             })?;
-        let effective_max_steps = target_config
-            .max_steps
-            .min(target_config.runtime_config.max_steps);
+        let effective_max_steps = target_config.execution_config.defaults.max_steps;
         let params = RunParams {
             provider_key: &target_config.provider_key,
             agent_config: &target_config.agent_config,
@@ -68,7 +66,7 @@ impl AgentInvoker for DirectAgentInvoker {
             sandbox: target_config.agent_config.sandbox.clone(),
             workspace_root: target_config.workspace_root.clone(),
             user_id: request.user_id,
-            owner_ids: target_config.runtime_config.owner_ids.clone(),
+            owner_ids: target_config.execution_config.owner_ids.clone(),
             process_manager: Arc::clone(&self.process_manager),
             completion_tx: None,
             completion_route: None,
@@ -109,14 +107,12 @@ impl AgentInvoker for DirectAgentInvoker {
             system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
             agent_id: "task-worker",
             session_id: &request.session_id,
-            max_steps: current_config
-                .max_steps
-                .min(current_config.runtime_config.max_steps),
+            max_steps: current_config.execution_config.defaults.max_steps,
             memory,
             sandbox: current_config.agent_config.sandbox.clone(),
             workspace_root: current_config.workspace_root.clone(),
             user_id: request.user_id,
-            owner_ids: current_config.runtime_config.owner_ids.clone(),
+            owner_ids: current_config.execution_config.owner_ids.clone(),
             process_manager: Arc::clone(&self.process_manager),
             completion_tx: None,
             completion_route: None,

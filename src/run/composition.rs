@@ -270,12 +270,11 @@ pub(crate) async fn assemble_runtime_state(
             AgentRuntimeConfig {
                 agent_id: agent.id.clone(),
                 provider_key,
-                runtime_config: loaded.global.runtime.clone(),
+                execution_config: loaded.global.execution.clone(),
                 agent_config,
                 workspace_root: agent.workspace.clone(),
                 app_base_dir: app_paths.base_dir.clone(),
                 system_prompt,
-                max_steps: loaded.global.runtime.max_steps,
             },
         );
     }
@@ -310,8 +309,8 @@ pub(crate) async fn assemble_runtime_state(
         agents: directory,
         process_manager,
         completion_tx: gateway_tx,
-        safe_error_reply: loaded.global.runtime.safe_error_reply.clone(),
-        tool_call_transparency: loaded.global.runtime.tool_call_transparency,
+        safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
+        tool_call_transparency: loaded.global.execution.defaults.tool_call_transparency,
     });
 
     Ok((
