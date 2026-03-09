@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sandbox_runtime::{FilesystemConfig, NetworkConfig, SandboxManager, SandboxRuntimeConfig};
+use tokio::runtime::Builder;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
 
@@ -42,18 +43,8 @@ pub async fn prepare_command_for_exec(
     let init_started = Instant::now();
     debug!(status = "started", "sandbox.init");
 
-    timeout(
-        Duration::from_secs(SANDBOX_INIT_TIMEOUT_SECS),
-        manager.initialize(runtime_cfg),
-    )
-    .await
-    .map_err(|_| {
-        FrameworkError::Tool(format!(
-            "sandbox init timed out after {}s",
-            SANDBOX_INIT_TIMEOUT_SECS
-        ))
-    })?
-    .map_err(|e| FrameworkError::Tool(format!("failed to initialize sandbox runtime: {e}")))?;
+    run_manager_init_with_timeout(Arc::clone(&manager), runtime_cfg, SANDBOX_INIT_TIMEOUT_SECS)
+        .await?;
     debug!(
         status = "completed",
         elapsed_ms = init_started.elapsed().as_millis() as u64,
@@ -62,18 +53,12 @@ pub async fn prepare_command_for_exec(
 
     let wrap_started = Instant::now();
     debug!(status = "started", "sandbox.wrap");
-    let wrapped = timeout(
-        Duration::from_secs(SANDBOX_WRAP_TIMEOUT_SECS),
-        manager.wrap_with_sandbox(user_command, Some("/bin/bash"), None),
+    let wrapped = run_manager_wrap_with_timeout(
+        Arc::clone(&manager),
+        user_command.to_owned(),
+        SANDBOX_WRAP_TIMEOUT_SECS,
     )
-    .await
-    .map_err(|_| {
-        FrameworkError::Tool(format!(
-            "sandbox wrap timed out after {}s",
-            SANDBOX_WRAP_TIMEOUT_SECS
-        ))
-    })?
-    .map_err(|e| FrameworkError::Tool(format!("failed to wrap command in sandbox runtime: {e}")))?;
+    .await?;
     debug!(
         status = "completed",
         elapsed_ms = wrap_started.elapsed().as_millis() as u64,
@@ -84,6 +69,55 @@ pub async fn prepare_command_for_exec(
         wrapped_command: wrapped,
         manager,
     })
+}
+
+async fn run_manager_init_with_timeout(
+    manager: Arc<SandboxManager>,
+    runtime_cfg: SandboxRuntimeConfig,
+    timeout_secs: u64,
+) -> Result<(), FrameworkError> {
+    let join = tokio::task::spawn_blocking(move || {
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| FrameworkError::Tool(format!("failed to create sandbox runtime: {e}")))?;
+        rt.block_on(async {
+            manager.initialize(runtime_cfg).await.map_err(|e| {
+                FrameworkError::Tool(format!("failed to initialize sandbox runtime: {e}"))
+            })
+        })
+    });
+
+    timeout(Duration::from_secs(timeout_secs), join)
+        .await
+        .map_err(|_| FrameworkError::Tool(format!("sandbox init timed out after {timeout_secs}s")))?
+        .map_err(|e| FrameworkError::Tool(format!("sandbox runtime join failed: {e}")))?
+}
+
+async fn run_manager_wrap_with_timeout(
+    manager: Arc<SandboxManager>,
+    command: String,
+    timeout_secs: u64,
+) -> Result<String, FrameworkError> {
+    let join = tokio::task::spawn_blocking(move || {
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| FrameworkError::Tool(format!("failed to create sandbox runtime: {e}")))?;
+        rt.block_on(async {
+            manager
+                .wrap_with_sandbox(&command, Some("/bin/bash"), None)
+                .await
+                .map_err(|e| {
+                    FrameworkError::Tool(format!("failed to wrap command in sandbox runtime: {e}"))
+                })
+        })
+    });
+
+    timeout(Duration::from_secs(timeout_secs), join)
+        .await
+        .map_err(|_| FrameworkError::Tool(format!("sandbox wrap timed out after {timeout_secs}s")))?
+        .map_err(|e| FrameworkError::Tool(format!("sandbox runtime join failed: {e}")))?
 }
 
 fn build_runtime_config(
