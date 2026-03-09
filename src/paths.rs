@@ -11,6 +11,7 @@ pub struct AppPaths {
     pub secrets_path: PathBuf,
     pub db_path: PathBuf,
     pub long_term_db_path: PathBuf,
+    pub cron_db_path: PathBuf,
     pub fastembed_cache_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub log_path: PathBuf,
@@ -34,6 +35,7 @@ impl AppPaths {
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: db_dir.join("lraf.db"),
             long_term_db_path: db_dir.join("lraf_long_term.db"),
+            cron_db_path: db_dir.join("cron.db"),
             fastembed_cache_dir: base_dir.join(".fastembed_cache"),
             log_path: logs_dir.join("service.log"),
             pid_path: run_dir.join("service.pid"),
@@ -91,6 +93,10 @@ mod tests {
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str());
         assert_eq!(db_dir_name, Some("db"));
+        assert_eq!(
+            paths.cron_db_path.file_name().and_then(|s| s.to_str()),
+            Some("cron.db")
+        );
         assert_eq!(
             paths.logs_dir.file_name().and_then(|s| s.to_str()),
             Some("logs")

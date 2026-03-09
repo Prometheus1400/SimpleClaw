@@ -35,10 +35,10 @@ pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, Pro
 pub use routing::RoutingConfig;
 #[allow(unused_imports)]
 pub use tools::{
-    ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemorizeToolConfig,
-    MemoryToolConfig, ProcessToolConfig, ReactToolConfig, ReadToolConfig, SkillsToolConfig,
-    SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig,
-    WebSearchProvider, WebSearchToolConfig,
+    ClockToolConfig, CronToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig,
+    MemorizeToolConfig, MemoryToolConfig, ProcessToolConfig, ReactToolConfig, ReadToolConfig,
+    SkillsToolConfig, SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig,
+    WebFetchToolConfig, WebSearchProvider, WebSearchToolConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -196,6 +196,7 @@ mod tests {
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: db_dir.join("lraf.db"),
             long_term_db_path: db_dir.join("lraf_long_term.db"),
+            cron_db_path: db_dir.join("cron.db"),
             fastembed_cache_dir: base_dir.join(".fastembed_cache"),
             log_path: logs_dir.join("service.log"),
             pid_path: run_dir.join("service.pid"),
@@ -552,6 +553,7 @@ channels:
                 "task".to_owned(),
                 "web_search".to_owned(),
                 "clock".to_owned(),
+                "cron".to_owned(),
                 "react".to_owned(),
                 "web_fetch".to_owned(),
                 "read".to_owned(),

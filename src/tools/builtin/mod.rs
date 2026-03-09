@@ -1,5 +1,6 @@
 mod clock;
 mod common;
+pub(crate) mod cron;
 mod edit;
 pub(crate) mod exec;
 mod forget;

@@ -19,6 +19,7 @@ use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
 use crate::providers::ProviderFactory;
 use crate::react::ReactLoop;
+use crate::tools::builtin::cron::{CronStore, CronTool};
 use crate::tools::skill::SkillFactory;
 use crate::tools::{ProcessManager, ToolFactory, default_factory};
 
@@ -288,7 +289,12 @@ pub(crate) async fn assemble_runtime_state(
         );
     }
 
-    let tool_factory = deps.tool_factory_builder.create_tool_factory();
+    let cron_store = Arc::new(std::sync::Mutex::new(CronStore::open(
+        &app_paths.cron_db_path,
+    )?));
+
+    let mut tool_factory = deps.tool_factory_builder.create_tool_factory();
+    tool_factory.register_builtin(Box::new(CronTool::new(Arc::clone(&cron_store))));
     let react_loop =
         deps.react_loop_factory
             .create_react_loop(provider_factory, tool_factory, skill_factory);
@@ -322,6 +328,7 @@ pub(crate) async fn assemble_runtime_state(
         gateway: Arc::clone(&gateway),
         agents: directory,
         process_manager,
+        cron_store,
         completion_tx: gateway_tx,
         safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
     });

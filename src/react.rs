@@ -255,6 +255,7 @@ mod tests {
             "task",
             "web_search",
             "clock",
+            "cron",
             "react",
             "web_fetch",
             "read",
