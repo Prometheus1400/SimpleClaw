@@ -324,7 +324,6 @@ pub(crate) async fn assemble_runtime_state(
         process_manager,
         completion_tx: gateway_tx,
         safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
-        tool_call_transparency: loaded.global.execution.defaults.transparency.tool_calls,
     });
 
     Ok((

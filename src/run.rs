@@ -129,10 +129,14 @@ pub(crate) async fn handle_inbound_once(
                 );
                 return Ok(());
             }
+            let transparency = runtime.transparency();
             let outbound = transparency::render_tool_call_transparency(
                 &outcome.reply,
                 &outcome.tool_calls,
-                state.context.tool_call_transparency,
+                transparency.tool_calls,
+                transparency.memory_recall,
+                outcome.memory_recall_used,
+                outcome.memory_recall_hits,
                 inbound.source_channel,
             );
             if let Err(err) = state.gateway.send_message(&inbound, &outbound).await {

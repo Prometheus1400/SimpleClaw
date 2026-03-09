@@ -316,9 +316,7 @@ impl MemoryStore {
             long_term_weight: 1.0,
             max_chars: 4000,
         };
-        let hits = self
-            .query_recall_hits(session_id, query, &config)
-            .await?;
+        let hits = self.query_recall_hits(session_id, query, &config).await?;
         Ok(hits
             .into_iter()
             .map(|hit| match hit.store {

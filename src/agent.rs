@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig};
+use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, TransparencyConfig};
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryRecallHit, StoredRole};
 use crate::prompt::PromptAssembler;
@@ -68,7 +68,6 @@ pub struct RuntimeContext {
     pub process_manager: Arc<ProcessManager>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
     pub safe_error_reply: String,
-    pub tool_call_transparency: bool,
 }
 
 pub struct AgentRuntime {
@@ -78,6 +77,10 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     pub fn new(config: AgentRuntimeConfig) -> Self {
         Self { config }
+    }
+
+    pub fn transparency(&self) -> TransparencyConfig {
+        self.config.effective_execution.transparency
     }
 
     #[tracing::instrument(
@@ -124,10 +127,10 @@ impl AgentRuntime {
             .await?;
 
         let history = self.seeded_history(&memory, memory_session_id).await?;
-        let system_prompt = self
+        let prompt_build = self
             .build_turn_system_prompt(&memory, memory_session_id, &inbound.content)
             .await;
-        let system_prompt = inject_caller_context(&system_prompt, inbound);
+        let system_prompt = inject_caller_context(&prompt_build.system_prompt, inbound);
         debug!(status = "history_loaded", "agent context");
 
         let effective_max_steps = self.config.effective_execution.max_steps;
@@ -159,7 +162,7 @@ impl AgentRuntime {
             source_message_id: inbound.source_message_id.clone(),
         };
 
-        let outcome = match context.react_loop.run(params, history).await {
+        let mut outcome = match context.react_loop.run(params, history).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 error!(
@@ -172,6 +175,8 @@ impl AgentRuntime {
                 return Err(err);
             }
         };
+        outcome.memory_recall_used = prompt_build.memory_recall_hits > 0;
+        outcome.memory_recall_hits = prompt_build.memory_recall_hits;
 
         if !is_no_reply(&outcome.reply) {
             memory
@@ -248,19 +253,15 @@ impl AgentRuntime {
         memory: &DynMemory,
         session_id: &str,
         query: &str,
-    ) -> String {
-        let config = self
-            .config
-            .effective_execution
-            .memory_recall
-            .normalized();
+    ) -> PromptBuild {
+        let config = self.config.effective_execution.memory_recall.normalized();
         if !config.enabled {
-            return self.config.system_prompt.clone();
+            return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
         let trimmed_query = query.trim();
         if trimmed_query.is_empty() {
-            return self.config.system_prompt.clone();
+            return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
         let hits = match memory
@@ -275,24 +276,48 @@ impl AgentRuntime {
                     error = %err,
                     "memory recall query"
                 );
-                return self.config.system_prompt.clone();
+                return PromptBuild::without_recall(self.config.system_prompt.clone());
             }
         };
 
         if hits.is_empty() {
             debug!(status = "completed", "memory recall");
-            return self.config.system_prompt.clone();
+            return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
         debug!(status = "completed", "memory recall");
 
         let section = format_recalled_memory(&hits, config.max_chars as usize);
         if section.is_empty() {
-            return self.config.system_prompt.clone();
+            return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
-        format!("{}\n\n{}", self.config.system_prompt, section)
+        PromptBuild {
+            system_prompt: format!("{}\n\n{}", self.config.system_prompt, section),
+            memory_recall_hits: count_formatted_recalled_hits(&section),
+        }
     }
+}
+
+struct PromptBuild {
+    system_prompt: String,
+    memory_recall_hits: usize,
+}
+
+impl PromptBuild {
+    fn without_recall(system_prompt: String) -> Self {
+        Self {
+            system_prompt,
+            memory_recall_hits: 0,
+        }
+    }
+}
+
+fn count_formatted_recalled_hits(section: &str) -> usize {
+    section
+        .lines()
+        .filter(|line| line.starts_with(char::is_numeric))
+        .count()
 }
 
 fn format_recalled_memory(hits: &[MemoryRecallHit], max_chars: usize) -> String {

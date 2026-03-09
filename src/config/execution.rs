@@ -51,9 +51,7 @@ impl ExecutionDefaultsConfig {
                 enabled: memory_overrides
                     .enabled
                     .unwrap_or(self.memory_recall.enabled),
-                top_k: memory_overrides
-                    .top_k
-                    .unwrap_or(self.memory_recall.top_k),
+                top_k: memory_overrides.top_k.unwrap_or(self.memory_recall.top_k),
                 min_score: memory_overrides
                     .min_score
                     .unwrap_or(self.memory_recall.min_score),
@@ -76,6 +74,11 @@ impl ExecutionDefaultsConfig {
                     .as_ref()
                     .and_then(|value| value.tool_calls)
                     .unwrap_or(self.transparency.tool_calls),
+                memory_recall: overrides
+                    .transparency
+                    .as_ref()
+                    .and_then(|value| value.memory_recall)
+                    .unwrap_or(self.transparency.memory_recall),
             },
             memory_recall,
             safe_error_reply: overrides
@@ -90,11 +93,15 @@ impl ExecutionDefaultsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct TransparencyConfig {
     pub tool_calls: bool,
+    pub memory_recall: bool,
 }
 
 impl Default for TransparencyConfig {
     fn default() -> Self {
-        Self { tool_calls: false }
+        Self {
+            tool_calls: false,
+            memory_recall: false,
+        }
     }
 }
 
@@ -178,6 +185,7 @@ pub struct AgentExecutionOverrides {
 #[serde(default, deny_unknown_fields)]
 pub struct TransparencyOverrides {
     pub tool_calls: Option<bool>,
+    pub memory_recall: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -205,6 +213,7 @@ mod tests {
             history_messages: None,
             transparency: Some(TransparencyOverrides {
                 tool_calls: Some(true),
+                memory_recall: Some(true),
             }),
             memory_recall: Some(MemoryRecallOverrides {
                 enabled: Some(false),
@@ -220,11 +229,9 @@ mod tests {
         assert_eq!(merged.max_steps, 42);
         assert_eq!(merged.history_messages, defaults.history_messages);
         assert!(merged.transparency.tool_calls);
+        assert!(merged.transparency.memory_recall);
         assert!(!merged.memory_recall.enabled);
-        assert_eq!(
-            merged.memory_recall.top_k,
-            defaults.memory_recall.top_k
-        );
+        assert_eq!(merged.memory_recall.top_k, defaults.memory_recall.top_k);
         assert!((merged.memory_recall.min_score - 0.9).abs() < f32::EPSILON);
         assert_eq!(
             merged.memory_recall.long_term_weight,
@@ -240,7 +247,14 @@ mod tests {
         let merged = defaults.merge_with_overrides(&AgentExecutionOverrides::default());
         assert_eq!(merged.max_steps, defaults.max_steps);
         assert_eq!(merged.history_messages, defaults.history_messages);
-        assert_eq!(merged.transparency.tool_calls, defaults.transparency.tool_calls);
+        assert_eq!(
+            merged.transparency.tool_calls,
+            defaults.transparency.tool_calls
+        );
+        assert_eq!(
+            merged.transparency.memory_recall,
+            defaults.transparency.memory_recall
+        );
         assert_eq!(
             merged.memory_recall.long_term_weight,
             defaults.memory_recall.long_term_weight

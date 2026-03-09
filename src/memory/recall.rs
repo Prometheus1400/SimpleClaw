@@ -30,18 +30,12 @@ pub(super) fn rank_recall_hits(
     let mut out = Vec::new();
     for item in candidates {
         if item.raw_similarity < normalized_config.min_score {
-            trace!(
-                status = "filtered_by_min_score",
-                "memory recall candidate"
-            );
+            trace!(status = "filtered_by_min_score", "memory recall candidate");
             continue;
         }
         let key = normalize_memory_key(&item.content);
         if key.is_empty() {
-            trace!(
-                status = "filtered_empty_content",
-                "memory recall candidate"
-            );
+            trace!(status = "filtered_empty_content", "memory recall candidate");
             continue;
         }
         if !dedupe.insert(key) {

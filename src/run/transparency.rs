@@ -6,15 +6,24 @@ use crate::dispatch::ToolExecutionResult;
 pub(super) fn render_tool_call_transparency(
     reply: &str,
     tool_calls: &[ToolExecutionResult],
-    enabled: bool,
+    tool_calls_enabled: bool,
+    memory_recall_enabled: bool,
+    memory_recall_used: bool,
+    memory_recall_hits: usize,
     channel_kind: GatewayChannelKind,
 ) -> String {
-    if !enabled || tool_calls.is_empty() {
+    let summary_lines = summary_lines(
+        tool_calls,
+        tool_calls_enabled,
+        memory_recall_enabled,
+        memory_recall_used,
+        memory_recall_hits,
+    );
+    if summary_lines.is_empty() {
         return reply.to_owned();
     }
 
     let style = style_for_channel(channel_kind).unwrap_or(TransparencyRenderStyle::PlainFooter);
-    let summary_lines = summary_lines(tool_calls);
     render_for_style(reply, &summary_lines, style)
 }
 
@@ -30,8 +39,21 @@ fn style_for_channel(kind: GatewayChannelKind) -> Option<TransparencyRenderStyle
     }
 }
 
-fn summary_lines(tool_calls: &[ToolExecutionResult]) -> Vec<String> {
-    vec![tool_summary_line(tool_calls)]
+fn summary_lines(
+    tool_calls: &[ToolExecutionResult],
+    tool_calls_enabled: bool,
+    memory_recall_enabled: bool,
+    memory_recall_used: bool,
+    memory_recall_hits: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if tool_calls_enabled && !tool_calls.is_empty() {
+        lines.push(tool_summary_line(tool_calls));
+    }
+    if memory_recall_enabled && memory_recall_used {
+        lines.push(memory_recall_summary_line(memory_recall_hits));
+    }
+    lines
 }
 
 fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
@@ -71,6 +93,10 @@ fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
     }
 }
 
+fn memory_recall_summary_line(hits: usize) -> String {
+    format!("memory_recall: used (hits={hits})")
+}
+
 fn flatten_tool_calls(tool_calls: &[ToolExecutionResult]) -> Vec<&ToolExecutionResult> {
     let mut flattened = Vec::new();
     for call in tool_calls {
@@ -79,10 +105,7 @@ fn flatten_tool_calls(tool_calls: &[ToolExecutionResult]) -> Vec<&ToolExecutionR
     flattened
 }
 
-fn append_flattened<'a>(
-    call: &'a ToolExecutionResult,
-    out: &mut Vec<&'a ToolExecutionResult>,
-) {
+fn append_flattened<'a>(call: &'a ToolExecutionResult, out: &mut Vec<&'a ToolExecutionResult>) {
     out.push(call);
     for child in &call.nested_tool_calls {
         append_flattened(child, out);
@@ -123,25 +146,27 @@ mod tests {
     use crate::config::GatewayChannelKind;
     use crate::dispatch::ToolExecutionResult;
 
+    fn render(reply: &str, calls: &[ToolExecutionResult], tool_calls_enabled: bool) -> String {
+        render_tool_call_transparency(
+            reply,
+            calls,
+            tool_calls_enabled,
+            false,
+            false,
+            0,
+            GatewayChannelKind::Discord,
+        )
+    }
+
     #[test]
     fn off_mode_returns_reply_unchanged() {
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &[],
-            false,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &[], false);
         assert_eq!(rendered, "base reply");
     }
 
     #[test]
     fn enabled_mode_with_no_calls_returns_reply_unchanged() {
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &[],
-            true,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &[], true);
         assert_eq!(rendered, "base reply");
     }
 
@@ -156,12 +181,7 @@ mod tests {
             tool_call_id: None,
             nested_tool_calls: Vec::new(),
         }];
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &calls,
-            true,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &calls, true);
         assert!(rendered.contains("\n-# tools: [clock okx1]"));
     }
 
@@ -187,12 +207,7 @@ mod tests {
                 nested_tool_calls: Vec::new(),
             },
         ];
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &calls,
-            true,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &calls, true);
         assert!(rendered.contains("-# tools: [clock okx1 errx1]"));
     }
 
@@ -215,12 +230,7 @@ mod tests {
                 nested_tool_calls: Vec::new(),
             }],
         }];
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &calls,
-            true,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &calls, true);
         assert!(rendered.contains("-# tools: [web\\_fetch errx1] [clock okx1]"));
     }
 
@@ -235,12 +245,7 @@ mod tests {
             tool_call_id: None,
             nested_tool_calls: Vec::new(),
         }];
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &calls,
-            true,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &calls, true);
         assert!(rendered.contains("-# tools: [web\\_fetch okx1]"));
         assert!(!rendered.contains("-# tools: [web_fetch okx1]"));
     }
@@ -274,13 +279,7 @@ mod tests {
                 nested_tool_calls: Vec::new(),
             }],
         }];
-
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &calls,
-            true,
-            GatewayChannelKind::Discord,
-        );
+        let rendered = render("base reply", &calls, true);
         assert!(rendered.contains("-# tools: [summon okx1] [clock okx1]"));
     }
 
@@ -311,12 +310,59 @@ mod tests {
                 }],
             }],
         }];
+        let rendered = render("base reply", &calls, true);
+        assert!(rendered.contains("-# tools: [task okx1] [summon okx1] [exec okx1]"));
+    }
+
+    #[test]
+    fn memory_recall_transparency_renders_used_with_hits() {
+        let rendered = render_tool_call_transparency(
+            "base reply",
+            &[],
+            false,
+            true,
+            true,
+            2,
+            GatewayChannelKind::Discord,
+        );
+        assert!(rendered.contains("-# memory\\_recall: used (hits=2)"));
+    }
+
+    #[test]
+    fn memory_recall_transparency_omits_line_when_not_used() {
+        let rendered = render_tool_call_transparency(
+            "base reply",
+            &[],
+            false,
+            true,
+            false,
+            0,
+            GatewayChannelKind::Discord,
+        );
+        assert_eq!(rendered, "base reply");
+    }
+
+    #[test]
+    fn memory_recall_line_can_render_with_tool_summary() {
+        let calls = vec![ToolExecutionResult {
+            name: "clock".to_owned(),
+            args_json: "{}".to_owned(),
+            output: "ok".to_owned(),
+            success: true,
+            elapsed_ms: 1,
+            tool_call_id: None,
+            nested_tool_calls: Vec::new(),
+        }];
         let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
             true,
+            true,
+            true,
+            1,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# tools: [task okx1] [summon okx1] [exec okx1]"));
+        assert!(rendered.contains("-# tools: [clock okx1]"));
+        assert!(rendered.contains("-# memory\\_recall: used (hits=1)"));
     }
 }

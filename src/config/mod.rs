@@ -450,6 +450,7 @@ memory_recall:
     fn execution_defaults_tool_call_transparency_defaults_off() {
         let execution = ExecutionConfig::default();
         assert!(!execution.defaults.transparency.tool_calls);
+        assert!(!execution.defaults.transparency.memory_recall);
     }
 
     #[test]
@@ -457,9 +458,11 @@ memory_recall:
         let yaml = r#"
 transparency:
   tool_calls: true
+  memory_recall: true
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml).expect("valid yaml");
         assert!(parsed.transparency.tool_calls);
+        assert!(parsed.transparency.memory_recall);
     }
 
     #[test]
