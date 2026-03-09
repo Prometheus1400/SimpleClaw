@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 
@@ -13,17 +13,16 @@ use crate::tools::{
 /// Implements agent-to-agent invocation by looking up configs in the
 /// [`AgentDirectory`] and recursing through the [`ReactLoop`].
 ///
-/// Constructed once at composition time and injected into `ReactLoop`
-/// via [`ReactLoop::set_invoker`].
+/// Constructed once at composition time and held by [`ReactLoop`].
 pub(crate) struct DirectAgentInvoker {
-    react_loop: Arc<ReactLoop>,
+    react_loop: Weak<ReactLoop>,
     agents: Arc<AgentDirectory>,
     process_manager: Arc<ProcessManager>,
 }
 
 impl DirectAgentInvoker {
     pub fn new(
-        react_loop: Arc<ReactLoop>,
+        react_loop: Weak<ReactLoop>,
         agents: Arc<AgentDirectory>,
         process_manager: Arc<ProcessManager>,
     ) -> Self {
@@ -74,6 +73,8 @@ impl AgentInvoker for DirectAgentInvoker {
             source_message_id: None,
         };
         self.react_loop
+            .upgrade()
+            .ok_or_else(|| FrameworkError::Tool("react loop unavailable".to_owned()))?
             .run(params, vec![Message::text(Role::User, request.prompt)])
             .await
             .map(|outcome| InvokeOutcome {
@@ -120,6 +121,8 @@ impl AgentInvoker for DirectAgentInvoker {
             source_message_id: None,
         };
         self.react_loop
+            .upgrade()
+            .ok_or_else(|| FrameworkError::Tool("react loop unavailable".to_owned()))?
             .run(params, vec![Message::text(Role::User, request.prompt)])
             .await
             .map(|outcome| InvokeOutcome {
@@ -357,16 +360,15 @@ mod tests {
     }
 
     fn test_react_loop(provider: Arc<dyn Provider>) -> Arc<ReactLoop> {
-        let react_loop = Arc::new(ReactLoop::new(
+        Arc::new(ReactLoop::new(
             ProviderFactory::from_parts(HashMap::from([(
                 "default".to_owned(),
                 (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
             )])),
             default_factory(),
             SkillFactory::new(PathBuf::from("/tmp/simpleclaw-invoke-skills")),
-        ));
-        react_loop.set_invoker(Arc::new(NoopInvoker));
-        react_loop
+            Arc::new(NoopInvoker),
+        ))
     }
 
     fn test_directory(with_memory: bool) -> Arc<AgentDirectory> {
@@ -386,7 +388,7 @@ mod tests {
     async fn invoke_agent_returns_unknown_agent_error() {
         let provider: Arc<dyn Provider> = Arc::new(RecordingProvider::final_text("unused"));
         let invoker = DirectAgentInvoker::new(
-            test_react_loop(provider),
+            Arc::downgrade(&test_react_loop(provider)),
             Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
             Arc::new(ProcessManager::new()),
         );
@@ -409,7 +411,7 @@ mod tests {
     async fn invoke_agent_returns_missing_memory_error() {
         let provider: Arc<dyn Provider> = Arc::new(RecordingProvider::final_text("unused"));
         let invoker = DirectAgentInvoker::new(
-            test_react_loop(provider),
+            Arc::downgrade(&test_react_loop(provider)),
             test_directory(false),
             Arc::new(ProcessManager::new()),
         );
@@ -432,8 +434,9 @@ mod tests {
     async fn invoke_agent_runs_with_target_agent_prompt_and_history() {
         let provider_impl = Arc::new(RecordingProvider::final_text("agent reply"));
         let provider: Arc<dyn Provider> = provider_impl.clone();
+        let react_loop = test_react_loop(provider);
         let invoker = DirectAgentInvoker::new(
-            test_react_loop(provider),
+            Arc::downgrade(&react_loop),
             test_directory(true),
             Arc::new(ProcessManager::new()),
         );
@@ -460,8 +463,9 @@ mod tests {
     async fn invoke_worker_disables_recursive_tools_in_tool_specs() {
         let provider_impl = Arc::new(RecordingProvider::final_text("worker reply"));
         let provider: Arc<dyn Provider> = provider_impl.clone();
+        let react_loop = test_react_loop(provider);
         let invoker = DirectAgentInvoker::new(
-            test_react_loop(provider),
+            Arc::downgrade(&react_loop),
             test_directory(true),
             Arc::new(ProcessManager::new()),
         );
@@ -492,8 +496,9 @@ mod tests {
     async fn invoke_worker_uses_max_steps_override() {
         let provider_impl = Arc::new(RecordingProvider::empty());
         let provider: Arc<dyn Provider> = provider_impl.clone();
+        let react_loop = test_react_loop(provider);
         let invoker = DirectAgentInvoker::new(
-            test_react_loop(provider),
+            Arc::downgrade(&react_loop),
             test_directory(true),
             Arc::new(ProcessManager::new()),
         );
