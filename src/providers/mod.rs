@@ -1,4 +1,5 @@
 mod gemini;
+mod moonshot_compatible;
 mod registry;
 mod types;
 

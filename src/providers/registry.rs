@@ -6,6 +6,7 @@ use crate::config::{ProviderEntryConfig, ProviderKind};
 use crate::error::FrameworkError;
 
 use super::gemini::GeminiProvider;
+use super::moonshot_compatible::MoonshotCompatibleProvider;
 use super::types::Provider;
 
 pub struct ProviderMetadata {
@@ -16,7 +17,11 @@ pub struct ProviderMetadata {
 
 pub trait ProviderAdapter: Send + Sync {
     fn metadata(&self) -> ProviderMetadata;
-    fn create(&self, entry: &ProviderEntryConfig) -> Result<Box<dyn Provider>, FrameworkError>;
+    fn create(
+        &self,
+        provider_key: &str,
+        entry: &ProviderEntryConfig,
+    ) -> Result<Box<dyn Provider>, FrameworkError>;
 }
 
 pub struct ProviderRegistry {
@@ -27,11 +32,13 @@ impl ProviderRegistry {
     pub fn new() -> Self {
         let mut adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>> = HashMap::new();
         adapters.insert(ProviderKind::Gemini, Arc::new(GeminiProviderAdapter));
+        adapters.insert(ProviderKind::Moonshot, Arc::new(MoonshotProviderAdapter));
         Self { adapters }
     }
 
     pub fn create_provider(
         &self,
+        provider_key: &str,
         entry: &ProviderEntryConfig,
     ) -> Result<Box<dyn Provider>, FrameworkError> {
         let kind = entry.kind();
@@ -41,7 +48,7 @@ impl ProviderRegistry {
                 kind.as_str()
             )));
         };
-        adapter.create(entry)
+        adapter.create(provider_key, entry)
     }
 
     pub fn metadata_for_kind(
@@ -72,7 +79,7 @@ impl ProviderFactory {
         let registry = ProviderRegistry::new();
         let mut entries = HashMap::new();
         for (key, entry) in &config.entries {
-            let provider = registry.create_provider(entry)?;
+            let provider = registry.create_provider(key, entry)?;
             let metadata = registry.metadata_for_kind(entry.kind())?;
             entries.insert(
                 key.clone(),
@@ -134,8 +141,39 @@ impl ProviderAdapter for GeminiProviderAdapter {
         }
     }
 
-    fn create(&self, entry: &ProviderEntryConfig) -> Result<Box<dyn Provider>, FrameworkError> {
+    fn create(
+        &self,
+        _provider_key: &str,
+        entry: &ProviderEntryConfig,
+    ) -> Result<Box<dyn Provider>, FrameworkError> {
         let provider = GeminiProvider::from_entry(entry)?;
+        Ok(Box::new(provider))
+    }
+}
+
+struct MoonshotProviderAdapter;
+
+impl ProviderAdapter for MoonshotProviderAdapter {
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            kind: ProviderKind::Moonshot,
+            supports_native_tools: true,
+            known_models: &[],
+        }
+    }
+
+    fn create(
+        &self,
+        provider_key: &str,
+        entry: &ProviderEntryConfig,
+    ) -> Result<Box<dyn Provider>, FrameworkError> {
+        let ProviderEntryConfig::Moonshot(config) = entry else {
+            return Err(FrameworkError::Config(
+                "moonshot provider adapter received wrong provider config variant".to_owned(),
+            ));
+        };
+        let provider =
+            MoonshotCompatibleProvider::from_moonshot_config(provider_key, config.clone())?;
         Ok(Box::new(provider))
     }
 }

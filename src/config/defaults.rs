@@ -36,6 +36,22 @@ pub(super) fn default_provider_api_base() -> String {
     "https://generativelanguage.googleapis.com/v1beta".to_owned()
 }
 
+pub(super) fn default_oauth_redirect_host() -> String {
+    "127.0.0.1".to_owned()
+}
+
+pub(super) fn default_oauth_redirect_port() -> u16 {
+    8765
+}
+
+pub(super) fn default_oauth_callback_path() -> String {
+    "/oauth/callback".to_owned()
+}
+
+pub(super) fn default_oauth_timeout_secs() -> u64 {
+    180
+}
+
 pub(super) fn default_max_steps() -> u32 {
     8
 }

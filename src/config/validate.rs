@@ -182,6 +182,9 @@ pub(super) fn validate_providers_config(providers: &ProvidersConfig) -> Result<(
             providers.default
         )));
     }
+    for (key, entry) in &providers.entries {
+        entry.validate(key)?;
+    }
     Ok(())
 }
 
