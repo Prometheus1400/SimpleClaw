@@ -15,6 +15,7 @@ mod paths;
 mod prompt;
 mod providers;
 mod react;
+mod reply_policy;
 mod run;
 mod secrets;
 mod telemetry;

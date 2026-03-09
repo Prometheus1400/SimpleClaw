@@ -13,6 +13,7 @@ use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunOutcome, RunParams};
+use crate::reply_policy::is_no_reply;
 use crate::tools::{CompletionRoute, ProcessManager};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
@@ -172,14 +173,16 @@ impl AgentRuntime {
             }
         };
 
-        memory
-            .append_message(
-                memory_session_id,
-                StoredRole::Assistant,
-                &outcome.reply,
-                None,
-            )
-            .await?;
+        if !is_no_reply(&outcome.reply) {
+            memory
+                .append_message(
+                    memory_session_id,
+                    StoredRole::Assistant,
+                    &outcome.reply,
+                    None,
+                )
+                .await?;
+        }
         info!(
             status = "completed",
             elapsed_ms = execution_started.elapsed().as_millis() as u64,
@@ -428,5 +431,4 @@ mod tests {
         assert!(output.contains("guild_id: guild-789"));
         assert!(output.contains("message_id: msg-1"));
     }
-
 }

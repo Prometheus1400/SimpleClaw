@@ -14,6 +14,7 @@ use crate::channels::InboundMessage;
 use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, LoadedConfig};
 use crate::paths::AppPaths;
+use crate::reply_policy::is_no_reply;
 
 pub(crate) mod composition;
 mod daemon;
@@ -115,6 +116,19 @@ pub(crate) async fn handle_inbound_once(
         .await
     {
         Ok(outcome) => {
+            if is_no_reply(&outcome.reply) {
+                tracing::debug!(
+                    status = "suppressed",
+                    reason = "no_reply_sentinel",
+                    "outbound reply"
+                );
+                info!(
+                    status = "completed",
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "inbound lifecycle"
+                );
+                return Ok(());
+            }
             let outbound = transparency::render_tool_call_transparency(
                 &outcome.reply,
                 &outcome.tool_calls,
@@ -474,11 +488,11 @@ fn query_long_memory(path: &Path, limit: usize) -> color_eyre::Result<Vec<LongMe
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
     use std::future::pending;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::fs;
-    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
@@ -623,7 +637,9 @@ mod tests {
                 emoji.to_owned(),
             ));
             if self.fail_reaction.load(Ordering::Relaxed) {
-                return Err(FrameworkError::Tool("simulated reaction failure".to_owned()));
+                return Err(FrameworkError::Tool(
+                    "simulated reaction failure".to_owned(),
+                ));
             }
             Ok(())
         }
@@ -662,7 +678,10 @@ mod tests {
         Gateway::new(channels, RoutingConfig::default(), tx)
     }
 
-    fn test_handler() -> (SessionHandler<InboundMessage>, mpsc::UnboundedReceiver<String>) {
+    fn test_handler() -> (
+        SessionHandler<InboundMessage>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
         let handler: SessionHandler<InboundMessage> = Arc::new(move |inbound: InboundMessage| {
             let tx = tx.clone();
@@ -691,7 +710,10 @@ mod tests {
         let reactions = channel.reactions().await;
         assert_eq!(reactions.len(), 1);
         assert_eq!(reactions[0].0, inbound.channel_id);
-        assert_eq!(reactions[0].1, inbound.source_message_id.unwrap_or_default());
+        assert_eq!(
+            reactions[0].1,
+            inbound.source_message_id.unwrap_or_default()
+        );
         assert_eq!(reactions[0].2, INBOUND_ACK_REACTION);
     }
 

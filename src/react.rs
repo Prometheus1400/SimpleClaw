@@ -3,6 +3,7 @@ use crate::error::FrameworkError;
 use crate::gateway::Gateway;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, Role};
+use crate::reply_policy::no_reply_prompt_instruction;
 use crate::tools::ProcessManager;
 use crate::tools::skill::SkillFactory;
 use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
@@ -128,10 +129,14 @@ async fn run_loop(
     let definitions = turn_tools.definitions();
     let run_started = Instant::now();
     let extra_instructions = dispatcher.prompt_instructions(&definitions);
+    let no_reply_instructions = no_reply_prompt_instruction();
     let effective_system_prompt = if extra_instructions.is_empty() {
-        params.system_prompt.to_owned()
+        format!("{}{}", params.system_prompt, no_reply_instructions)
     } else {
-        format!("{}{extra_instructions}", params.system_prompt)
+        format!(
+            "{}{}{}",
+            params.system_prompt, extra_instructions, no_reply_instructions
+        )
     };
 
     let tool_specs = if dispatcher.should_send_tool_specs() {

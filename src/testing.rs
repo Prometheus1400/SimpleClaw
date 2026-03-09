@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -371,11 +371,13 @@ impl ChannelFactory for StaticChannelFactory {
 }
 
 fn create_ephemeral_paths() -> color_eyre::Result<EphemeralPaths> {
+    static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .wrap_err("clock drift while building integration temp dir")?
         .as_nanos();
-    let root_dir = std::env::temp_dir().join(format!("simpleclaw_integration_{nanos}"));
+    let nonce = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root_dir = std::env::temp_dir().join(format!("simpleclaw_integration_{nanos}_{nonce}"));
     let workspace_dir = root_dir.join("workspace");
     let db_dir = root_dir.join("db");
     let short_term_db_path = db_dir.join("short.db");
