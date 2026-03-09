@@ -23,6 +23,7 @@ use crate::channels::InboundMessage;
 use crate::config::{GatewayChannelKind, ToolSandboxConfig, ToolsConfig};
 use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
+use crate::gateway::Gateway;
 use crate::memory::DynMemory;
 use crate::providers::ToolDefinition;
 
@@ -82,6 +83,7 @@ pub struct CompletionRoute {
     pub source_channel: GatewayChannelKind,
     pub target_agent_id: String,
     pub session_key: String,
+    pub source_message_id: Option<String>,
     pub channel_id: String,
     pub guild_id: Option<String>,
     pub is_dm: bool,
@@ -96,6 +98,7 @@ pub(crate) struct ToolExecEnv {
     pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
     pub invoker: Arc<dyn AgentInvoker>,
+    pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
 }
@@ -234,6 +237,7 @@ impl ToolFactory {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ActiveTools {
     ordered: Vec<Arc<dyn Tool>>,
     by_name: HashMap<String, Arc<dyn Tool>>,
@@ -254,6 +258,32 @@ impl ActiveTools {
             .get(name)
             .copied()
             .unwrap_or(false)
+    }
+
+    pub(crate) fn without(&self, name: &str) -> Self {
+        let ordered = self
+            .ordered
+            .iter()
+            .filter(|tool| tool.name() != name)
+            .cloned()
+            .collect();
+        let by_name = self
+            .by_name
+            .iter()
+            .filter(|(tool_name, _)| tool_name.as_str() != name)
+            .map(|(tool_name, tool)| (tool_name.clone(), Arc::clone(tool)))
+            .collect();
+        let owner_restricted_by_name = self
+            .owner_restricted_by_name
+            .iter()
+            .filter(|(tool_name, _)| tool_name.as_str() != name)
+            .map(|(tool_name, restricted)| (tool_name.clone(), *restricted))
+            .collect();
+        Self {
+            ordered,
+            by_name,
+            owner_restricted_by_name,
+        }
     }
 }
 
@@ -532,6 +562,7 @@ impl ProcessManager {
                     source_channel: route.source_channel,
                     target_agent_id: route.target_agent_id,
                     session_key: route.session_key,
+                    source_message_id: None,
                     channel_id: route.channel_id,
                     guild_id: route.guild_id,
                     is_dm: route.is_dm,
@@ -816,6 +847,10 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
+            react: Some(crate::config::ReactToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
             skills: Some(crate::config::SkillsToolConfig {
                 enabled: false,
                 ..Default::default()
@@ -892,5 +927,30 @@ mod tests {
             .expect("resolve tools");
         assert!(active.owner_restricted("clock"));
         assert!(!active.owner_restricted("skill_demo"));
+    }
+
+    #[test]
+    fn active_tools_without_removes_target_tool() {
+        let mut factory = ToolFactory::new();
+        factory.register_builtin(Box::new(NamedTool { name: "clock" }));
+        factory.register_builtin(Box::new(NamedTool { name: "react" }));
+        let mut config = only_process_enabled();
+        config.process = Some(crate::config::ProcessToolConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        config.clock = Some(crate::config::ClockToolConfig {
+            enabled: true,
+            owner_restricted: true,
+        });
+        config.react = Some(crate::config::ReactToolConfig {
+            enabled: true,
+            owner_restricted: false,
+        });
+        let active = factory.resolve_active(&config, &[]).expect("resolve tools");
+        let filtered = active.without("react");
+        assert!(active.get("react").is_some());
+        assert!(filtered.get("react").is_none());
+        assert!(filtered.get("clock").is_some());
     }
 }

@@ -22,6 +22,7 @@ pub(super) fn route_inbound(
         source_channel: kind,
         target_agent_id: target_agent_id.clone(),
         session_key: build_session_key(&target_agent_id, inbound.is_dm, kind, &inbound.channel_id),
+        source_message_id: Some(inbound.message_id),
         channel_id: inbound.channel_id,
         guild_id: inbound.guild_id,
         is_dm: inbound.is_dm,
@@ -46,6 +47,7 @@ mod tests {
     #[test]
     fn route_inbound_sets_policy_and_session_fields() {
         let inbound = ChannelInbound {
+            message_id: "321".to_owned(),
             channel_id: "123".to_owned(),
             guild_id: Some("10".to_owned()),
             is_dm: false,
@@ -68,6 +70,7 @@ mod tests {
     #[test]
     fn route_inbound_drops_dm_when_policy_denies_ingest() {
         let inbound = ChannelInbound {
+            message_id: "321".to_owned(),
             channel_id: "123".to_owned(),
             guild_id: None,
             is_dm: true,

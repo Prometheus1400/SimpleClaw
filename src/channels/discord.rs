@@ -3,7 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serenity::http::Http;
 use serenity::model::channel::Message as DiscordMessage;
-use serenity::model::id::ChannelId;
+use serenity::model::channel::ReactionType;
+use serenity::model::id::{ChannelId, EmojiId, MessageId};
 use serenity::prelude::*;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Duration, sleep};
@@ -91,6 +92,7 @@ impl EventHandler for DiscordHandler {
             .unwrap_or(false);
 
         let inbound = ChannelInbound {
+            message_id: msg.id.get().to_string(),
             channel_id: channel_id.to_string(),
             guild_id: guild_id.map(|id| id.to_string()),
             is_dm,
@@ -120,6 +122,22 @@ impl Channel for DiscordChannel {
         Ok(())
     }
 
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        let message_id = parse_message_id(message_id)?;
+        let reaction = parse_reaction_type(emoji)?;
+        channel_id
+            .create_reaction(&self.http, message_id, reaction)
+            .await
+            .map_err(|e| FrameworkError::Tool(format!("discord add reaction failed: {e}")))?;
+        Ok(())
+    }
+
     async fn broadcast_typing(&self, channel_id: &str) -> Result<(), FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
         channel_id
@@ -142,6 +160,70 @@ fn parse_channel_id(raw: &str) -> Result<ChannelId, FrameworkError> {
         .parse()
         .map_err(|_| FrameworkError::Tool(format!("invalid discord channel id: {raw}")))?;
     Ok(ChannelId::new(id))
+}
+
+fn parse_message_id(raw: &str) -> Result<MessageId, FrameworkError> {
+    let id: u64 = raw
+        .parse()
+        .map_err(|_| FrameworkError::Tool(format!("invalid discord message id: {raw}")))?;
+    Ok(MessageId::new(id))
+}
+
+fn parse_reaction_type(raw: &str) -> Result<ReactionType, FrameworkError> {
+    let emoji = raw.trim();
+    if emoji.is_empty() {
+        return Err(FrameworkError::Tool(
+            "emoji is required to add a reaction".to_owned(),
+        ));
+    }
+
+    if let Some(parsed) = parse_custom_reaction_type(emoji)? {
+        return Ok(parsed);
+    }
+
+    Ok(ReactionType::Unicode(emoji.to_owned()))
+}
+
+fn parse_custom_reaction_type(emoji: &str) -> Result<Option<ReactionType>, FrameworkError> {
+    let Some(stripped) = emoji
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        return Ok(None);
+    };
+
+    let (animated, rest) = if let Some(value) = stripped.strip_prefix("a:") {
+        (true, value)
+    } else if let Some(value) = stripped.strip_prefix(':') {
+        (false, value)
+    } else {
+        return Ok(None);
+    };
+
+    let mut parts = rest.split(':');
+    let Some(name) = parts.next() else {
+        return Err(FrameworkError::Tool(format!(
+            "invalid custom emoji format: {emoji}"
+        )));
+    };
+    let Some(id_raw) = parts.next() else {
+        return Err(FrameworkError::Tool(format!(
+            "invalid custom emoji format: {emoji}"
+        )));
+    };
+    if parts.next().is_some() {
+        return Err(FrameworkError::Tool(format!(
+            "invalid custom emoji format: {emoji}"
+        )));
+    }
+    let id: u64 = id_raw
+        .parse()
+        .map_err(|_| FrameworkError::Tool(format!("invalid custom emoji id: {id_raw}")))?;
+    Ok(Some(ReactionType::Custom {
+        animated,
+        id: EmojiId::new(id),
+        name: Some(name.to_owned()),
+    }))
 }
 
 fn message_mentions_user(msg: &DiscordMessage, user_id: u64) -> bool {

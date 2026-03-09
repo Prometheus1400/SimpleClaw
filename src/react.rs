@@ -1,5 +1,6 @@
 use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
+use crate::gateway::Gateway;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, Role};
 use crate::tools::ProcessManager;
@@ -33,8 +34,10 @@ pub struct RunParams<'a> {
     pub user_id: String,
     pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
+    pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +93,7 @@ impl ReactLoop {
             owner_ids: params.owner_ids.clone(),
             process_manager: Arc::clone(&params.process_manager),
             invoker,
+            gateway: params.gateway.clone(),
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
         };
@@ -116,7 +120,12 @@ async fn run_loop(
     active_tools: &crate::tools::ActiveTools,
     history: &mut Vec<Message>,
 ) -> Result<RunOutcome, FrameworkError> {
-    let definitions = active_tools.definitions();
+    let turn_tools = if params.source_message_id.is_some() {
+        active_tools.clone()
+    } else {
+        active_tools.without("react")
+    };
+    let definitions = turn_tools.definitions();
     let run_started = Instant::now();
     let extra_instructions = dispatcher.prompt_instructions(&definitions);
     let effective_system_prompt = if extra_instructions.is_empty() {
@@ -166,7 +175,7 @@ async fn run_loop(
         match dispatcher.parse_response(&response) {
             DispatchAction::ToolCalls(calls) => {
                 let results = dispatcher
-                    .execute_tool_calls(&calls, active_tools, tool_env, params.session_id)
+                    .execute_tool_calls(&calls, &turn_tools, tool_env, params.session_id)
                     .instrument(turn_span.clone())
                     .await;
                 executed_tool_calls.extend(results.iter().cloned());
@@ -233,6 +242,7 @@ mod tests {
             "task",
             "web_search",
             "clock",
+            "react",
             "web_fetch",
             "read",
             "edit",

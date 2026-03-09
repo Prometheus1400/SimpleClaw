@@ -35,9 +35,9 @@ pub use routing::RoutingConfig;
 #[allow(unused_imports)]
 pub use tools::{
     ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemorizeToolConfig,
-    MemoryToolConfig, ProcessToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
-    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchProvider,
-    WebSearchToolConfig,
+    MemoryToolConfig, ProcessToolConfig, ReactToolConfig, ReadToolConfig, SkillsToolConfig,
+    SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig,
+    WebSearchProvider, WebSearchToolConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -541,6 +541,7 @@ channels:
                 "task".to_owned(),
                 "web_search".to_owned(),
                 "clock".to_owned(),
+                "react".to_owned(),
                 "web_fetch".to_owned(),
                 "read".to_owned(),
                 "edit".to_owned(),

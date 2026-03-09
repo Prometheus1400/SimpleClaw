@@ -208,7 +208,7 @@ impl ReactLoopFactory for DefaultReactLoopFactory {
 }
 
 pub(crate) struct RuntimeState {
-    pub gateway: Gateway,
+    pub gateway: Arc<Gateway>,
     pub runtimes: HashMap<String, AgentRuntime>,
     pub context: Arc<RuntimeContext>,
 }
@@ -311,14 +311,15 @@ pub(crate) async fn assemble_runtime_state(
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Gateway::new(
+    let gateway = Arc::new(Gateway::new(
         channels,
         loaded.global.gateway.routing.clone(),
         gateway_tx.clone(),
-    );
+    ));
 
     let context = Arc::new(RuntimeContext {
         react_loop,
+        gateway: Arc::clone(&gateway),
         agents: directory,
         process_manager,
         completion_tx: gateway_tx,

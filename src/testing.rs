@@ -167,6 +167,7 @@ pub async fn run_single_gateway_roundtrip(
         source_channel: GatewayChannelKind::Discord,
         target_agent_id: config.agent_id.clone(),
         session_key: format!("agent:{}:discord:{}", config.agent_id, config.channel_id),
+        source_message_id: Some("test-message-1".to_owned()),
         channel_id: config.channel_id.clone(),
         guild_id: None,
         is_dm: false,
@@ -259,6 +260,15 @@ impl Channel for CaptureChannel {
             channel_id: channel_id.to_owned(),
             content: content.to_owned(),
         });
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> Result<(), FrameworkError> {
         Ok(())
     }
 

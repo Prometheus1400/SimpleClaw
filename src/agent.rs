@@ -64,6 +64,7 @@ impl AgentDirectory {
 #[derive(Clone)]
 pub struct RuntimeContext {
     pub react_loop: Arc<ReactLoop>,
+    pub gateway: Arc<crate::gateway::Gateway>,
     pub agents: Arc<AgentDirectory>,
     pub process_manager: Arc<ProcessManager>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
@@ -144,16 +145,19 @@ impl AgentRuntime {
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.owner_ids.clone(),
             process_manager: Arc::clone(&context.process_manager),
+            gateway: Some(Arc::clone(&context.gateway)),
             completion_tx: Some(context.completion_tx.clone()),
             completion_route: Some(CompletionRoute {
                 trace_id: inbound.trace_id.clone(),
                 source_channel: inbound.source_channel,
                 target_agent_id: self.config.agent_id.clone(),
                 session_key: inbound.session_key.clone(),
+                source_message_id: inbound.source_message_id.clone(),
                 channel_id: inbound.channel_id.clone(),
                 guild_id: inbound.guild_id.clone(),
                 is_dm: inbound.is_dm,
             }),
+            source_message_id: inbound.source_message_id.clone(),
         };
 
         let outcome = match context.react_loop.run(params, history).await {
@@ -339,10 +343,14 @@ fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
         .as_ref()
         .map(|gid| format!("\nguild_id: {gid}"))
         .unwrap_or_default();
+    let message_line = inbound
+        .source_message_id
+        .as_ref()
+        .map(|message_id| format!("\nmessage_id: {message_id}"))
+        .unwrap_or_default();
     format!(
-        "{base}\n\n# CURRENT CONTEXT\nchat_type: {chat_type}\nplatform: {platform}\nchannel_id: {}{guild_line}\nSpeaker: **{}** (id: {})",
-        inbound.channel_id,
-        inbound.username, inbound.user_id
+        "{base}\n\n# CURRENT CONTEXT\nchat_type: {chat_type}\nplatform: {platform}\nchannel_id: {}{guild_line}{message_line}\nSpeaker: **{}** (id: {})",
+        inbound.channel_id, inbound.username, inbound.user_id
     )
 }
 
@@ -380,6 +388,7 @@ mod tests {
             source_channel: GatewayChannelKind::Discord,
             target_agent_id: "agent-1".to_owned(),
             session_key: "sess-1".to_owned(),
+            source_message_id: Some("msg-1".to_owned()),
             channel_id: "chan-456".to_owned(),
             guild_id: guild_id.map(|s| s.to_owned()),
             is_dm,
@@ -431,6 +440,7 @@ mod tests {
         assert!(output.contains("chat_type: dm"));
         assert!(output.contains("platform: discord"));
         assert!(output.contains("channel_id: chan-456"));
+        assert!(output.contains("message_id: msg-1"));
         assert!(!output.contains("guild_id:"));
         assert!(output.contains("Speaker: **kaleb** (id: user-123)"));
 
@@ -440,6 +450,7 @@ mod tests {
         assert!(output.contains("platform: discord"));
         assert!(output.contains("channel_id: chan-456"));
         assert!(output.contains("guild_id: guild-789"));
+        assert!(output.contains("message_id: msg-1"));
     }
 
     #[test]

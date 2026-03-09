@@ -98,6 +98,18 @@ pub(super) fn parse_task_args(args_json: &str) -> String {
     args_json.trim_matches('"').to_owned()
 }
 
+pub(super) fn parse_react_args(args_json: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(args_json) {
+        if let Some(emoji) = value.get("emoji").and_then(|v| v.as_str()) {
+            return emoji.to_owned();
+        }
+        if let Some(s) = value.as_str() {
+            return s.to_owned();
+        }
+    }
+    args_json.trim_matches('"').to_owned()
+}
+
 pub(super) fn parse_memorize_args(args_json: &str) -> (String, String, u8) {
     if let Ok(value) = serde_json::from_str::<Value>(args_json) {
         if let Some(fact) = value.get("fact").and_then(|v| v.as_str()) {

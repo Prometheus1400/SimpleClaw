@@ -67,8 +67,10 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: target_config.owner_ids.clone(),
             process_manager: Arc::clone(&self.process_manager),
+            gateway: None,
             completion_tx: None,
             completion_route: None,
+            source_message_id: None,
         };
         self.react_loop
             .run(params, vec![Message::text(Role::User, request.prompt)])
@@ -110,8 +112,10 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: current_config.owner_ids.clone(),
             process_manager: Arc::clone(&self.process_manager),
+            gateway: None,
             completion_tx: None,
             completion_route: None,
+            source_message_id: None,
         };
         self.react_loop
             .run(params, vec![Message::text(Role::User, request.prompt)])
