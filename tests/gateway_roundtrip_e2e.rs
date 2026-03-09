@@ -118,7 +118,10 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output() {
     let nested = response["content"]
         .as_str()
         .expect("tool response content should be a string");
-    assert!(nested.contains("\"status\":\"completed\""), "nested={nested}");
+    assert!(
+        nested.contains("\"status\":\"completed\""),
+        "nested={nested}"
+    );
     assert!(nested.contains("\"exitCode\":0"), "nested={nested}");
     assert!(nested.contains("\"stdout\":\"/"), "nested={nested}");
 }
@@ -187,7 +190,10 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output_on_repeated_runs() 
         let nested = response["content"]
             .as_str()
             .expect("tool response content should be a string");
-        assert!(nested.contains("\"status\":\"completed\""), "nested={nested}");
+        assert!(
+            nested.contains("\"status\":\"completed\""),
+            "nested={nested}"
+        );
         assert!(nested.contains("\"exitCode\":0"), "nested={nested}");
         assert!(nested.contains("\"stdout\":\"/"), "nested={nested}");
     }

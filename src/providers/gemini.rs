@@ -119,7 +119,10 @@ fn summarize_gemini_error_body(body: &str) -> String {
     if let Ok(value) = serde_json::from_str::<Value>(trimmed)
         && let Some(error_obj) = value.get("error").and_then(Value::as_object)
     {
-        let status = error_obj.get("status").and_then(Value::as_str).unwrap_or("");
+        let status = error_obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let message = error_obj
             .get("message")
             .and_then(Value::as_str)
@@ -219,19 +222,16 @@ impl Provider for GeminiProvider {
             )));
         }
 
-        let response_value = response
-            .json::<Value>()
-            .await
-            .map_err(|e| {
-                error!(
-                    status = "failed",
-                    error_kind = "response_parse",
-                    elapsed_ms = request_started.elapsed().as_millis() as u64,
-                    error = %e,
-                    "provider request"
-                );
-                FrameworkError::Provider(format!("invalid gemini response: {e}"))
-            })?;
+        let response_value = response.json::<Value>().await.map_err(|e| {
+            error!(
+                status = "failed",
+                error_kind = "response_parse",
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                error = %e,
+                "provider request"
+            );
+            FrameworkError::Provider(format!("invalid gemini response: {e}"))
+        })?;
 
         let mut output_text = None;
         let mut tool_calls = Vec::new();

@@ -68,7 +68,10 @@ impl CronStore {
             [],
         )
         .or_else(|err| {
-            if err.to_string().contains("duplicate column name: description") {
+            if err
+                .to_string()
+                .contains("duplicate column name: description")
+            {
                 Ok(0)
             } else {
                 Err(err)
