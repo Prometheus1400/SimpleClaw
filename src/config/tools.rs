@@ -503,14 +503,14 @@ impl Default for ReactToolConfig {
 pub struct SkillsToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    pub ids: Vec<String>,
+    pub disabled_skills: Vec<String>,
 }
 
 impl Default for SkillsToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
-            ids: Vec::new(),
+            disabled_skills: Vec::new(),
         }
     }
 }

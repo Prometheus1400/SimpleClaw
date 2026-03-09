@@ -585,7 +585,7 @@ tools:
       network_enabled: true
   skills:
     enabled: true
-    ids:
+    disabled_skills:
       - code_review
       - release_checklist
 "#,
@@ -597,7 +597,7 @@ tools:
         assert!(!exec.allow_background);
         assert_eq!(exec.sandbox.network_enabled, Some(true));
         assert_eq!(
-            parsed.tools.skills.expect("skills config").ids,
+            parsed.tools.skills.expect("skills config").disabled_skills,
             vec!["code_review".to_owned(), "release_checklist".to_owned()]
         );
     }
@@ -605,7 +605,10 @@ tools:
     #[test]
     fn agent_config_defaults_tools_skills_config() {
         let parsed: AgentInnerConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
-        assert_eq!(parsed.tools.skills_config().ids, Vec::<String>::new());
+        assert_eq!(
+            parsed.tools.skills_config().disabled_skills,
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -614,7 +617,7 @@ tools:
             r#"
 tools:
   skills:
-    ids:
+    disabled_skills:
       - code_review
 skills:
   enabled_skills:
