@@ -27,7 +27,7 @@ impl Default for ExecutionConfig {
 pub struct ExecutionDefaultsConfig {
     pub max_steps: u32,
     pub history_messages: u32,
-    pub tool_call_transparency: ToolCallTransparency,
+    pub transparency: TransparencyConfig,
     pub memory_preinject: MemoryPreinjectConfig,
     pub safe_error_reply: String,
 }
@@ -37,7 +37,7 @@ impl Default for ExecutionDefaultsConfig {
         Self {
             max_steps: default_max_steps(),
             history_messages: default_history_messages(),
-            tool_call_transparency: ToolCallTransparency::default(),
+            transparency: TransparencyConfig::default(),
             memory_preinject: MemoryPreinjectConfig::default(),
             safe_error_reply: default_safe_error_reply(),
         }
@@ -70,9 +70,13 @@ impl ExecutionDefaultsConfig {
         Self {
             max_steps: overrides.max_steps.unwrap_or(self.max_steps),
             history_messages: overrides.history_messages.unwrap_or(self.history_messages),
-            tool_call_transparency: overrides
-                .tool_call_transparency
-                .unwrap_or(self.tool_call_transparency),
+            transparency: TransparencyConfig {
+                tool_calls: overrides
+                    .transparency
+                    .as_ref()
+                    .and_then(|value| value.tool_calls)
+                    .unwrap_or(self.transparency.tool_calls),
+            },
             memory_preinject,
             safe_error_reply: overrides
                 .safe_error_reply
@@ -82,13 +86,16 @@ impl ExecutionDefaultsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCallTransparency {
-    #[default]
-    Off,
-    Concise,
-    Detailed,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransparencyConfig {
+    pub tool_calls: bool,
+}
+
+impl Default for TransparencyConfig {
+    fn default() -> Self {
+        Self { tool_calls: false }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,9 +169,15 @@ pub enum SummonMode {
 pub struct AgentExecutionOverrides {
     pub max_steps: Option<u32>,
     pub history_messages: Option<u32>,
-    pub tool_call_transparency: Option<ToolCallTransparency>,
+    pub transparency: Option<TransparencyOverrides>,
     pub memory_preinject: Option<MemoryPreinjectOverrides>,
     pub safe_error_reply: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransparencyOverrides {
+    pub tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -181,7 +194,7 @@ pub struct MemoryPreinjectOverrides {
 mod tests {
     use super::{
         AgentExecutionOverrides, ExecutionDefaultsConfig, MemoryPreinjectOverrides,
-        ToolCallTransparency,
+        TransparencyOverrides,
     };
 
     #[test]
@@ -190,7 +203,9 @@ mod tests {
         let overrides = AgentExecutionOverrides {
             max_steps: Some(42),
             history_messages: None,
-            tool_call_transparency: Some(ToolCallTransparency::Detailed),
+            transparency: Some(TransparencyOverrides {
+                tool_calls: Some(true),
+            }),
             memory_preinject: Some(MemoryPreinjectOverrides {
                 enabled: Some(false),
                 top_k: None,
@@ -204,10 +219,7 @@ mod tests {
         let merged = defaults.merge_with_overrides(&overrides);
         assert_eq!(merged.max_steps, 42);
         assert_eq!(merged.history_messages, defaults.history_messages);
-        assert_eq!(
-            merged.tool_call_transparency,
-            ToolCallTransparency::Detailed
-        );
+        assert!(merged.transparency.tool_calls);
         assert!(!merged.memory_preinject.enabled);
         assert_eq!(
             merged.memory_preinject.top_k,
@@ -228,10 +240,7 @@ mod tests {
         let merged = defaults.merge_with_overrides(&AgentExecutionOverrides::default());
         assert_eq!(merged.max_steps, defaults.max_steps);
         assert_eq!(merged.history_messages, defaults.history_messages);
-        assert_eq!(
-            merged.tool_call_transparency,
-            defaults.tool_call_transparency
-        );
+        assert_eq!(merged.transparency.tool_calls, defaults.transparency.tool_calls);
         assert_eq!(
             merged.memory_preinject.long_term_weight,
             defaults.memory_preinject.long_term_weight

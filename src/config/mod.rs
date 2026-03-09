@@ -27,7 +27,8 @@ pub use database::{DatabaseConfig, EmbeddingConfig};
 pub use execution::ExecutionDefaultsConfig;
 #[allow(unused_imports)]
 pub use execution::{AgentExecutionOverrides, MemoryPreinjectOverrides};
-pub use execution::{ExecutionConfig, LogLevel, MemoryPreinjectConfig, ToolCallTransparency};
+#[allow(unused_imports)]
+pub use execution::{ExecutionConfig, LogLevel, MemoryPreinjectConfig, TransparencyConfig};
 pub use gateway::{ChannelConfig, GatewayChannelKind, GatewayConfig};
 pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, ProvidersConfig};
 #[allow(unused_imports)]
@@ -438,28 +439,25 @@ memory_preinject:
     #[test]
     fn execution_defaults_tool_call_transparency_defaults_off() {
         let execution = ExecutionConfig::default();
-        assert_eq!(
-            execution.defaults.tool_call_transparency,
-            ToolCallTransparency::Off
-        );
+        assert!(!execution.defaults.transparency.tool_calls);
     }
 
     #[test]
     fn execution_defaults_tool_call_transparency_accepts_values() {
         let yaml = r#"
-tool_call_transparency: detailed
+transparency:
+  tool_calls: true
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml).expect("valid yaml");
-        assert_eq!(
-            parsed.tool_call_transparency,
-            ToolCallTransparency::Detailed
-        );
+        assert!(parsed.transparency.tool_calls);
     }
 
     #[test]
     fn execution_defaults_tool_call_transparency_rejects_unknown_value() {
         let yaml = r#"
-tool_call_transparency: verbose
+transparency:
+  tool_calls: true
+  verbose: true
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml);
         assert!(parsed.is_err());

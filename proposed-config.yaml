@@ -5,7 +5,8 @@ execution:
   defaults:
     max_steps: 8
     history_messages: 10
-    tool_call_transparency: concise
+    transparency:
+      tool_calls: true
     memory_preinject:
       enabled: true
       top_k: 3
@@ -61,7 +62,8 @@ agents:
         execution:
           max_steps: 10
           history_messages: 12
-          tool_call_transparency: concise
+          transparency:
+            tool_calls: true
           memory_preinject:
             top_k: 5
           safe_error_reply: "Planner hit an internal error."

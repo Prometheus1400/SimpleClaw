@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, ToolCallTransparency};
+use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig};
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
@@ -68,7 +68,7 @@ pub struct RuntimeContext {
     pub process_manager: Arc<ProcessManager>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
     pub safe_error_reply: String,
-    pub tool_call_transparency: ToolCallTransparency,
+    pub tool_call_transparency: bool,
 }
 
 pub struct AgentRuntime {

@@ -1,19 +1,20 @@
-use crate::config::{GatewayChannelKind, ToolCallTransparency};
+use std::collections::HashMap;
+
+use crate::config::GatewayChannelKind;
 use crate::dispatch::ToolExecutionResult;
-use crate::telemetry::sanitize_preview;
 
 pub(super) fn render_tool_call_transparency(
     reply: &str,
     tool_calls: &[ToolExecutionResult],
-    mode: ToolCallTransparency,
+    enabled: bool,
     channel_kind: GatewayChannelKind,
 ) -> String {
-    if mode == ToolCallTransparency::Off || tool_calls.is_empty() {
+    if !enabled || tool_calls.is_empty() {
         return reply.to_owned();
     }
 
     let style = style_for_channel(channel_kind).unwrap_or(TransparencyRenderStyle::PlainFooter);
-    let summary_lines = summary_lines(tool_calls, mode);
+    let summary_lines = summary_lines(tool_calls);
     render_for_style(reply, &summary_lines, style)
 }
 
@@ -29,79 +30,62 @@ fn style_for_channel(kind: GatewayChannelKind) -> Option<TransparencyRenderStyle
     }
 }
 
-fn summary_lines(tool_calls: &[ToolExecutionResult], mode: ToolCallTransparency) -> Vec<String> {
-    match mode {
-        ToolCallTransparency::Off => Vec::new(),
-        ToolCallTransparency::Concise => concise_summary_lines(tool_calls),
-        ToolCallTransparency::Detailed => detailed_summary_lines(tool_calls),
+fn summary_lines(tool_calls: &[ToolExecutionResult]) -> Vec<String> {
+    vec![tool_summary_line(tool_calls)]
+}
+
+fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
+    let mut order = Vec::new();
+    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
+    for call in flatten_tool_calls(tool_calls) {
+        let entry = counts.entry(call.name.as_str()).or_insert_with(|| {
+            order.push(call.name.as_str());
+            (0, 0)
+        });
+        if call.success {
+            entry.0 += 1;
+        } else {
+            entry.1 += 1;
+        }
+    }
+
+    let groups = order
+        .into_iter()
+        .map(|name| {
+            let (ok, err) = counts[name];
+            let mut parts = Vec::new();
+            if ok > 0 {
+                parts.push(format!("okx{ok}"));
+            }
+            if err > 0 {
+                parts.push(format!("errx{err}"));
+            }
+            format!("[{name} {}]", parts.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if groups.is_empty() {
+        "tools: [none]".to_owned()
+    } else {
+        format!("tools: {groups}")
     }
 }
 
-fn concise_summary_lines(tool_calls: &[ToolExecutionResult]) -> Vec<String> {
-    let mut lines = Vec::new();
-    for call in tool_calls {
-        append_concise_tree(call, 0, &mut lines);
-    }
-    lines
-}
-
-fn detailed_summary_lines(tool_calls: &[ToolExecutionResult]) -> Vec<String> {
-    let flattened = flatten_tool_calls(tool_calls);
-    let mut lines = Vec::with_capacity(1 + flattened.len());
-    lines.push("tool calls (detailed):".to_owned());
-    for (idx, (depth, path, call)) in flattened.into_iter().enumerate() {
-        let status = if call.success { "ok" } else { "error" };
-        let args = sanitize_preview(&call.args_json, 120);
-        let output = sanitize_preview(&call.output, 160);
-        lines.push(format!(
-            "{} | {} | {} | {}ms | path:{} | depth:{} | args:{} | out:{}",
-            idx + 1,
-            status,
-            call.name,
-            call.elapsed_ms,
-            path,
-            depth,
-            args,
-            output
-        ));
-    }
-    lines
-}
-
-fn flatten_tool_calls(
-    tool_calls: &[ToolExecutionResult],
-) -> Vec<(usize, String, &ToolExecutionResult)> {
+fn flatten_tool_calls(tool_calls: &[ToolExecutionResult]) -> Vec<&ToolExecutionResult> {
     let mut flattened = Vec::new();
-    for (idx, call) in tool_calls.iter().enumerate() {
-        let path = (idx + 1).to_string();
-        append_flattened(call, 0, &path, &mut flattened);
+    for call in tool_calls {
+        append_flattened(call, &mut flattened);
     }
     flattened
 }
 
 fn append_flattened<'a>(
     call: &'a ToolExecutionResult,
-    depth: usize,
-    path: &str,
-    out: &mut Vec<(usize, String, &'a ToolExecutionResult)>,
+    out: &mut Vec<&'a ToolExecutionResult>,
 ) {
-    out.push((depth, path.to_owned(), call));
-    for (idx, child) in call.nested_tool_calls.iter().enumerate() {
-        let child_path = format!("{path}.{}", idx + 1);
-        append_flattened(child, depth + 1, &child_path, out);
-    }
-}
-
-fn append_concise_tree(call: &ToolExecutionResult, depth: usize, out: &mut Vec<String>) {
-    let status = if call.success { "ok" } else { "error" };
-    if depth == 0 {
-        out.push(format!("({status}|{})", call.name));
-    } else {
-        let arrow = format!("{}>", "-".repeat(depth));
-        out.push(format!("{arrow} ({status}|{})", call.name));
-    }
+    out.push(call);
     for child in &call.nested_tool_calls {
-        append_concise_tree(child, depth + 1, out);
+        append_flattened(child, out);
     }
 }
 
@@ -136,7 +120,7 @@ fn escape_discord_subtext(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{TransparencyRenderStyle, render_for_style, render_tool_call_transparency};
-    use crate::config::{GatewayChannelKind, ToolCallTransparency};
+    use crate::config::GatewayChannelKind;
     use crate::dispatch::ToolExecutionResult;
 
     #[test]
@@ -144,36 +128,25 @@ mod tests {
         let rendered = render_tool_call_transparency(
             "base reply",
             &[],
-            ToolCallTransparency::Off,
+            false,
             GatewayChannelKind::Discord,
         );
         assert_eq!(rendered, "base reply");
     }
 
     #[test]
-    fn concise_mode_with_no_calls_returns_reply_unchanged() {
+    fn enabled_mode_with_no_calls_returns_reply_unchanged() {
         let rendered = render_tool_call_transparency(
             "base reply",
             &[],
-            ToolCallTransparency::Concise,
+            true,
             GatewayChannelKind::Discord,
         );
         assert_eq!(rendered, "base reply");
     }
 
     #[test]
-    fn detailed_mode_with_no_calls_returns_reply_unchanged() {
-        let rendered = render_tool_call_transparency(
-            "base reply",
-            &[],
-            ToolCallTransparency::Detailed,
-            GatewayChannelKind::Discord,
-        );
-        assert_eq!(rendered, "base reply");
-    }
-
-    #[test]
-    fn concise_discord_uses_single_line_token_format() {
+    fn enabled_mode_renders_grouped_status_chips() {
         let calls = vec![ToolExecutionResult {
             name: "clock".to_owned(),
             args_json: "{}".to_owned(),
@@ -186,14 +159,14 @@ mod tests {
         let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
-            ToolCallTransparency::Concise,
+            true,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("\n-# (ok|clock)"));
+        assert!(rendered.contains("\n-# tools: [clock okx1]"));
     }
 
     #[test]
-    fn concise_renders_multiple_top_level_calls_on_separate_lines() {
+    fn repeated_calls_are_aggregated_with_ok_and_err_counts() {
         let calls = vec![
             ToolExecutionResult {
                 name: "clock".to_owned(),
@@ -217,35 +190,38 @@ mod tests {
         let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
-            ToolCallTransparency::Concise,
+            true,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# (ok|clock)\n-# (error|clock)"));
+        assert!(rendered.contains("-# tools: [clock okx1 errx1]"));
     }
 
     #[test]
-    fn detailed_mode_redacts_sensitive_values_and_uses_row_layout() {
+    fn grouped_summary_preserves_first_seen_tool_order() {
         let calls = vec![ToolExecutionResult {
             name: "web_fetch".to_owned(),
-            args_json: r#"{"url":"https://example.com","api_key":"secret-123"}"#.to_owned(),
-            output: r#"authorization: Bearer super-secret"#.to_owned(),
+            args_json: "{}".to_owned(),
+            output: "ok".to_owned(),
             success: false,
             elapsed_ms: 11,
             tool_call_id: None,
-            nested_tool_calls: Vec::new(),
+            nested_tool_calls: vec![ToolExecutionResult {
+                name: "clock".to_owned(),
+                args_json: "{}".to_owned(),
+                output: "ok".to_owned(),
+                success: true,
+                elapsed_ms: 1,
+                tool_call_id: None,
+                nested_tool_calls: Vec::new(),
+            }],
         }];
         let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
-            ToolCallTransparency::Detailed,
+            true,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# tool calls (detailed):"));
-        assert!(rendered.contains("-# 1 | error | web\\_fetch | 11ms | path:1 | depth:0 | args:"));
-        assert!(rendered.contains("| out:"));
-        assert!(rendered.contains("***REDACTED***"));
-        assert!(!rendered.contains("secret-123"));
-        assert!(!rendered.contains("super-secret"));
+        assert!(rendered.contains("-# tools: [web\\_fetch errx1] [clock okx1]"));
     }
 
     #[test]
@@ -262,11 +238,11 @@ mod tests {
         let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
-            ToolCallTransparency::Concise,
+            true,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# (ok|web\\_fetch)"));
-        assert!(!rendered.contains("-# (ok|web_fetch)"));
+        assert!(rendered.contains("-# tools: [web\\_fetch okx1]"));
+        assert!(!rendered.contains("-# tools: [web_fetch okx1]"));
     }
 
     #[test]
@@ -280,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_calls_are_included_in_concise_and_detailed() {
+    fn nested_calls_are_included_in_grouped_summary() {
         let calls = vec![ToolExecutionResult {
             name: "summon".to_owned(),
             args_json: r#"{"agent":"research"}"#.to_owned(),
@@ -299,26 +275,17 @@ mod tests {
             }],
         }];
 
-        let concise = render_tool_call_transparency(
+        let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
-            ToolCallTransparency::Concise,
+            true,
             GatewayChannelKind::Discord,
         );
-        assert!(concise.contains("-# (ok|summon)\n-# -> (ok|clock)"));
-
-        let detailed = render_tool_call_transparency(
-            "base reply",
-            &calls,
-            ToolCallTransparency::Detailed,
-            GatewayChannelKind::Discord,
-        );
-        assert!(detailed.contains("path:1 | depth:0"));
-        assert!(detailed.contains("path:1.1 | depth:1"));
+        assert!(rendered.contains("-# tools: [summon okx1] [clock okx1]"));
     }
 
     #[test]
-    fn concise_uses_dash_depth_markers_for_deep_nesting() {
+    fn deep_nesting_is_counted_in_flattened_grouping() {
         let calls = vec![ToolExecutionResult {
             name: "task".to_owned(),
             args_json: "{}".to_owned(),
@@ -347,9 +314,9 @@ mod tests {
         let rendered = render_tool_call_transparency(
             "base reply",
             &calls,
-            ToolCallTransparency::Concise,
+            true,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# (ok|task)\n-# -> (ok|summon)\n-# --> (ok|exec)"));
+        assert!(rendered.contains("-# tools: [task okx1] [summon okx1] [exec okx1]"));
     }
 }
