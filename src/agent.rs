@@ -371,6 +371,11 @@ fn memory_hit_label(hit: &MemoryRecallHit) -> String {
 fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
     let chat_type = if inbound.is_dm { "dm" } else { "group" };
     let platform = inbound.source_channel.as_str();
+    let trigger_line = if inbound.user_id == "system" && inbound.username == "cron" {
+        "\ntrigger: scheduled_cron"
+    } else {
+        ""
+    };
     let guild_line = inbound
         .guild_id
         .as_ref()
@@ -382,7 +387,7 @@ fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
         .map(|message_id| format!("\nmessage_id: {message_id}"))
         .unwrap_or_default();
     format!(
-        "{base}\n\n# CURRENT CONTEXT\nchat_type: {chat_type}\nplatform: {platform}\nchannel_id: {}{guild_line}{message_line}\nSpeaker: **{}** (id: {})",
+        "{base}\n\n# CURRENT CONTEXT\nchat_type: {chat_type}\nplatform: {platform}\nchannel_id: {}{guild_line}{message_line}{trigger_line}\nSpeaker: **{}** (id: {})",
         inbound.channel_id, inbound.username, inbound.user_id
     )
 }
@@ -468,5 +473,18 @@ mod tests {
         assert!(output.contains("channel_id: chan-456"));
         assert!(output.contains("guild_id: guild-789"));
         assert!(output.contains("message_id: msg-1"));
+    }
+
+    #[test]
+    fn inject_caller_context_marks_scheduled_cron_trigger() {
+        let mut inbound = test_inbound(false, None);
+        inbound.user_id = "system".to_owned();
+        inbound.username = "cron".to_owned();
+        inbound.source_message_id = None;
+
+        let output = inject_caller_context("base prompt", &inbound);
+
+        assert!(output.contains("trigger: scheduled_cron"));
+        assert!(output.contains("Speaker: **cron** (id: system)"));
     }
 }
