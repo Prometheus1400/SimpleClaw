@@ -67,7 +67,7 @@ impl Tool for CronTool {
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"delete\",\"list\"]},\"schedule\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"},\"guard_command\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"],\"allOf\":[{\"if\":{\"properties\":{\"action\":{\"const\":\"create\"}}},\"then\":{\"required\":[\"schedule\",\"description\",\"prompt\"]}},{\"if\":{\"properties\":{\"action\":{\"const\":\"delete\"}}},\"then\":{\"required\":[\"id\"]}}]}"
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"delete\",\"list\"]},\"schedule\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"},\"guard_command\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}"
     }
 
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
@@ -237,5 +237,29 @@ fn parse_schedule(raw: &str) -> Result<Schedule, cron::error::Error> {
                 Err(err)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{CronStore, CronTool};
+    use crate::tools::Tool;
+    use uuid::Uuid;
+
+    #[test]
+    fn input_schema_avoids_conditional_keywords() {
+        let path = std::env::temp_dir().join(format!("simpleclaw-cron-schema-{}.db", Uuid::new_v4()));
+        let tool = CronTool::new(Arc::new(Mutex::new(
+            CronStore::open(&path).expect("cron store"),
+        )));
+        let schema = tool.input_schema_json();
+
+        assert!(!schema.contains("\"allOf\""));
+        assert!(!schema.contains("\"if\""));
+        assert!(!schema.contains("\"then\""));
+
+        let _ = std::fs::remove_file(path);
     }
 }
