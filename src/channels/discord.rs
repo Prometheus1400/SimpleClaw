@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serenity::http::Http;
 use serenity::model::channel::Message as DiscordMessage;
+use serenity::model::channel::MessageReaction;
 use serenity::model::channel::ReactionType;
 use serenity::model::id::{ChannelId, EmojiId, MessageId};
 use serenity::prelude::*;
@@ -131,10 +132,35 @@ impl Channel for DiscordChannel {
         let channel_id = parse_channel_id(channel_id)?;
         let message_id = parse_message_id(message_id)?;
         let reaction = parse_reaction_type(emoji)?;
+        let message = channel_id
+            .message(&self.http, message_id)
+            .await
+            .map_err(|e| FrameworkError::Tool(format!("discord fetch message failed: {e}")))?;
+        let existing_bot_reactions = collect_bot_reaction_types(&message.reactions);
+
         channel_id
-            .create_reaction(&self.http, message_id, reaction)
+            .create_reaction(&self.http, message_id, reaction.clone())
             .await
             .map_err(|e| FrameworkError::Tool(format!("discord add reaction failed: {e}")))?;
+
+        for existing in existing_bot_reactions
+            .into_iter()
+            .filter(|existing| *existing != reaction)
+        {
+            if let Err(err) = channel_id
+                .delete_reaction(&self.http, message_id, None, existing)
+                .await
+            {
+                tracing::warn!(
+                    status = "failed",
+                    error_kind = "delete_reaction",
+                    error = %err,
+                    channel_id = %channel_id.get(),
+                    message_id = %message_id.get(),
+                    "discord reaction cleanup failed"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -226,6 +252,14 @@ fn parse_custom_reaction_type(emoji: &str) -> Result<Option<ReactionType>, Frame
     }))
 }
 
+fn collect_bot_reaction_types(reactions: &[MessageReaction]) -> Vec<ReactionType> {
+    reactions
+        .iter()
+        .filter(|reaction| reaction.me)
+        .map(|reaction| reaction.reaction_type.clone())
+        .collect()
+}
+
 fn message_mentions_user(msg: &DiscordMessage, user_id: u64) -> bool {
     if msg.mentions.iter().any(|user| user.id.get() == user_id) {
         return true;
@@ -258,5 +292,62 @@ fn message_username(msg: &DiscordMessage) -> String {
         msg.author.id.get().to_string()
     } else {
         trimmed.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{collect_bot_reaction_types, parse_reaction_type};
+    use serenity::model::channel::MessageReaction;
+    use serenity::model::channel::ReactionType;
+    use serenity::model::id::EmojiId;
+
+    fn message_reaction(me: bool, reaction_type: ReactionType) -> MessageReaction {
+        let emoji = match reaction_type {
+            ReactionType::Unicode(name) => json!({ "id": null, "name": name }),
+            ReactionType::Custom { animated, id, name } => {
+                json!({ "id": id.get().to_string(), "name": name, "animated": animated })
+            }
+            _ => panic!("unsupported ReactionType variant in test helper"),
+        };
+
+        serde_json::from_value(json!({
+            "count": 1,
+            "count_details": { "burst": 0, "normal": 1 },
+            "me": me,
+            "me_burst": false,
+            "emoji": emoji,
+            "burst_colors": []
+        }))
+        .expect("test reaction should deserialize")
+    }
+
+    #[test]
+    fn collect_bot_reactions_includes_only_current_user_reactions() {
+        let reactions = vec![
+            message_reaction(true, ReactionType::Unicode("👀".to_owned())),
+            message_reaction(false, ReactionType::Unicode("✅".to_owned())),
+        ];
+
+        let selected = collect_bot_reaction_types(&reactions);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0], ReactionType::Unicode("👀".to_owned()));
+    }
+
+    #[test]
+    fn parse_reaction_type_custom_emoji_keeps_identity() {
+        let parsed = parse_reaction_type("<:party:123456>")
+            .expect("custom emoji should parse");
+
+        assert_eq!(
+            parsed,
+            ReactionType::Custom {
+                animated: false,
+                id: EmojiId::new(123456),
+                name: Some("party".to_owned()),
+            }
+        );
     }
 }
