@@ -159,7 +159,7 @@ pub(crate) async fn handle_inbound_once(
             );
             if let Err(send_err) = state
                 .gateway
-                .send_message(&inbound, &state.context.safe_error_reply)
+                .send_message(&inbound, &state.safe_error_reply)
                 .await
             {
                 tracing::error!(
@@ -186,11 +186,6 @@ pub async fn run_service() -> color_eyre::Result<()> {
     let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps).await?;
     let state = Arc::new(state);
     let _runtime_services = start_runtime_services(state.as_ref());
-    let _cron_handle = cron_scheduler::spawn(
-        Arc::clone(&state.context.cron_store),
-        state.context.completion_tx.clone(),
-        10,
-    );
     let coordinator =
         SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
     let handler: SessionHandler<InboundMessage> = {
@@ -516,7 +511,7 @@ mod tests {
         INBOUND_ACK_REACTION, dispatch_inbound_with_ack, handle_inbound_once, query_long_memory,
         query_short_memory,
     };
-    use crate::agent::{AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext};
+    use crate::agent::{AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime};
     use crate::channels::{Channel, ChannelInbound, InboundMessage};
     use crate::config::{
         AgentInnerConfig, ExecutionDefaultsConfig, GatewayChannelKind, MemoryRecallConfig,
@@ -989,19 +984,21 @@ mod tests {
             react_loop,
             gateway: Arc::clone(&gateway),
             agents,
-            process_manager: Arc::new(ProcessManager::new()),
-            cron_store: Arc::new(std::sync::Mutex::new(
-                crate::tools::builtin::cron::CronStore::open(&cron_path)
-                    .expect("cron store should open"),
-            )),
-            completion_tx: gateway_tx,
-            safe_error_reply: "safe fallback".to_owned(),
+            tool_runtime: Arc::new(ToolRuntime {
+                process_manager: Arc::new(ProcessManager::new()),
+                completion_tx: gateway_tx.clone(),
+            }),
         });
 
         RuntimeState {
             gateway,
             runtimes: HashMap::from([("default".to_owned(), AgentRuntime::new(runtime_config))]),
             context,
+            cron_store: Arc::new(std::sync::Mutex::new(
+                crate::tools::builtin::cron::CronStore::open(&cron_path)
+                    .expect("cron store should open"),
+            )),
+            safe_error_reply: "safe fallback".to_owned(),
         }
     }
 
@@ -1110,20 +1107,22 @@ mod tests {
             )),
             gateway: Arc::clone(&gateway),
             agents: Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
-            process_manager: Arc::new(ProcessManager::new()),
+            tool_runtime: Arc::new(ToolRuntime {
+                process_manager: Arc::new(ProcessManager::new()),
+                completion_tx: gateway_tx.clone(),
+            }),
+        });
+        let state = RuntimeState {
+            gateway,
+            runtimes: HashMap::new(),
+            context,
             cron_store: Arc::new(std::sync::Mutex::new(
                 crate::tools::builtin::cron::CronStore::open(
                     &std::env::temp_dir().join("simpleclaw_run_unknown_agent_cron.db"),
                 )
                 .expect("cron store should open"),
             )),
-            completion_tx: gateway_tx,
             safe_error_reply: "safe fallback".to_owned(),
-        });
-        let state = RuntimeState {
-            gateway,
-            runtimes: HashMap::new(),
-            context,
         };
         let inbound = inbound_message();
 
