@@ -431,7 +431,10 @@ mod tests {
 
         let output = map_duckduckgo_results("rust", &payload);
         assert_eq!(output.provider, "duckduckgo");
-        assert_eq!(output.results[0].description, "Rust is a systems programming language.");
+        assert_eq!(
+            output.results[0].description,
+            "Rust is a systems programming language."
+        );
         assert_eq!(output.results[0].title, "Rust");
         assert_eq!(output.results[0].url, "https://www.rust-lang.org/");
     }

@@ -24,6 +24,7 @@ pub struct ToolsConfig {
     pub summon: Option<SummonToolConfig>,
     pub task: Option<TaskToolConfig>,
     pub clock: Option<ClockToolConfig>,
+    pub react: Option<ReactToolConfig>,
     pub skills: Option<SkillsToolConfig>,
 }
 
@@ -60,6 +61,9 @@ impl ToolsConfig {
         }
         if self.clock.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("clock".to_owned());
+        }
+        if self.react.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("react".to_owned());
         }
         if self
             .web_fetch
@@ -100,6 +104,7 @@ impl ToolsConfig {
             "summon" => serde_json::to_value(self.summon.clone().unwrap_or_default()).ok()?,
             "task" => serde_json::to_value(self.task.clone().unwrap_or_default()).ok()?,
             "clock" => serde_json::to_value(self.clock.clone().unwrap_or_default()).ok()?,
+            "react" => serde_json::to_value(self.react.clone().unwrap_or_default()).ok()?,
             "skills" => serde_json::to_value(self.skills.clone().unwrap_or_default()).ok()?,
             _ => return None,
         };
@@ -120,6 +125,7 @@ impl ToolsConfig {
             "summon" => self.summon.clone().unwrap_or_default().owner_restricted,
             "task" => self.task.clone().unwrap_or_default().owner_restricted,
             "clock" => self.clock.clone().unwrap_or_default().owner_restricted,
+            "react" => self.react.clone().unwrap_or_default().owner_restricted,
             _ => return None,
         };
         Some(owner_restricted)
@@ -143,6 +149,7 @@ impl ToolsConfig {
                 "summon" => next.summon.get_or_insert_with(Default::default).enabled = false,
                 "task" => next.task.get_or_insert_with(Default::default).enabled = false,
                 "clock" => next.clock.get_or_insert_with(Default::default).enabled = false,
+                "react" => next.react.get_or_insert_with(Default::default).enabled = false,
                 "skills" => next.skills.get_or_insert_with(Default::default).enabled = false,
                 _ => {}
             }
@@ -430,6 +437,24 @@ impl Default for ClockToolConfig {
         Self {
             enabled: default_enabled(),
             owner_restricted: default_owner_restricted(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReactToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub owner_restricted: bool,
+}
+
+impl Default for ReactToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: false,
         }
     }
 }

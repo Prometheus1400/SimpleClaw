@@ -90,6 +90,17 @@ impl Gateway {
         channel.send_message(&inbound.channel_id, content).await
     }
 
+    pub async fn add_reaction(
+        &self,
+        source_channel: GatewayChannelKind,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, source_channel)?;
+        channel.add_reaction(channel_id, message_id, emoji).await
+    }
+
     pub async fn broadcast_typing(&self, inbound: &InboundMessage) -> Result<(), FrameworkError> {
         let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
         channel.broadcast_typing(&inbound.channel_id).await
@@ -126,6 +137,15 @@ mod tests {
             Ok(())
         }
 
+        async fn add_reaction(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
         async fn broadcast_typing(&self, _channel_id: &str) -> Result<(), FrameworkError> {
             Ok(())
         }
@@ -141,6 +161,7 @@ mod tests {
     #[tokio::test]
     async fn gateway_assigns_source_channel_and_session_key() {
         let inbound = ChannelInbound {
+            message_id: "321".to_owned(),
             channel_id: "123".to_owned(),
             guild_id: Some("10".to_owned()),
             is_dm: false,
@@ -162,5 +183,6 @@ mod tests {
             .expect("inbound should decode");
         assert_eq!(next.source_channel, GatewayChannelKind::Discord);
         assert_eq!(next.session_key, "agent:default:discord:123");
+        assert_eq!(next.source_message_id.as_deref(), Some("321"));
     }
 }

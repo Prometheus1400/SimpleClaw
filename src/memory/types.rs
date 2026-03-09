@@ -74,7 +74,7 @@ pub enum MemoryHitStore {
 }
 
 #[derive(Debug, Clone)]
-pub struct MemoryPreinjectHit {
+pub struct MemoryRecallHit {
     pub store: MemoryHitStore,
     pub content: String,
     pub kind: Option<String>,

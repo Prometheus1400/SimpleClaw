@@ -14,6 +14,7 @@ use crate::channels::InboundMessage;
 use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, LoadedConfig};
 use crate::paths::AppPaths;
+use crate::reply_policy::is_no_reply;
 
 pub(crate) mod composition;
 mod daemon;
@@ -33,6 +34,7 @@ use logging::collect_log_history;
 use session::{SessionHandler, SessionWorkerCoordinator};
 
 const SESSION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
+const INBOUND_ACK_REACTION: &str = "👀";
 
 #[tracing::instrument(
     name = "inbound.message",
@@ -114,10 +116,27 @@ pub(crate) async fn handle_inbound_once(
         .await
     {
         Ok(outcome) => {
+            if is_no_reply(&outcome.reply) {
+                tracing::debug!(
+                    status = "suppressed",
+                    reason = "no_reply_sentinel",
+                    "outbound reply"
+                );
+                info!(
+                    status = "completed",
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "inbound lifecycle"
+                );
+                return Ok(());
+            }
+            let transparency = runtime.transparency();
             let outbound = transparency::render_tool_call_transparency(
                 &outcome.reply,
                 &outcome.tool_calls,
-                state.context.tool_call_transparency,
+                transparency.tool_calls,
+                transparency.memory_recall,
+                outcome.memory_recall_used,
+                outcome.memory_recall_hits,
                 inbound.source_channel,
             );
             if let Err(err) = state.gateway.send_message(&inbound, &outbound).await {
@@ -190,10 +209,50 @@ pub async fn run_service() -> color_eyre::Result<()> {
             );
             continue;
         };
-        let key = inbound.session_key.clone();
-        coordinator
-            .dispatch(key, inbound, Arc::clone(&handler))
-            .await;
+        dispatch_inbound_with_ack(
+            &coordinator,
+            Arc::clone(&handler),
+            state.gateway.as_ref(),
+            inbound,
+        )
+        .await;
+    }
+}
+
+async fn dispatch_inbound_with_ack(
+    coordinator: &SessionWorkerCoordinator<InboundMessage>,
+    handler: SessionHandler<InboundMessage>,
+    gateway: &crate::gateway::Gateway,
+    inbound: InboundMessage,
+) {
+    let key = inbound.session_key.clone();
+    let queued = coordinator.dispatch(key, inbound.clone(), handler).await;
+    if !queued || !inbound.invoke || inbound.user_id == "system" {
+        return;
+    }
+    let Some(message_id) = inbound.source_message_id.as_deref() else {
+        return;
+    };
+
+    if let Err(err) = gateway
+        .add_reaction(
+            inbound.source_channel,
+            &inbound.channel_id,
+            message_id,
+            INBOUND_ACK_REACTION,
+        )
+        .await
+    {
+        tracing::warn!(
+            status = "failed",
+            error_kind = "inbound_ack",
+            error = %err,
+            trace_id = %inbound.trace_id,
+            session_id = %inbound.session_key,
+            channel_id = %inbound.channel_id,
+            message_id = %message_id,
+            "inbound ack reaction failed"
+        );
     }
 }
 
@@ -432,13 +491,28 @@ fn query_long_memory(path: &Path, limit: usize) -> color_eyre::Result<Vec<LongMe
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
+    use std::future::pending;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use async_trait::async_trait;
     use rusqlite::Connection;
+    use tokio::sync::{Mutex, mpsc};
+    use tokio::time::{Duration, timeout};
 
-    use super::{query_long_memory, query_short_memory};
+    use super::{
+        INBOUND_ACK_REACTION, dispatch_inbound_with_ack, query_long_memory, query_short_memory,
+    };
+    use crate::channels::{Channel, ChannelInbound, InboundMessage};
+    use crate::config::{GatewayChannelKind, RoutingConfig};
+    use crate::error::FrameworkError;
+    use crate::gateway::Gateway;
+    use crate::run::session::{SessionHandler, SessionWorkerCoordinator};
+    use crate::telemetry::next_trace_id;
 
     fn temp_db_path(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -524,5 +598,176 @@ mod tests {
         assert_eq!(rows[1].content, "fact-1");
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[derive(Default)]
+    struct AckCaptureChannel {
+        reactions: Mutex<Vec<(String, String, String)>>,
+        fail_reaction: AtomicBool,
+    }
+
+    impl AckCaptureChannel {
+        fn with_reaction_failure() -> Self {
+            Self {
+                reactions: Mutex::new(Vec::new()),
+                fail_reaction: AtomicBool::new(true),
+            }
+        }
+
+        async fn reactions(&self) -> Vec<(String, String, String)> {
+            self.reactions.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl Channel for AckCaptureChannel {
+        async fn send_message(
+            &self,
+            _channel_id: &str,
+            _content: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            channel_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> Result<(), FrameworkError> {
+            self.reactions.lock().await.push((
+                channel_id.to_owned(),
+                message_id.to_owned(),
+                emoji.to_owned(),
+            ));
+            if self.fail_reaction.load(Ordering::Relaxed) {
+                return Err(FrameworkError::Tool(
+                    "simulated reaction failure".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn broadcast_typing(&self, _channel_id: &str) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn listen(&self) -> Result<ChannelInbound, FrameworkError> {
+            pending::<Result<ChannelInbound, FrameworkError>>().await
+        }
+    }
+
+    fn inbound_message() -> InboundMessage {
+        InboundMessage {
+            trace_id: next_trace_id(),
+            source_channel: GatewayChannelKind::Discord,
+            target_agent_id: "default".to_owned(),
+            session_key: "agent:default:discord:chan-1".to_owned(),
+            source_message_id: Some("msg-1".to_owned()),
+            channel_id: "chan-1".to_owned(),
+            guild_id: None,
+            is_dm: false,
+            user_id: "user-1".to_owned(),
+            username: "kaleb".to_owned(),
+            mentioned_bot: true,
+            invoke: true,
+            content: "hello".to_owned(),
+        }
+    }
+
+    fn test_gateway(channel: Arc<dyn Channel>) -> Gateway {
+        let mut channels = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, channel);
+        let (tx, _rx) = mpsc::channel(4);
+        Gateway::new(channels, RoutingConfig::default(), tx)
+    }
+
+    fn test_handler() -> (
+        SessionHandler<InboundMessage>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let handler: SessionHandler<InboundMessage> = Arc::new(move |inbound: InboundMessage| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(inbound.trace_id);
+            })
+        });
+        (handler, rx)
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_adds_seen_reaction_for_invoke_messages() {
+        let channel = Arc::new(AckCaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(60));
+        let (handler, mut processed_rx) = test_handler();
+        let inbound = inbound_message();
+
+        dispatch_inbound_with_ack(&coordinator, handler, &gateway, inbound.clone()).await;
+
+        let processed = timeout(Duration::from_secs(1), processed_rx.recv())
+            .await
+            .expect("message should be processed")
+            .expect("processed trace id should exist");
+        assert_eq!(processed, inbound.trace_id);
+        let reactions = channel.reactions().await;
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].0, inbound.channel_id);
+        assert_eq!(
+            reactions[0].1,
+            inbound.source_message_id.unwrap_or_default()
+        );
+        assert_eq!(reactions[0].2, INBOUND_ACK_REACTION);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_skips_seen_reaction_for_passive_messages() {
+        let channel = Arc::new(AckCaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(60));
+        let (handler, mut processed_rx) = test_handler();
+        let mut inbound = inbound_message();
+        inbound.invoke = false;
+
+        dispatch_inbound_with_ack(&coordinator, handler, &gateway, inbound).await;
+
+        let _ = timeout(Duration::from_secs(1), processed_rx.recv())
+            .await
+            .expect("message should be processed");
+        assert!(channel.reactions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_skips_seen_reaction_for_system_messages() {
+        let channel = Arc::new(AckCaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(60));
+        let (handler, mut processed_rx) = test_handler();
+        let mut inbound = inbound_message();
+        inbound.user_id = "system".to_owned();
+
+        dispatch_inbound_with_ack(&coordinator, handler, &gateway, inbound).await;
+
+        let _ = timeout(Duration::from_secs(1), processed_rx.recv())
+            .await
+            .expect("message should be processed");
+        assert!(channel.reactions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_continues_when_seen_reaction_fails() {
+        let channel = Arc::new(AckCaptureChannel::with_reaction_failure());
+        let gateway = test_gateway(channel.clone());
+        let coordinator = SessionWorkerCoordinator::new(Duration::from_secs(60));
+        let (handler, mut processed_rx) = test_handler();
+        let inbound = inbound_message();
+
+        dispatch_inbound_with_ack(&coordinator, handler, &gateway, inbound).await;
+
+        let _ = timeout(Duration::from_secs(1), processed_rx.recv())
+            .await
+            .expect("message should still be processed");
+        assert_eq!(channel.reactions().await.len(), 1);
     }
 }

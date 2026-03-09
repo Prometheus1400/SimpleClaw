@@ -27,8 +27,8 @@ impl Default for ExecutionConfig {
 pub struct ExecutionDefaultsConfig {
     pub max_steps: u32,
     pub history_messages: u32,
-    pub tool_call_transparency: ToolCallTransparency,
-    pub memory_preinject: MemoryPreinjectConfig,
+    pub transparency: TransparencyConfig,
+    pub memory_recall: MemoryRecallConfig,
     pub safe_error_reply: String,
 }
 
@@ -37,8 +37,8 @@ impl Default for ExecutionDefaultsConfig {
         Self {
             max_steps: default_max_steps(),
             history_messages: default_history_messages(),
-            tool_call_transparency: ToolCallTransparency::default(),
-            memory_preinject: MemoryPreinjectConfig::default(),
+            transparency: TransparencyConfig::default(),
+            memory_recall: MemoryRecallConfig::default(),
             safe_error_reply: default_safe_error_reply(),
         }
     }
@@ -46,34 +46,41 @@ impl Default for ExecutionDefaultsConfig {
 
 impl ExecutionDefaultsConfig {
     pub fn merge_with_overrides(&self, overrides: &AgentExecutionOverrides) -> Self {
-        let memory_preinject = match &overrides.memory_preinject {
-            Some(memory_overrides) => MemoryPreinjectConfig {
+        let memory_recall = match &overrides.memory_recall {
+            Some(memory_overrides) => MemoryRecallConfig {
                 enabled: memory_overrides
                     .enabled
-                    .unwrap_or(self.memory_preinject.enabled),
-                top_k: memory_overrides
-                    .top_k
-                    .unwrap_or(self.memory_preinject.top_k),
+                    .unwrap_or(self.memory_recall.enabled),
+                top_k: memory_overrides.top_k.unwrap_or(self.memory_recall.top_k),
                 min_score: memory_overrides
                     .min_score
-                    .unwrap_or(self.memory_preinject.min_score),
+                    .unwrap_or(self.memory_recall.min_score),
                 long_term_weight: memory_overrides
                     .long_term_weight
-                    .unwrap_or(self.memory_preinject.long_term_weight),
+                    .unwrap_or(self.memory_recall.long_term_weight),
                 max_chars: memory_overrides
                     .max_chars
-                    .unwrap_or(self.memory_preinject.max_chars),
+                    .unwrap_or(self.memory_recall.max_chars),
             },
-            None => self.memory_preinject.clone(),
+            None => self.memory_recall.clone(),
         };
 
         Self {
             max_steps: overrides.max_steps.unwrap_or(self.max_steps),
             history_messages: overrides.history_messages.unwrap_or(self.history_messages),
-            tool_call_transparency: overrides
-                .tool_call_transparency
-                .unwrap_or(self.tool_call_transparency),
-            memory_preinject,
+            transparency: TransparencyConfig {
+                tool_calls: overrides
+                    .transparency
+                    .as_ref()
+                    .and_then(|value| value.tool_calls)
+                    .unwrap_or(self.transparency.tool_calls),
+                memory_recall: overrides
+                    .transparency
+                    .as_ref()
+                    .and_then(|value| value.memory_recall)
+                    .unwrap_or(self.transparency.memory_recall),
+            },
+            memory_recall,
             safe_error_reply: overrides
                 .safe_error_reply
                 .clone()
@@ -82,18 +89,25 @@ impl ExecutionDefaultsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCallTransparency {
-    #[default]
-    Off,
-    Concise,
-    Detailed,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransparencyConfig {
+    pub tool_calls: bool,
+    pub memory_recall: bool,
+}
+
+impl Default for TransparencyConfig {
+    fn default() -> Self {
+        Self {
+            tool_calls: false,
+            memory_recall: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct MemoryPreinjectConfig {
+pub struct MemoryRecallConfig {
     pub enabled: bool,
     pub top_k: u32,
     pub min_score: f32,
@@ -101,20 +115,20 @@ pub struct MemoryPreinjectConfig {
     pub max_chars: u32,
 }
 
-impl Default for MemoryPreinjectConfig {
+impl Default for MemoryRecallConfig {
     fn default() -> Self {
         use super::defaults::*;
         Self {
-            enabled: default_memory_preinject_enabled(),
-            top_k: default_memory_preinject_top_k(),
-            min_score: default_memory_preinject_min_score(),
-            long_term_weight: default_memory_preinject_long_term_weight(),
-            max_chars: default_memory_preinject_max_chars(),
+            enabled: default_memory_recall_enabled(),
+            top_k: default_memory_recall_top_k(),
+            min_score: default_memory_recall_min_score(),
+            long_term_weight: default_memory_recall_long_term_weight(),
+            max_chars: default_memory_recall_max_chars(),
         }
     }
 }
 
-impl MemoryPreinjectConfig {
+impl MemoryRecallConfig {
     pub fn normalized(&self) -> Self {
         Self {
             enabled: self.enabled,
@@ -162,14 +176,21 @@ pub enum SummonMode {
 pub struct AgentExecutionOverrides {
     pub max_steps: Option<u32>,
     pub history_messages: Option<u32>,
-    pub tool_call_transparency: Option<ToolCallTransparency>,
-    pub memory_preinject: Option<MemoryPreinjectOverrides>,
+    pub transparency: Option<TransparencyOverrides>,
+    pub memory_recall: Option<MemoryRecallOverrides>,
     pub safe_error_reply: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
-pub struct MemoryPreinjectOverrides {
+pub struct TransparencyOverrides {
+    pub tool_calls: Option<bool>,
+    pub memory_recall: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryRecallOverrides {
     pub enabled: Option<bool>,
     pub top_k: Option<u32>,
     pub min_score: Option<f32>,
@@ -180,8 +201,8 @@ pub struct MemoryPreinjectOverrides {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentExecutionOverrides, ExecutionDefaultsConfig, MemoryPreinjectOverrides,
-        ToolCallTransparency,
+        AgentExecutionOverrides, ExecutionDefaultsConfig, MemoryRecallOverrides,
+        TransparencyOverrides,
     };
 
     #[test]
@@ -190,8 +211,11 @@ mod tests {
         let overrides = AgentExecutionOverrides {
             max_steps: Some(42),
             history_messages: None,
-            tool_call_transparency: Some(ToolCallTransparency::Detailed),
-            memory_preinject: Some(MemoryPreinjectOverrides {
+            transparency: Some(TransparencyOverrides {
+                tool_calls: Some(true),
+                memory_recall: Some(true),
+            }),
+            memory_recall: Some(MemoryRecallOverrides {
                 enabled: Some(false),
                 top_k: None,
                 min_score: Some(0.9),
@@ -204,21 +228,16 @@ mod tests {
         let merged = defaults.merge_with_overrides(&overrides);
         assert_eq!(merged.max_steps, 42);
         assert_eq!(merged.history_messages, defaults.history_messages);
+        assert!(merged.transparency.tool_calls);
+        assert!(merged.transparency.memory_recall);
+        assert!(!merged.memory_recall.enabled);
+        assert_eq!(merged.memory_recall.top_k, defaults.memory_recall.top_k);
+        assert!((merged.memory_recall.min_score - 0.9).abs() < f32::EPSILON);
         assert_eq!(
-            merged.tool_call_transparency,
-            ToolCallTransparency::Detailed
+            merged.memory_recall.long_term_weight,
+            defaults.memory_recall.long_term_weight
         );
-        assert!(!merged.memory_preinject.enabled);
-        assert_eq!(
-            merged.memory_preinject.top_k,
-            defaults.memory_preinject.top_k
-        );
-        assert!((merged.memory_preinject.min_score - 0.9).abs() < f32::EPSILON);
-        assert_eq!(
-            merged.memory_preinject.long_term_weight,
-            defaults.memory_preinject.long_term_weight
-        );
-        assert_eq!(merged.memory_preinject.max_chars, 2500);
+        assert_eq!(merged.memory_recall.max_chars, 2500);
         assert_eq!(merged.safe_error_reply, "custom");
     }
 
@@ -229,12 +248,16 @@ mod tests {
         assert_eq!(merged.max_steps, defaults.max_steps);
         assert_eq!(merged.history_messages, defaults.history_messages);
         assert_eq!(
-            merged.tool_call_transparency,
-            defaults.tool_call_transparency
+            merged.transparency.tool_calls,
+            defaults.transparency.tool_calls
         );
         assert_eq!(
-            merged.memory_preinject.long_term_weight,
-            defaults.memory_preinject.long_term_weight
+            merged.transparency.memory_recall,
+            defaults.transparency.memory_recall
+        );
+        assert_eq!(
+            merged.memory_recall.long_term_weight,
+            defaults.memory_recall.long_term_weight
         );
         assert_eq!(merged.safe_error_reply, defaults.safe_error_reply);
     }

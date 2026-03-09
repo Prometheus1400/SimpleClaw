@@ -36,7 +36,12 @@ where
         }
     }
 
-    pub(crate) async fn dispatch(&self, key: String, message: T, handler: SessionHandler<T>) {
+    pub(crate) async fn dispatch(
+        &self,
+        key: String,
+        message: T,
+        handler: SessionHandler<T>,
+    ) -> bool {
         let mut pending = Some(message);
 
         for attempt in 0..=1 {
@@ -46,7 +51,7 @@ where
                 .expect("pending message is always present before send attempt");
 
             match tx.send(payload) {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(err) => {
                     pending = Some(err.0);
                     self.remove_worker_if_matches(&key, worker_id).await;
@@ -56,11 +61,13 @@ where
                             session_key = %key,
                             "dropping inbound message after worker enqueue retries were exhausted"
                         );
-                        return;
+                        return false;
                     }
                 }
             }
         }
+
+        false
     }
 
     async fn worker_sender_for_key(

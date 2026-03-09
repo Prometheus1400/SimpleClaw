@@ -26,8 +26,9 @@ pub use database::{DatabaseConfig, EmbeddingConfig};
 #[allow(unused_imports)]
 pub use execution::ExecutionDefaultsConfig;
 #[allow(unused_imports)]
-pub use execution::{AgentExecutionOverrides, MemoryPreinjectOverrides};
-pub use execution::{ExecutionConfig, LogLevel, MemoryPreinjectConfig, ToolCallTransparency};
+pub use execution::{AgentExecutionOverrides, MemoryRecallOverrides};
+#[allow(unused_imports)]
+pub use execution::{ExecutionConfig, LogLevel, MemoryRecallConfig, TransparencyConfig};
 pub use gateway::{ChannelConfig, GatewayChannelKind, GatewayConfig};
 pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, ProvidersConfig};
 #[allow(unused_imports)]
@@ -35,9 +36,9 @@ pub use routing::RoutingConfig;
 #[allow(unused_imports)]
 pub use tools::{
     ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemorizeToolConfig,
-    MemoryToolConfig, ProcessToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
-    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchProvider,
-    WebSearchToolConfig,
+    MemoryToolConfig, ProcessToolConfig, ReactToolConfig, ReadToolConfig, SkillsToolConfig,
+    SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig,
+    WebSearchProvider, WebSearchToolConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -375,15 +376,15 @@ mod tests {
         let execution = ExecutionConfig::default();
         assert_eq!(execution.defaults.history_messages, 10);
         assert_eq!(execution.log_level, LogLevel::Info);
-        assert!(execution.defaults.memory_preinject.enabled);
-        assert_eq!(execution.defaults.memory_preinject.top_k, 3);
-        assert!((execution.defaults.memory_preinject.min_score - 0.72).abs() < f32::EPSILON);
+        assert!(execution.defaults.memory_recall.enabled);
+        assert_eq!(execution.defaults.memory_recall.top_k, 3);
+        assert!((execution.defaults.memory_recall.min_score - 0.72).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn execution_defaults_memory_preinject_accepts_overrides() {
+    fn execution_defaults_memory_recall_accepts_overrides() {
         let yaml = r#"
-memory_preinject:
+memory_recall:
   enabled: false
   top_k: 5
   min_score: 0.8
@@ -391,17 +392,17 @@ memory_preinject:
   max_chars: 900
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml).expect("valid yaml");
-        assert!(!parsed.memory_preinject.enabled);
-        assert_eq!(parsed.memory_preinject.top_k, 5);
-        assert!((parsed.memory_preinject.min_score - 0.8).abs() < f32::EPSILON);
-        assert!((parsed.memory_preinject.long_term_weight - 0.7).abs() < f32::EPSILON);
-        assert_eq!(parsed.memory_preinject.max_chars, 900);
+        assert!(!parsed.memory_recall.enabled);
+        assert_eq!(parsed.memory_recall.top_k, 5);
+        assert!((parsed.memory_recall.min_score - 0.8).abs() < f32::EPSILON);
+        assert!((parsed.memory_recall.long_term_weight - 0.7).abs() < f32::EPSILON);
+        assert_eq!(parsed.memory_recall.max_chars, 900);
     }
 
     #[test]
-    fn execution_defaults_memory_preinject_rejects_unknown_fields() {
+    fn execution_defaults_memory_recall_rejects_unknown_fields() {
         let yaml = r#"
-memory_preinject:
+memory_recall:
   enabled: true
   bogus: 1
 "#;
@@ -410,9 +411,19 @@ memory_preinject:
     }
 
     #[test]
-    fn execution_defaults_memory_preinject_rejects_legacy_short_term_weight() {
+    fn execution_defaults_rejects_legacy_memory_preinject_key() {
         let yaml = r#"
 memory_preinject:
+  enabled: true
+"#;
+        let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn execution_defaults_memory_recall_rejects_legacy_short_term_weight() {
+        let yaml = r#"
+memory_recall:
   short_term_weight: 0.3
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml);
@@ -420,8 +431,8 @@ memory_preinject:
     }
 
     #[test]
-    fn runtime_memory_preinject_normalized_clamps_values() {
-        let config = MemoryPreinjectConfig {
+    fn runtime_memory_recall_normalized_clamps_values() {
+        let config = MemoryRecallConfig {
             enabled: true,
             top_k: 999,
             min_score: 5.0,
@@ -438,28 +449,28 @@ memory_preinject:
     #[test]
     fn execution_defaults_tool_call_transparency_defaults_off() {
         let execution = ExecutionConfig::default();
-        assert_eq!(
-            execution.defaults.tool_call_transparency,
-            ToolCallTransparency::Off
-        );
+        assert!(!execution.defaults.transparency.tool_calls);
+        assert!(!execution.defaults.transparency.memory_recall);
     }
 
     #[test]
     fn execution_defaults_tool_call_transparency_accepts_values() {
         let yaml = r#"
-tool_call_transparency: detailed
+transparency:
+  tool_calls: true
+  memory_recall: true
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml).expect("valid yaml");
-        assert_eq!(
-            parsed.tool_call_transparency,
-            ToolCallTransparency::Detailed
-        );
+        assert!(parsed.transparency.tool_calls);
+        assert!(parsed.transparency.memory_recall);
     }
 
     #[test]
     fn execution_defaults_tool_call_transparency_rejects_unknown_value() {
         let yaml = r#"
-tool_call_transparency: verbose
+transparency:
+  tool_calls: true
+  verbose: true
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml);
         assert!(parsed.is_err());
@@ -541,6 +552,7 @@ channels:
                 "task".to_owned(),
                 "web_search".to_owned(),
                 "clock".to_owned(),
+                "react".to_owned(),
                 "web_fetch".to_owned(),
                 "read".to_owned(),
                 "edit".to_owned(),

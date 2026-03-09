@@ -83,9 +83,9 @@
 - Use `child.wait()` in a spawned task and update session state on completion.
 - Avoid periodic polling as the primary completion mechanism.
 
-### 12. Memory Pre-injection Calls `config.normalized()` Twice
+### 12. Memory Recall Calls `config.normalized()` Twice
 
-**Problem:** In `query_preinject_hits`, `config.normalized()` is called, and then `rank_preinject_hits` internally calls it again on the same config. This is wasteful and could lead to subtle bugs if normalization isn't idempotent.
+**Problem:** In `query_recall_hits`, `config.normalized()` is called, and then `rank_recall_hits` internally calls it again on the same config. This is wasteful and could lead to subtle bugs if normalization isn't idempotent.
 
 **Improvement:**
 - Normalize once at the entry point and pass the normalized config through.
@@ -145,7 +145,7 @@
 - Move methods used by runtime/tools into the trait surface first:
   - `append_message`
   - `recent_messages`
-  - `query_preinject_hits`
+  - `query_recall_hits`
   - `memorize`
   - `semantic_forget_long_term`
   - `list_long_term_facts`

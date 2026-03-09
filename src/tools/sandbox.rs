@@ -342,6 +342,7 @@ mod tests {
             owner_ids: vec![],
             process_manager: Arc::new(ProcessManager::new()),
             invoker: Arc::new(NoopInvoker),
+            gateway: None,
             completion_tx: None,
             completion_route: None,
         }

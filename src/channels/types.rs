@@ -2,6 +2,7 @@ use crate::config::GatewayChannelKind;
 
 #[derive(Debug, Clone)]
 pub struct ChannelInbound {
+    pub message_id: String,
     pub channel_id: String,
     pub guild_id: Option<String>,
     pub is_dm: bool,
@@ -17,6 +18,7 @@ pub struct InboundMessage {
     pub source_channel: GatewayChannelKind,
     pub target_agent_id: String,
     pub session_key: String,
+    pub source_message_id: Option<String>,
     pub channel_id: String,
     pub guild_id: Option<String>,
     pub is_dm: bool,

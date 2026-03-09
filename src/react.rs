@@ -1,7 +1,9 @@
 use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
+use crate::gateway::Gateway;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, Role};
+use crate::reply_policy::no_reply_prompt_instruction;
 use crate::tools::ProcessManager;
 use crate::tools::skill::SkillFactory;
 use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
@@ -33,14 +35,18 @@ pub struct RunParams<'a> {
     pub user_id: String,
     pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
+    pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
+    pub source_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
     pub reply: String,
     pub tool_calls: Vec<ToolExecutionResult>,
+    pub memory_recall_used: bool,
+    pub memory_recall_hits: usize,
 }
 
 impl ReactLoop {
@@ -90,6 +96,7 @@ impl ReactLoop {
             owner_ids: params.owner_ids.clone(),
             process_manager: Arc::clone(&params.process_manager),
             invoker,
+            gateway: params.gateway.clone(),
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
         };
@@ -116,13 +123,22 @@ async fn run_loop(
     active_tools: &crate::tools::ActiveTools,
     history: &mut Vec<Message>,
 ) -> Result<RunOutcome, FrameworkError> {
-    let definitions = active_tools.definitions();
+    let turn_tools = if params.source_message_id.is_some() {
+        active_tools.clone()
+    } else {
+        active_tools.without("react")
+    };
+    let definitions = turn_tools.definitions();
     let run_started = Instant::now();
     let extra_instructions = dispatcher.prompt_instructions(&definitions);
+    let no_reply_instructions = no_reply_prompt_instruction();
     let effective_system_prompt = if extra_instructions.is_empty() {
-        params.system_prompt.to_owned()
+        format!("{}{}", params.system_prompt, no_reply_instructions)
     } else {
-        format!("{}{extra_instructions}", params.system_prompt)
+        format!(
+            "{}{}{}",
+            params.system_prompt, extra_instructions, no_reply_instructions
+        )
     };
 
     let tool_specs = if dispatcher.should_send_tool_specs() {
@@ -166,7 +182,7 @@ async fn run_loop(
         match dispatcher.parse_response(&response) {
             DispatchAction::ToolCalls(calls) => {
                 let results = dispatcher
-                    .execute_tool_calls(&calls, active_tools, tool_env, params.session_id)
+                    .execute_tool_calls(&calls, &turn_tools, tool_env, params.session_id)
                     .instrument(turn_span.clone())
                     .await;
                 executed_tool_calls.extend(results.iter().cloned());
@@ -184,6 +200,8 @@ async fn run_loop(
                 return Ok(RunOutcome {
                     reply: text,
                     tool_calls: executed_tool_calls,
+                    memory_recall_used: false,
+                    memory_recall_hits: 0,
                 });
             }
             DispatchAction::Empty => {
@@ -201,6 +219,8 @@ async fn run_loop(
     Ok(RunOutcome {
         reply: "max_steps reached without final response".to_owned(),
         tool_calls: executed_tool_calls,
+        memory_recall_used: false,
+        memory_recall_hits: 0,
     })
 }
 
@@ -233,6 +253,7 @@ mod tests {
             "task",
             "web_search",
             "clock",
+            "react",
             "web_fetch",
             "read",
             "edit",

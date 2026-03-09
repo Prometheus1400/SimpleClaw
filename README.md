@@ -76,7 +76,7 @@ flowchart LR
 - `MemoryStore` (`src/memory/mod.rs`):
   - short-term DB: `sessions`, `messages`
   - long-term DB: `ltm_facts`, `ltm_facts_vec`
-  - semantic preinject query path and long-term memory tools.
+  - semantic recall query path and long-term memory tools.
 
 ## Message Lifecycle (Step-by-Step)
 
@@ -108,7 +108,7 @@ sequenceDiagram
         IN->>GW: broadcast_typing (non-system users)
         IN->>AR: run(...)
         AR->>M: append user message
-        AR->>M: recent_messages + preinject query
+        AR->>M: recent_messages + recall query
         AR->>RL: run(params, history)
         loop up to max_steps
             RL->>P: generate(system_prompt, history, tool_specs)
@@ -145,13 +145,14 @@ sequenceDiagram
 ### 3) Prompt construction per turn
 - Base prompt: concatenated workspace files in this order:
   - `IDENTITY.md`, `AGENT.md`, `USER.md`, `MEMORY.md`, `SOUL.md`
-- Optional memory preinject appends a scored long-term context section.
+- Optional memory recall appends a scored long-term context section.
 - Caller context is always injected (`CURRENT SPEAKER` with user id/name).
 
 ### 4) Tool execution security controls
 - Owner restriction is configured per built-in tool via `owner_restricted` (default: `true`).
 - Dynamic skill tools are not owner-restricted.
 - If `runtime.owner_ids` is empty, owner-restricted tools fail as misconfigured.
+- `tools.summon.allowed` is a strict allowlist. Empty or omitted means no summon targets are allowed.
 - Sandbox gate (`tools/sandbox.rs`) enforces sandbox-aware tools when `sandbox=on`.
 
 ### 5) Background process completion is an inbound event

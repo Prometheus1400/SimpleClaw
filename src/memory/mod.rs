@@ -9,21 +9,21 @@ use rusqlite::params;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::config::{DatabaseConfig, EmbeddingConfig, MemoryPreinjectConfig};
+use crate::config::{DatabaseConfig, EmbeddingConfig, MemoryRecallConfig};
 use crate::error::FrameworkError;
 use crate::paths::AppPaths;
 
 mod embedder;
-mod preinject;
+mod recall;
 mod schema;
 mod types;
 
 use embedder::{embed_text, encode_f32_blob};
-use preinject::{parse_memory_kind, rank_preinject_hits};
+use recall::{parse_memory_kind, rank_recall_hits};
 use schema::register_sqlite_vec;
 pub use types::{
     LongTermFactSummary, LongTermForgetMatch, LongTermForgetResult, MemorizeResult, MemoryHitStore,
-    MemoryPreinjectHit, StoredMessage, StoredRole,
+    MemoryRecallHit, StoredMessage, StoredRole,
 };
 
 pub type DynMemory = Arc<dyn Memory>;
@@ -43,12 +43,12 @@ pub trait Memory: Send + Sync {
         query: &str,
         top_k: usize,
     ) -> Result<Vec<String>, FrameworkError>;
-    async fn query_preinject_hits(
+    async fn query_recall_hits(
         &self,
         session_id: &str,
         query: &str,
-        config: &MemoryPreinjectConfig,
-    ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError>;
+        config: &MemoryRecallConfig,
+    ) -> Result<Vec<MemoryRecallHit>, FrameworkError>;
     async fn semantic_forget_long_term(
         &self,
         query: &str,
@@ -309,16 +309,14 @@ impl MemoryStore {
     ) -> Result<Vec<String>, FrameworkError> {
         let top_k = top_k.max(1);
         let top_k_u32 = u32::try_from(top_k).unwrap_or(u32::MAX);
-        let config = MemoryPreinjectConfig {
+        let config = MemoryRecallConfig {
             enabled: true,
             top_k: top_k_u32,
             min_score: 0.0,
             long_term_weight: 1.0,
             max_chars: 4000,
         };
-        let hits = self
-            .query_preinject_hits(session_id, query, &config)
-            .await?;
+        let hits = self.query_recall_hits(session_id, query, &config).await?;
         Ok(hits
             .into_iter()
             .map(|hit| match hit.store {
@@ -331,17 +329,17 @@ impl MemoryStore {
             .collect())
     }
 
-    pub async fn query_preinject_hits(
+    pub async fn query_recall_hits(
         &self,
         session_id: &str,
         query: &str,
-        config: &MemoryPreinjectConfig,
-    ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError> {
+        config: &MemoryRecallConfig,
+    ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
         let started = std::time::Instant::now();
         debug!(
             status = "started",
             session_id = %session_id,
-            "memory preinject query"
+            "memory recall query"
         );
         let config = config.normalized();
         let query_embedding = embed_text(self.embedder_ref()?, query).await?;
@@ -378,7 +376,7 @@ impl MemoryStore {
                     let similarity = 1.0 - (distance * distance / 2.0);
                     let imp = (importance as f32).clamp(1.0, 5.0);
                     let with_importance = similarity * (1.0 + (imp - 1.0) * 0.1);
-                    out.push(MemoryPreinjectHit {
+                    out.push(MemoryRecallHit {
                         store: MemoryHitStore::LongTerm,
                         content,
                         kind: Some(kind),
@@ -387,17 +385,17 @@ impl MemoryStore {
                         final_score: with_importance * config.long_term_weight,
                     });
                 }
-                Ok::<Vec<MemoryPreinjectHit>, rusqlite::Error>(out)
+                Ok::<Vec<MemoryRecallHit>, rusqlite::Error>(out)
             })
             .await
             .map_err(|e| FrameworkError::Config(e.to_string()))??;
 
-        let hits = rank_preinject_hits(candidates, &config);
+        let hits = rank_recall_hits(candidates, &config);
         debug!(
             status = "completed",
             session_id = %session_id,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "memory preinject query"
+            "memory recall query"
         );
         Ok(hits)
     }
@@ -766,13 +764,13 @@ impl Memory for MemoryStore {
         MemoryStore::semantic_query_combined(self, session_id, query, top_k).await
     }
 
-    async fn query_preinject_hits(
+    async fn query_recall_hits(
         &self,
         session_id: &str,
         query: &str,
-        config: &MemoryPreinjectConfig,
-    ) -> Result<Vec<MemoryPreinjectHit>, FrameworkError> {
-        MemoryStore::query_preinject_hits(self, session_id, query, config).await
+        config: &MemoryRecallConfig,
+    ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+        MemoryStore::query_recall_hits(self, session_id, query, config).await
     }
 
     async fn semantic_forget_long_term(

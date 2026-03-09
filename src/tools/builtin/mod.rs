@@ -6,6 +6,7 @@ mod forget;
 mod memorize;
 mod memory;
 mod process;
+mod react;
 mod read;
 mod summon;
 mod task;
@@ -23,6 +24,7 @@ pub(crate) fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(task::TaskTool::default()),
         Box::new(web_search::WebSearchTool::default()),
         Box::new(clock::ClockTool::UtcNow),
+        Box::new(react::ReactTool::default()),
         Box::new(web_fetch::WebFetchTool::default()),
         Box::new(read::ReadTool::default()),
         Box::new(edit::EditTool::default()),

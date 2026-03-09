@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -128,7 +128,7 @@ pub async fn run_single_gateway_roundtrip(
     fs::create_dir_all(&workspace_dir).wrap_err("failed to create test workspace")?;
 
     let mut global = GlobalConfig::default();
-    global.execution.defaults.memory_preinject.enabled = false;
+    global.execution.defaults.memory_recall.enabled = false;
     global.execution.defaults.max_steps = config.max_steps;
     global.agents.default = config.agent_id.clone();
     global.agents.list = vec![AgentEntryConfig {
@@ -167,6 +167,7 @@ pub async fn run_single_gateway_roundtrip(
         source_channel: GatewayChannelKind::Discord,
         target_agent_id: config.agent_id.clone(),
         session_key: format!("agent:{}:discord:{}", config.agent_id, config.channel_id),
+        source_message_id: Some("test-message-1".to_owned()),
         channel_id: config.channel_id.clone(),
         guild_id: None,
         is_dm: false,
@@ -259,6 +260,15 @@ impl Channel for CaptureChannel {
             channel_id: channel_id.to_owned(),
             content: content.to_owned(),
         });
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> Result<(), FrameworkError> {
         Ok(())
     }
 
@@ -361,11 +371,13 @@ impl ChannelFactory for StaticChannelFactory {
 }
 
 fn create_ephemeral_paths() -> color_eyre::Result<EphemeralPaths> {
+    static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .wrap_err("clock drift while building integration temp dir")?
         .as_nanos();
-    let root_dir = std::env::temp_dir().join(format!("simpleclaw_integration_{nanos}"));
+    let nonce = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root_dir = std::env::temp_dir().join(format!("simpleclaw_integration_{nanos}_{nonce}"));
     let workspace_dir = root_dir.join("workspace");
     let db_dir = root_dir.join("db");
     let short_term_db_path = db_dir.join("short.db");

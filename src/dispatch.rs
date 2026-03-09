@@ -19,9 +19,11 @@ pub(crate) struct ParsedToolCall {
 #[derive(Debug, Clone)]
 pub(crate) struct ToolExecutionResult {
     pub name: String,
+    #[allow(dead_code)]
     pub args_json: String,
     pub output: String,
     pub success: bool,
+    #[allow(dead_code)]
     pub elapsed_ms: u64,
     pub tool_call_id: Option<String>,
     pub nested_tool_calls: Vec<ToolExecutionResult>,
