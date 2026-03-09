@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
@@ -60,15 +60,6 @@ pub(crate) trait ProcessManagerFactory: Send + Sync {
     fn create_process_manager(&self) -> Arc<ProcessManager>;
 }
 
-pub(crate) trait ReactLoopFactory: Send + Sync {
-    fn create_react_loop(
-        &self,
-        provider_factory: ProviderFactory,
-        tool_factory: ToolFactory,
-        skill_factory: SkillFactory,
-    ) -> Arc<ReactLoop>;
-}
-
 pub(crate) struct RuntimeDependencies {
     pub provider_factory_builder: Arc<dyn ProviderFactoryBuilder>,
     pub memory_factory: Arc<dyn MemoryFactory>,
@@ -76,7 +67,6 @@ pub(crate) struct RuntimeDependencies {
     pub tool_factory_builder: Arc<dyn ToolFactoryBuilder>,
     pub skill_factory_builder: Arc<dyn SkillFactoryBuilder>,
     pub process_manager_factory: Arc<dyn ProcessManagerFactory>,
-    pub react_loop_factory: Arc<dyn ReactLoopFactory>,
 }
 
 impl Default for RuntimeDependencies {
@@ -88,7 +78,6 @@ impl Default for RuntimeDependencies {
             tool_factory_builder: Arc::new(DefaultToolFactoryBuilder),
             skill_factory_builder: Arc::new(DefaultSkillFactoryBuilder),
             process_manager_factory: Arc::new(DefaultProcessManagerFactory),
-            react_loop_factory: Arc::new(DefaultReactLoopFactory),
         }
     }
 }
@@ -191,27 +180,14 @@ impl ProcessManagerFactory for DefaultProcessManagerFactory {
     }
 }
 
-struct DefaultReactLoopFactory;
-
-impl ReactLoopFactory for DefaultReactLoopFactory {
-    fn create_react_loop(
-        &self,
-        provider_factory: ProviderFactory,
-        tool_factory: ToolFactory,
-        skill_factory: SkillFactory,
-    ) -> Arc<ReactLoop> {
-        Arc::new(ReactLoop::new(
-            provider_factory,
-            tool_factory,
-            skill_factory,
-        ))
-    }
-}
-
 pub(crate) struct RuntimeState {
     pub gateway: Arc<Gateway>,
     pub runtimes: HashMap<String, AgentRuntime>,
     pub context: Arc<RuntimeContext>,
+}
+
+pub(crate) struct RuntimeServices {
+    _gateway_listeners: crate::gateway::GatewayListeners,
 }
 
 pub(crate) async fn assemble_runtime_state(
@@ -295,10 +271,6 @@ pub(crate) async fn assemble_runtime_state(
 
     let mut tool_factory = deps.tool_factory_builder.create_tool_factory();
     tool_factory.register_builtin(Box::new(CronTool::new(Arc::clone(&cron_store))));
-    let react_loop =
-        deps.react_loop_factory
-            .create_react_loop(provider_factory, tool_factory, skill_factory);
-
     let directory = Arc::new(AgentDirectory::new(agent_configs_map, memories_map));
     let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
     for (agent_id, config) in directory.iter_configs() {
@@ -306,22 +278,19 @@ pub(crate) async fn assemble_runtime_state(
     }
 
     let process_manager = deps.process_manager_factory.create_process_manager();
-
-    let invoker: Arc<dyn crate::tools::AgentInvoker> = Arc::new(DirectAgentInvoker::new(
-        Arc::clone(&react_loop),
-        Arc::clone(&directory),
-        Arc::clone(&process_manager),
-    ));
-    react_loop.set_invoker(invoker);
+    let react_loop = Arc::new_cyclic(|react_loop: &Weak<ReactLoop>| {
+        let invoker: Arc<dyn crate::tools::AgentInvoker> = Arc::new(DirectAgentInvoker::new(
+            react_loop.clone(),
+            Arc::clone(&directory),
+            Arc::clone(&process_manager),
+        ));
+        ReactLoop::new(provider_factory, tool_factory, skill_factory, invoker)
+    });
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Arc::new(Gateway::new(
-        channels,
-        loaded.global.gateway.routing.clone(),
-        gateway_tx.clone(),
-    ));
+    let gateway = Arc::new(Gateway::new(channels, loaded.global.gateway.routing.clone()));
 
     let context = Arc::new(RuntimeContext {
         react_loop,
@@ -341,6 +310,12 @@ pub(crate) async fn assemble_runtime_state(
         },
         gateway_rx,
     ))
+}
+
+pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
+    RuntimeServices {
+        _gateway_listeners: state.gateway.start(state.context.completion_tx.clone()),
+    }
 }
 
 pub(crate) fn agent_workspace_memory_paths(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {

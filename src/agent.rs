@@ -695,21 +695,19 @@ mod tests {
     fn test_gateway() -> Arc<Gateway> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, Arc::new(QuietChannel));
-        let (tx, _rx) = mpsc::channel(1);
-        Arc::new(Gateway::new(channels, RoutingConfig::default(), tx))
+        Arc::new(Gateway::new(channels, RoutingConfig::default()))
     }
 
     fn test_react_loop(provider: Arc<dyn Provider>) -> Arc<ReactLoop> {
-        let react_loop = Arc::new(ReactLoop::new(
+        Arc::new(ReactLoop::new(
             ProviderFactory::from_parts(HashMap::from([(
                 "default".to_owned(),
                 (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
             )])),
             default_factory(),
             SkillFactory::new(PathBuf::from("/tmp/simpleclaw-skill-test")),
-        ));
-        react_loop.set_invoker(Arc::new(NoopInvoker));
-        react_loop
+            Arc::new(NoopInvoker),
+        ))
     }
 
     fn test_runtime_context(memory: DynMemory, react_loop: Arc<ReactLoop>) -> RuntimeContext {

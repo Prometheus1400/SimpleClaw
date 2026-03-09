@@ -22,7 +22,7 @@ use crate::paths::AppPaths;
 use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
 use crate::run::composition::{
     ChannelFactory, MemoryFactory, ProviderFactoryBuilder, RuntimeDependencies,
-    assemble_runtime_state,
+    assemble_runtime_state, start_runtime_services,
 };
 use crate::run::handle_inbound_once;
 
@@ -220,6 +220,9 @@ pub async fn run_single_gateway_roundtrip(
     let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
         .await
         .wrap_err("failed to assemble runtime state for integration harness")?;
+    let _runtime_services = config
+        .route_via_gateway_listener
+        .then(|| start_runtime_services(&state));
 
     let memory_session_id = if config.route_via_gateway_listener {
         run_via_gateway_listener(&state, &mut inbound_rx, &channel, &config).await?

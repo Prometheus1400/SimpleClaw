@@ -29,6 +29,7 @@ pub use logging::{RETAIN_DAILY_LOG_FILES, RotatingLogWriter};
 
 use composition::{
     RuntimeDependencies, RuntimeState, agent_workspace_memory_paths, assemble_runtime_state,
+    start_runtime_services,
 };
 use daemon::{is_process_running, read_pid, state_paths};
 use logging::collect_log_history;
@@ -184,6 +185,7 @@ pub async fn run_service() -> color_eyre::Result<()> {
     let deps = RuntimeDependencies::default();
     let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps).await?;
     let state = Arc::new(state);
+    let _runtime_services = start_runtime_services(state.as_ref());
     let _cron_handle = cron_scheduler::spawn(
         Arc::clone(&state.context.cron_store),
         state.context.completion_tx.clone(),
@@ -940,8 +942,7 @@ mod tests {
     fn test_gateway(channel: Arc<dyn Channel>) -> Gateway {
         let mut channels = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
-        let (tx, _rx) = mpsc::channel(4);
-        Gateway::new(channels, RoutingConfig::default(), tx)
+        Gateway::new(channels, RoutingConfig::default())
     }
 
     fn lifecycle_runtime_state(
@@ -952,7 +953,7 @@ mod tests {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
         let (gateway_tx, _gateway_rx) = mpsc::channel(4);
-        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default(), gateway_tx.clone()));
+        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default()));
         let mut agent_config = AgentInnerConfig::default();
         agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
         let runtime_config = AgentRuntimeConfig {
@@ -972,8 +973,8 @@ mod tests {
             )])),
             default_factory(),
             SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
+            Arc::new(NoopInvoker),
         ));
-        react_loop.set_invoker(Arc::new(NoopInvoker));
 
         let agents = Arc::new(AgentDirectory::new(
             HashMap::from([("default".to_owned(), runtime_config.clone())]),
@@ -1099,12 +1100,13 @@ mod tests {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel.clone());
         let (gateway_tx, _gateway_rx) = mpsc::channel(4);
-        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default(), gateway_tx.clone()));
+        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default()));
         let context = Arc::new(RuntimeContext {
             react_loop: Arc::new(ReactLoop::new(
                 ProviderFactory::from_parts(HashMap::new()),
                 default_factory(),
                 SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
+                Arc::new(NoopInvoker),
             )),
             gateway: Arc::clone(&gateway),
             agents: Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::task::JoinHandle;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
@@ -16,21 +17,44 @@ mod transport;
 
 pub struct Gateway {
     channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
+    inbound_policy: RoutingConfig,
+}
+
+pub struct GatewayListeners {
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl GatewayListeners {
+    pub fn shutdown(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for GatewayListeners {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl Gateway {
-    pub fn new(
-        channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
-        inbound_policy: RoutingConfig,
-        inbound_tx: mpsc::Sender<InboundMessage>,
-    ) -> Self {
-        for (kind, channel) in &channels {
+    pub fn new(channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>, inbound_policy: RoutingConfig) -> Self {
+        Self {
+            channels,
+            inbound_policy,
+        }
+    }
+
+    pub fn start(&self, inbound_tx: mpsc::Sender<InboundMessage>) -> GatewayListeners {
+        let mut tasks = Vec::with_capacity(self.channels.len());
+        for (kind, channel) in &self.channels {
             let kind = *kind;
             let channel = Arc::clone(channel);
             let inbound_tx = inbound_tx.clone();
-            let inbound_policy = inbound_policy.clone();
+            let inbound_policy = self.inbound_policy.clone();
             let listener_span = info_span!("gateway.listen");
-            tokio::spawn(
+            tasks.push(tokio::spawn(
                 async move {
                     loop {
                         match channel.listen().await {
@@ -75,10 +99,10 @@ impl Gateway {
                     }
                 }
                 .instrument(listener_span),
-            );
+            ));
         }
 
-        Self { channels }
+        GatewayListeners { tasks }
     }
 
     pub async fn send_message(
@@ -176,7 +200,8 @@ mod tests {
         let mut channels = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
         let (tx, mut rx) = mpsc::channel(1);
-        let _gateway = Gateway::new(channels, RoutingConfig::default(), tx);
+        let gateway = Gateway::new(channels, RoutingConfig::default());
+        let _listeners = gateway.start(tx);
         let next = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("gateway should emit normalized inbound")

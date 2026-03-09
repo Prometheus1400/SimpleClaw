@@ -8,7 +8,7 @@ use crate::tools::ProcessManager;
 use crate::tools::skill::SkillFactory;
 use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
 use crate::{channels::InboundMessage, memory::DynMemory};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -20,7 +20,7 @@ pub struct ReactLoop {
     provider_factory: ProviderFactory,
     tool_factory: ToolFactory,
     skill_factory: SkillFactory,
-    invoker: OnceLock<Arc<dyn AgentInvoker>>,
+    invoker: Arc<dyn AgentInvoker>,
 }
 
 pub struct RunParams<'a> {
@@ -55,20 +55,13 @@ impl ReactLoop {
         provider_factory: ProviderFactory,
         tool_factory: ToolFactory,
         skill_factory: SkillFactory,
+        invoker: Arc<dyn AgentInvoker>,
     ) -> Self {
         Self {
             provider_factory,
             tool_factory,
             skill_factory,
-            invoker: OnceLock::new(),
-        }
-    }
-
-    /// Inject the agent invoker. Must be called exactly once after construction
-    /// and before the first call to [`run`](Self::run).
-    pub fn set_invoker(&self, invoker: Arc<dyn AgentInvoker>) {
-        if self.invoker.set(invoker).is_err() {
-            panic!("ReactLoop::set_invoker called more than once");
+            invoker,
         }
     }
 
@@ -88,7 +81,7 @@ impl ReactLoop {
             .supports_native_tools(params.provider_key);
         let dispatcher = resolve_dispatcher(supports_native);
         let skills = self.skill_factory.tools_for_agent(params.agent_id);
-        let invoker = Arc::clone(self.invoker.get().expect("invoker not initialized"));
+        let invoker = Arc::clone(&self.invoker);
         let tool_env = ToolExecEnv {
             agent_id: params.agent_id.to_owned(),
             memory: params.memory.clone(),
