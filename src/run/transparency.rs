@@ -46,14 +46,18 @@ fn summary_lines(
     memory_recall_used: bool,
     memory_recall_hits: usize,
 ) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut parts = Vec::new();
     if tool_calls_enabled && !tool_calls.is_empty() {
-        lines.push(tool_summary_line(tool_calls));
+        parts.push(tool_summary_line(tool_calls));
     }
     if memory_recall_enabled && memory_recall_used {
-        lines.push(memory_recall_summary_line(memory_recall_hits));
+        parts.push(memory_recall_summary_line(memory_recall_hits));
     }
-    lines
+    if parts.is_empty() {
+        Vec::new()
+    } else {
+        vec![parts.join(" | ")]
+    }
 }
 
 fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
@@ -77,10 +81,10 @@ fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
             let (ok, err) = counts[name];
             let mut parts = Vec::new();
             if ok > 0 {
-                parts.push(format!("okx{ok}"));
+                parts.push(format!("ok×{ok}"));
             }
             if err > 0 {
-                parts.push(format!("errx{err}"));
+                parts.push(format!("err×{err}"));
             }
             format!("[{name} {}]", parts.join(" "))
         })
@@ -94,7 +98,7 @@ fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
 }
 
 fn memory_recall_summary_line(hits: usize) -> String {
-    format!("memory_recall: used (hits={hits})")
+    format!("memory: hits={hits}")
 }
 
 fn flatten_tool_calls(tool_calls: &[ToolExecutionResult]) -> Vec<&ToolExecutionResult> {
@@ -182,7 +186,8 @@ mod tests {
             nested_tool_calls: Vec::new(),
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("\n-# tools: [clock okx1]"));
+        assert!(rendered.contains("\n-# tools: [clock ok×1]"));
+        assert!(!rendered.contains("okx1"));
     }
 
     #[test]
@@ -208,7 +213,9 @@ mod tests {
             },
         ];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [clock okx1 errx1]"));
+        assert!(rendered.contains("-# tools: [clock ok×1 err×1]"));
+        assert!(!rendered.contains("okx1"));
+        assert!(!rendered.contains("errx1"));
     }
 
     #[test]
@@ -231,7 +238,7 @@ mod tests {
             }],
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [web\\_fetch errx1] [clock okx1]"));
+        assert!(rendered.contains("-# tools: [web\\_fetch err×1] [clock ok×1]"));
     }
 
     #[test]
@@ -246,8 +253,8 @@ mod tests {
             nested_tool_calls: Vec::new(),
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [web\\_fetch okx1]"));
-        assert!(!rendered.contains("-# tools: [web_fetch okx1]"));
+        assert!(rendered.contains("-# tools: [web\\_fetch ok×1]"));
+        assert!(!rendered.contains("-# tools: [web_fetch ok×1]"));
     }
 
     #[test]
@@ -280,7 +287,7 @@ mod tests {
             }],
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [summon okx1] [clock okx1]"));
+        assert!(rendered.contains("-# tools: [summon ok×1] [clock ok×1]"));
     }
 
     #[test]
@@ -311,7 +318,7 @@ mod tests {
             }],
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [task okx1] [summon okx1] [exec okx1]"));
+        assert!(rendered.contains("-# tools: [task ok×1] [summon ok×1] [exec ok×1]"));
     }
 
     #[test]
@@ -325,7 +332,7 @@ mod tests {
             2,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# memory\\_recall: used (hits=2)"));
+        assert!(rendered.contains("-# memory: hits=2"));
     }
 
     #[test]
@@ -362,7 +369,7 @@ mod tests {
             1,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# tools: [clock okx1]"));
-        assert!(rendered.contains("-# memory\\_recall: used (hits=1)"));
+        assert!(rendered.contains("-# tools: [clock ok×1] | memory: hits=1"));
+        assert!(!rendered.contains("\n-# memory"));
     }
 }
