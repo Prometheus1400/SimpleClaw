@@ -49,6 +49,7 @@ enum CronAction {
 struct CronArgs {
     action: CronAction,
     schedule: Option<String>,
+    description: Option<String>,
     prompt: Option<String>,
     guard_command: Option<String>,
     id: Option<String>,
@@ -62,11 +63,11 @@ impl Tool for CronTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage agent cron jobs using JSON: {action:create|delete|list, schedule?, prompt?, guard_command?, id?, query?}"
+        "Manage agent cron jobs using JSON: {action:create|delete|list, schedule?, description?, prompt?, guard_command?, id?, query?}. Create requires schedule, description, and prompt."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"delete\",\"list\"]},\"schedule\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"},\"guard_command\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}"
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"delete\",\"list\"]},\"schedule\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"},\"guard_command\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"],\"allOf\":[{\"if\":{\"properties\":{\"action\":{\"const\":\"create\"}}},\"then\":{\"required\":[\"schedule\",\"description\",\"prompt\"]}},{\"if\":{\"properties\":{\"action\":{\"const\":\"delete\"}}},\"then\":{\"required\":[\"id\"]}}]}"
     }
 
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
@@ -105,6 +106,18 @@ impl Tool for CronTool {
                     FrameworkError::Tool(format!("invalid cron schedule '{schedule}': {err}"))
                 })?;
 
+                let description = args
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        FrameworkError::Tool(
+                            "cron create requires non-empty description".to_owned(),
+                        )
+                    })?
+                    .to_owned();
+
                 let prompt = args
                     .prompt
                     .as_deref()
@@ -136,6 +149,7 @@ impl Tool for CronTool {
                     id: Uuid::new_v4().to_string(),
                     agent_id: ctx.agent_id.clone(),
                     schedule,
+                    description,
                     prompt,
                     guard_command,
                     workspace_root: ctx.workspace_root.display().to_string(),
@@ -156,6 +170,7 @@ impl Tool for CronTool {
                     "status": "created",
                     "id": job.id,
                     "schedule": job.schedule,
+                    "description": job.description,
                     "prompt": job.prompt,
                     "guardCommand": job.guard_command,
                     "guardTimeoutSeconds": job.guard_timeout_seconds
@@ -196,6 +211,7 @@ fn job_to_json(job: &CronJob) -> serde_json::Value {
         "id": job.id,
         "agentId": job.agent_id,
         "schedule": job.schedule,
+        "description": job.description,
         "prompt": job.prompt,
         "guardCommand": job.guard_command,
         "workspaceRoot": job.workspace_root,

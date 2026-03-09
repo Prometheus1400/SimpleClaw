@@ -11,6 +11,7 @@ pub(crate) struct CronJob {
     pub id: String,
     pub agent_id: String,
     pub schedule: String,
+    pub description: String,
     pub prompt: String,
     pub guard_command: Option<String>,
     pub workspace_root: String,
@@ -45,6 +46,7 @@ impl CronStore {
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
                 schedule TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
                 prompt TEXT NOT NULL,
                 guard_command TEXT,
                 workspace_root TEXT NOT NULL,
@@ -61,6 +63,17 @@ impl CronStore {
             CREATE INDEX IF NOT EXISTS idx_cron_jobs_agent ON cron_jobs(agent_id);
             ",
         )?;
+        conn.execute(
+            "ALTER TABLE cron_jobs ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .or_else(|err| {
+            if err.to_string().contains("duplicate column name: description") {
+                Ok(0)
+            } else {
+                Err(err)
+            }
+        })?;
 
         Ok(Self { conn })
     }
@@ -69,19 +82,20 @@ impl CronStore {
         self.conn.execute(
             "
             INSERT INTO cron_jobs (
-                id, agent_id, schedule, prompt, guard_command, workspace_root,
+                id, agent_id, schedule, description, prompt, guard_command, workspace_root,
                 channel_id, guild_id, source_channel, is_dm,
                 created_by, created_at, last_fired_at, guard_timeout_seconds, enabled
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6,
-                ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16
             )
             ",
             params![
                 job.id,
                 job.agent_id,
                 job.schedule,
+                job.description,
                 job.prompt,
                 job.guard_command,
                 job.workspace_root,
@@ -117,7 +131,7 @@ impl CronStore {
             let mut stmt = self.conn.prepare(
                 "
                 SELECT
-                    id, agent_id, schedule, prompt, guard_command, workspace_root,
+                    id, agent_id, schedule, description, prompt, guard_command, workspace_root,
                     channel_id, guild_id, source_channel, is_dm,
                     created_by, created_at, last_fired_at, guard_timeout_seconds, enabled
                 FROM cron_jobs
@@ -125,6 +139,7 @@ impl CronStore {
                   AND (
                     lower(id) LIKE ?2 OR
                     lower(schedule) LIKE ?2 OR
+                    lower(description) LIKE ?2 OR
                     lower(prompt) LIKE ?2
                   )
                 ORDER BY created_at DESC
@@ -141,7 +156,7 @@ impl CronStore {
         let mut stmt = self.conn.prepare(
             "
             SELECT
-                id, agent_id, schedule, prompt, guard_command, workspace_root,
+                id, agent_id, schedule, description, prompt, guard_command, workspace_root,
                 channel_id, guild_id, source_channel, is_dm,
                 created_by, created_at, last_fired_at, guard_timeout_seconds, enabled
             FROM cron_jobs
@@ -160,7 +175,7 @@ impl CronStore {
         let mut stmt = self.conn.prepare(
             "
             SELECT
-                id, agent_id, schedule, prompt, guard_command, workspace_root,
+                id, agent_id, schedule, description, prompt, guard_command, workspace_root,
                 channel_id, guild_id, source_channel, is_dm,
                 created_by, created_at, last_fired_at, guard_timeout_seconds, enabled
             FROM cron_jobs
@@ -201,14 +216,14 @@ impl CronStore {
 }
 
 fn parse_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
-    let created_at_raw: String = row.get(11)?;
-    let last_fired_raw: Option<String> = row.get(12)?;
+    let created_at_raw: String = row.get(12)?;
+    let last_fired_raw: Option<String> = row.get(13)?;
 
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(
-                11,
+                12,
                 rusqlite::types::Type::Text,
                 Box::new(err),
             )
@@ -220,7 +235,7 @@ fn parse_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
                 .map(|dt| dt.with_timezone(&Utc))
                 .map_err(|err| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        12,
+                        13,
                         rusqlite::types::Type::Text,
                         Box::new(err),
                     )
@@ -233,18 +248,19 @@ fn parse_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         id: row.get(0)?,
         agent_id: row.get(1)?,
         schedule: row.get(2)?,
-        prompt: row.get(3)?,
-        guard_command: row.get(4)?,
-        workspace_root: row.get(5)?,
-        channel_id: row.get(6)?,
-        guild_id: row.get(7)?,
-        source_channel: row.get(8)?,
-        is_dm: row.get::<_, i64>(9)? != 0,
-        created_by: row.get(10)?,
+        description: row.get(3)?,
+        prompt: row.get(4)?,
+        guard_command: row.get(5)?,
+        workspace_root: row.get(6)?,
+        channel_id: row.get(7)?,
+        guild_id: row.get(8)?,
+        source_channel: row.get(9)?,
+        is_dm: row.get::<_, i64>(10)? != 0,
+        created_by: row.get(11)?,
         created_at,
         last_fired_at,
-        guard_timeout_seconds: row.get::<_, i64>(13)? as u64,
-        enabled: row.get::<_, i64>(14)? != 0,
+        guard_timeout_seconds: row.get::<_, i64>(14)? as u64,
+        enabled: row.get::<_, i64>(15)? != 0,
     })
 }
 
@@ -274,6 +290,7 @@ mod tests {
             id: id.to_owned(),
             agent_id: "agent-a".to_owned(),
             schedule: "*/5 * * * *".to_owned(),
+            description: "status check".to_owned(),
             prompt: "check status".to_owned(),
             guard_command: Some("echo ok".to_owned()),
             workspace_root: "/tmp".to_owned(),
@@ -311,6 +328,11 @@ mod tests {
             .expect("query list should work");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "job-1");
+
+        let filtered = store
+            .list_jobs("agent-a", Some("status check"))
+            .expect("description query list should work");
+        assert_eq!(filtered.len(), 2);
 
         let count = store
             .count_jobs_for_agent("agent-a")

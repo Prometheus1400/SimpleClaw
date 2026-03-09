@@ -100,7 +100,7 @@ async fn run_tick(
             trace_id: next_trace_id(),
             source_channel,
             target_agent_id: job.agent_id.clone(),
-            session_key: format!("agent:{}:cron:{}", job.agent_id, job.id),
+            session_key: String::new(),
             source_message_id: None,
             channel_id: job.channel_id.clone(),
             guild_id: job.guild_id.clone(),
@@ -109,7 +109,16 @@ async fn run_tick(
             username: "cron".to_owned(),
             mentioned_bot: false,
             invoke: true,
-            content: job.prompt.clone(),
+            content: String::new(),
+        };
+        let trace_id = inbound.trace_id.clone();
+        let inbound = InboundMessage {
+            session_key: format!("agent:{}:cron:{}:{trace_id}", job.agent_id, job.id),
+            content: format!(
+                "[SCHEDULED CRON EVENT]\nJob ID: {}\nDescription: {}\nSchedule: {}\n\n{}",
+                job.id, job.description, job.schedule, job.prompt
+            ),
+            ..inbound
         };
 
         if let Err(err) = gateway_tx.send(inbound).await {
@@ -251,6 +260,7 @@ mod tests {
             id: "job-1".to_owned(),
             agent_id: "agent-a".to_owned(),
             schedule: schedule.to_owned(),
+            description: "sample cron job".to_owned(),
             prompt: "run".to_owned(),
             guard_command: None,
             workspace_root: "/tmp".to_owned(),
