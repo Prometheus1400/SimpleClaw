@@ -332,19 +332,16 @@ fn memory_hit_label(hit: &MemoryPreinjectHit) -> String {
 }
 
 fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
-    let environment = if inbound.is_dm {
-        "Direct message".to_owned()
-    } else {
-        match &inbound.guild_id {
-            Some(gid) => format!(
-                "Guild channel (guild: {}, channel: {})",
-                gid, inbound.channel_id
-            ),
-            None => format!("Group channel (channel: {})", inbound.channel_id),
-        }
-    };
+    let chat_type = if inbound.is_dm { "dm" } else { "group" };
+    let platform = inbound.source_channel.as_str();
+    let guild_line = inbound
+        .guild_id
+        .as_ref()
+        .map(|gid| format!("\nguild_id: {gid}"))
+        .unwrap_or_default();
     format!(
-        "{base}\n\n# CURRENT CONTEXT\nEnvironment: {environment}\nSpeaker: **{}** (id: {})",
+        "{base}\n\n# CURRENT CONTEXT\nchat_type: {chat_type}\nplatform: {platform}\nchannel_id: {}{guild_line}\nSpeaker: **{}** (id: {})",
+        inbound.channel_id,
         inbound.username, inbound.user_id
     )
 }
@@ -431,14 +428,18 @@ mod tests {
         let dm = test_inbound(true, None);
         let output = inject_caller_context("base prompt", &dm);
         assert!(output.contains("# CURRENT CONTEXT"));
-        assert!(output.contains("Environment: Direct message"));
+        assert!(output.contains("chat_type: dm"));
+        assert!(output.contains("platform: discord"));
+        assert!(output.contains("channel_id: chan-456"));
+        assert!(!output.contains("guild_id:"));
         assert!(output.contains("Speaker: **kaleb** (id: user-123)"));
 
         let guild = test_inbound(false, Some("guild-789"));
         let output = inject_caller_context("base prompt", &guild);
-        assert!(
-            output.contains("Environment: Guild channel (guild: guild-789, channel: chan-456)")
-        );
+        assert!(output.contains("chat_type: group"));
+        assert!(output.contains("platform: discord"));
+        assert!(output.contains("channel_id: chan-456"));
+        assert!(output.contains("guild_id: guild-789"));
     }
 
     #[test]
