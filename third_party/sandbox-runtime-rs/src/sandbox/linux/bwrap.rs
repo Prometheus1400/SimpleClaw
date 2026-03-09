@@ -43,20 +43,24 @@ pub fn generate_bwrap_command(
     let mut bwrap_args = vec![
         "bwrap".to_string(),
         "--unshare-net".to_string(), // Network isolation
-        "--dev".to_string(),
-        "/dev".to_string(),
-        "--proc".to_string(),
-        "/proc".to_string(),
-        "--tmpfs".to_string(),
-        "/tmp".to_string(),
-        "--tmpfs".to_string(),
-        "/run".to_string(),
     ];
 
-    // Start with read-only root filesystem
+    // Start with read-only root filesystem. This must be mounted before
+    // synthetic mounts like /dev, /proc, and tmpfs paths so those mounts
+    // remain visible and usable in the final namespace.
     bwrap_args.push("--ro-bind".to_string());
     bwrap_args.push("/".to_string());
     bwrap_args.push("/".to_string());
+
+    // Base synthetic filesystems/mounts.
+    bwrap_args.push("--dev".to_string());
+    bwrap_args.push("/dev".to_string());
+    bwrap_args.push("--proc".to_string());
+    bwrap_args.push("/proc".to_string());
+    bwrap_args.push("--tmpfs".to_string());
+    bwrap_args.push("/tmp".to_string());
+    bwrap_args.push("--tmpfs".to_string());
+    bwrap_args.push("/run".to_string());
 
     // Add writable mounts
     for mount in &mounts {
@@ -158,12 +162,12 @@ fn build_inner_command(
                 "Seccomp not available - Unix socket creation will not be blocked"
             );
             let env_vars = generate_proxy_env_string(http_proxy_port, socks_proxy_port);
-            parts.push(format!("{} {} -c {}", env_vars, shell, quote(command)));
+            parts.push(format!("{} ; {} -c {}", env_vars, shell, quote(command)));
         }
     } else {
         // Unix sockets allowed, just run the command
         let env_vars = generate_proxy_env_string(http_proxy_port, socks_proxy_port);
-        parts.push(format!("{} {} -c {}", env_vars, shell, quote(command)));
+        parts.push(format!("{} ; {} -c {}", env_vars, shell, quote(command)));
     }
 
     Ok(parts.join(" ; "))
@@ -224,6 +228,20 @@ mod tests {
 
         assert!(!inner.contains("& ;"), "unexpected '& ;' in: {inner}");
         assert!(!inner.contains("; ;"), "unexpected '; ;' in: {inner}");
+    }
+
+    #[test]
+    fn test_build_inner_command_splits_export_and_shell_exec() {
+        let mut config = SandboxRuntimeConfig::default();
+        config.network.allow_all_unix_sockets = Some(true);
+
+        let inner = build_inner_command("ls", &config, None, None, 3128, 1080, "/bin/bash")
+            .expect("build_inner_command should succeed");
+
+        assert!(
+            inner.contains("all_proxy='socks5://localhost:1080' ; /bin/bash -c 'ls'"),
+            "inner command must separate export from shell execution: {inner}"
+        );
     }
 
     #[test]
