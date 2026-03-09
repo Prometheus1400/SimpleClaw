@@ -7,13 +7,13 @@ use super::agents::{AgentEntryConfig, AgentInnerConfig};
 pub(super) fn default_db_path() -> PathBuf {
     AppPaths::resolve()
         .map(|paths| paths.db_path)
-        .unwrap_or_else(|_| PathBuf::from("~/.simpleclaw/db/lraf.db"))
+        .unwrap_or_else(|_| PathBuf::from("~/.simpleclaw/db/short_term_memory.db"))
 }
 
 pub(super) fn default_long_term_db_path() -> PathBuf {
     AppPaths::resolve()
         .map(|paths| paths.long_term_db_path)
-        .unwrap_or_else(|_| PathBuf::from("~/.simpleclaw/db/lraf_long_term.db"))
+        .unwrap_or_else(|_| PathBuf::from("~/.simpleclaw/db/long_term_memory.db"))
 }
 
 pub(super) fn default_pool_size() -> usize {

@@ -33,8 +33,8 @@ impl AppPaths {
         Ok(Self {
             config_path: base_dir.join("config.yaml"),
             secrets_path: base_dir.join("secrets.yaml"),
-            db_path: db_dir.join("lraf.db"),
-            long_term_db_path: db_dir.join("lraf_long_term.db"),
+            db_path: db_dir.join("short_term_memory.db"),
+            long_term_db_path: db_dir.join("long_term_memory.db"),
             cron_db_path: db_dir.join("cron.db"),
             fastembed_cache_dir: base_dir.join(".fastembed_cache"),
             log_path: logs_dir.join("service.log"),
@@ -93,6 +93,14 @@ mod tests {
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str());
         assert_eq!(db_dir_name, Some("db"));
+        assert_eq!(
+            paths.db_path.file_name().and_then(|s| s.to_str()),
+            Some("short_term_memory.db")
+        );
+        assert_eq!(
+            paths.long_term_db_path.file_name().and_then(|s| s.to_str()),
+            Some("long_term_memory.db")
+        );
         assert_eq!(
             paths.cron_db_path.file_name().and_then(|s| s.to_str()),
             Some("cron.db")

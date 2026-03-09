@@ -216,8 +216,8 @@ Secrets in config must be `${secret:<name>}` and resolve from:
 - PID file: `~/.simpleclaw/run/service.pid`
 - Prompt files: inside each agent workspace
 - Memory databases per agent workspace:
-  - `<workspace>/.simpleclaw/memory/lraf.db`
-  - `<workspace>/.simpleclaw/memory/lraf_long_term.db`
+  - `<workspace>/.simpleclaw/memory/short_term_memory.db`
+  - `<workspace>/.simpleclaw/memory/long_term_memory.db`
 
 ## Operational Commands
 

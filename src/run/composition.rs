@@ -345,7 +345,7 @@ pub(crate) async fn assemble_runtime_state(
 
 pub(crate) fn agent_workspace_memory_paths(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let memory_dir = workspace.join(".simpleclaw").join("memory");
-    let short_term_path = memory_dir.join("lraf.db");
-    let long_term_path = memory_dir.join("lraf_long_term.db");
+    let short_term_path = memory_dir.join("short_term_memory.db");
+    let long_term_path = memory_dir.join("long_term_memory.db");
     (memory_dir, short_term_path, long_term_path)
 }
