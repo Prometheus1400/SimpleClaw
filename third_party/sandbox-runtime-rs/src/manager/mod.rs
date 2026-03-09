@@ -5,6 +5,7 @@ pub mod network;
 pub mod state;
 
 use std::sync::Arc;
+use std::path::Path;
 
 use parking_lot::RwLock;
 
@@ -230,6 +231,7 @@ impl SandboxManager {
         command: &str,
         shell: Option<&str>,
         custom_config: Option<SandboxRuntimeConfig>,
+        _cwd: &Path,
     ) -> Result<String, SandboxError> {
         // Extract needed values from state while holding the lock
         let (config, http_port, socks_port) = {
@@ -272,11 +274,10 @@ impl SandboxManager {
                 (state.http_socket_path.clone(), state.socks_socket_path.clone())
             };
 
-            let cwd = std::env::current_dir()?;
             let (wrapped, warnings) = crate::sandbox::linux::generate_bwrap_command(
                 command,
                 &config,
-                &cwd,
+                _cwd,
                 http_socket.as_deref(),
                 socks_socket.as_deref(),
                 http_port.unwrap_or(3128),
