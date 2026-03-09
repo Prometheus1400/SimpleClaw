@@ -8,13 +8,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
 use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, ToolCallTransparency};
-use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunOutcome, RunParams};
-use crate::telemetry::sanitize_preview;
 use crate::tools::{CompletionRoute, ProcessManager};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
@@ -174,17 +172,11 @@ impl AgentRuntime {
             }
         };
 
-        let tool_suffix = format_tool_history_suffix(&outcome.tool_calls);
-        let stored_reply = if tool_suffix.is_empty() {
-            outcome.reply.clone()
-        } else {
-            format!("{}{tool_suffix}", outcome.reply)
-        };
         memory
             .append_message(
                 memory_session_id,
                 StoredRole::Assistant,
-                &stored_reply,
+                &outcome.reply,
                 None,
             )
             .await?;
@@ -354,21 +346,6 @@ fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
     )
 }
 
-fn format_tool_history_suffix(tool_calls: &[ToolExecutionResult]) -> String {
-    if tool_calls.is_empty() {
-        return String::new();
-    }
-    let entries: Vec<String> = tool_calls
-        .iter()
-        .map(|call| {
-            let args = sanitize_preview(&call.args_json, 40);
-            let output = sanitize_preview(&call.output, 60);
-            format!("{}({}) -> \"{}\"", call.name, args, output)
-        })
-        .collect();
-    format!("\n\n---\n[Tools used: {}]", entries.join(", "))
-}
-
 pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<String, FrameworkError> {
     PromptAssembler::from_workspace(workspace)
 }
@@ -377,10 +354,9 @@ pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<Strin
 mod tests {
     use crate::channels::InboundMessage;
     use crate::config::GatewayChannelKind;
-    use crate::dispatch::ToolExecutionResult;
     use crate::memory::{MemoryHitStore, MemoryPreinjectHit};
 
-    use super::{format_preinjected_memory, format_tool_history_suffix, inject_caller_context};
+    use super::{format_preinjected_memory, inject_caller_context};
 
     fn test_inbound(is_dm: bool, guild_id: Option<&str>) -> InboundMessage {
         InboundMessage {
@@ -453,25 +429,4 @@ mod tests {
         assert!(output.contains("message_id: msg-1"));
     }
 
-    #[test]
-    fn format_tool_history_suffix_empty_when_no_calls() {
-        assert!(format_tool_history_suffix(&[]).is_empty());
-    }
-
-    #[test]
-    fn format_tool_history_suffix_includes_tool_summary() {
-        let calls = vec![ToolExecutionResult {
-            name: "clock".to_owned(),
-            args_json: "{}".to_owned(),
-            output: "2026-03-08T12:00Z".to_owned(),
-            success: true,
-            elapsed_ms: 10,
-            tool_call_id: None,
-            nested_tool_calls: vec![],
-        }];
-        let suffix = format_tool_history_suffix(&calls);
-        assert!(suffix.contains("[Tools used:"));
-        assert!(suffix.contains("clock("));
-        assert!(suffix.contains("2026-03-08T12:00Z"));
-    }
 }
