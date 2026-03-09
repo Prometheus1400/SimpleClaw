@@ -1,21 +1,28 @@
-FROM rust:1-bookworm
+FROM ubuntu:24.04
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         build-essential \
         bubblewrap \
         ca-certificates \
         clang \
         cmake \
+        curl \
         git \
         libssl-dev \
         pkg-config \
         socat \
     && rm -rf /var/lib/apt/lists/*
 
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:${PATH}
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+
 WORKDIR /workspace
 
 ENV CARGO_TERM_COLOR=always
-ENV PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:${PATH}
 
 CMD ["bash"]

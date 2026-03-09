@@ -99,6 +99,7 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output() {
             args_json: r#"{"command":"pwd"}"#.to_owned(),
         }),
         scripted_final_reply: Some("tool-finished".to_owned()),
+        exec_timeout_seconds: Some(10),
         ..TestHarnessConfig::default()
     };
     let result = run_single_gateway_roundtrip(config)
@@ -117,9 +118,9 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output() {
     let nested = response["content"]
         .as_str()
         .expect("tool response content should be a string");
-    assert!(nested.contains("\"status\":\"completed\""));
-    assert!(nested.contains("\"exitCode\":0"));
-    assert!(nested.contains("\"stdout\":\"/"));
+    assert!(nested.contains("\"status\":\"completed\""), "nested={nested}");
+    assert!(nested.contains("\"exitCode\":0"), "nested={nested}");
+    assert!(nested.contains("\"stdout\":\"/"), "nested={nested}");
 }
 
 #[cfg(target_os = "linux")]
@@ -153,5 +154,41 @@ async fn gateway_roundtrip_exec_tool_call_reports_timeout_error() {
     let nested = response["content"]
         .as_str()
         .expect("tool response content should be a string");
-    assert!(nested.contains("exec timed out after 1s in sandbox runtime"));
+    assert!(
+        nested.contains("exec timed out after 1s in sandbox runtime"),
+        "nested={nested}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gateway_roundtrip_exec_tool_call_returns_pwd_output_on_repeated_runs() {
+    for _ in 0..2 {
+        let config = TestHarnessConfig {
+            inbound_content: "run pwd".to_owned(),
+            mock_reply: "tool-finished".to_owned(),
+            scripted_tool_call: Some(ScriptedToolCall {
+                id: Some("call-exec-pwd-repeat".to_owned()),
+                name: "exec".to_owned(),
+                args_json: r#"{"command":"pwd"}"#.to_owned(),
+            }),
+            scripted_final_reply: Some("tool-finished".to_owned()),
+            exec_timeout_seconds: Some(10),
+            ..TestHarnessConfig::default()
+        };
+        let result = run_single_gateway_roundtrip(config)
+            .await
+            .expect("integration harness should run");
+
+        let response = result
+            .observed_tool_response
+            .expect("tool response should be captured");
+        assert_eq!(response["status"], Value::String("ok".to_owned()));
+        let nested = response["content"]
+            .as_str()
+            .expect("tool response content should be a string");
+        assert!(nested.contains("\"status\":\"completed\""), "nested={nested}");
+        assert!(nested.contains("\"exitCode\":0"), "nested={nested}");
+        assert!(nested.contains("\"stdout\":\"/"), "nested={nested}");
+    }
 }

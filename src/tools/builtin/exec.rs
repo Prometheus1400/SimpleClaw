@@ -115,25 +115,45 @@ async fn exec_with_sandbox_runtime(
     runner.current_dir(crate::tools::sandbox::normalize_workspace_root(
         workspace_root,
     )?);
+    runner.kill_on_drop(true);
 
-    let output_result = timeout(Duration::from_secs(timeout_seconds), runner.output())
-        .await
-        .map_err(|_| {
-            FrameworkError::Tool(format!(
-                "exec timed out after {timeout_seconds}s in sandbox runtime"
-            ))
-        })?
-        .map_err(|e| FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}")));
-
+    let output_result = timeout(Duration::from_secs(timeout_seconds), runner.output()).await;
     prepared.cleanup().await;
-    debug!(
-        status = "completed",
-        tool = "exec",
-        phase = "sandbox_exec",
-        "sandbox.exec"
-    );
-
-    let output = output_result?;
+    let output = match output_result {
+        Ok(Ok(output)) => {
+            debug!(
+                status = "completed",
+                tool = "exec",
+                phase = "sandbox_exec",
+                "sandbox.exec"
+            );
+            output
+        }
+        Ok(Err(e)) => {
+            debug!(
+                status = "failed",
+                tool = "exec",
+                phase = "sandbox_exec",
+                error = %e,
+                "sandbox.exec"
+            );
+            return Err(FrameworkError::Tool(format!(
+                "exec failed to start sandbox runtime: {e}"
+            )));
+        }
+        Err(_) => {
+            debug!(
+                status = "timed_out",
+                tool = "exec",
+                phase = "sandbox_exec",
+                timeout_seconds,
+                "sandbox.exec"
+            );
+            return Err(FrameworkError::Tool(format!(
+                "exec timed out after {timeout_seconds}s in sandbox runtime"
+            )));
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

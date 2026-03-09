@@ -41,4 +41,4 @@ cron = "0.15"
 uuid = { version = "1", features = ["v4"] }
 
 [patch.crates-io]
-sandbox-runtime = { git = "https://github.com/Prometheus1400/sandbox-runtime-rs", rev = "50974f02adeb4f45c8d1a18776120ed6d201fc62" }
+sandbox-runtime = { path = "third_party/sandbox-runtime-rs" }
