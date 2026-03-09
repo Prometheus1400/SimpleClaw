@@ -12,19 +12,19 @@ pub(super) fn render_tool_call_transparency(
     memory_recall_hits: usize,
     channel_kind: GatewayChannelKind,
 ) -> String {
-    let summary_lines = summary_lines(
+    let summary = transparency_summary(
         tool_calls,
         tool_calls_enabled,
         memory_recall_enabled,
         memory_recall_used,
         memory_recall_hits,
     );
-    if summary_lines.is_empty() {
+    if summary.is_empty() {
         return reply.to_owned();
     }
 
     let style = style_for_channel(channel_kind).unwrap_or(TransparencyRenderStyle::PlainFooter);
-    render_for_style(reply, &summary_lines, style)
+    render_for_style(reply, &summary, style)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,28 +39,43 @@ fn style_for_channel(kind: GatewayChannelKind) -> Option<TransparencyRenderStyle
     }
 }
 
-fn summary_lines(
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TransparencySummary {
+    tool_groups: Vec<ToolSummaryGroup>,
+    memory_hits: Option<usize>,
+}
+
+impl TransparencySummary {
+    fn is_empty(&self) -> bool {
+        self.tool_groups.is_empty() && self.memory_hits.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolSummaryGroup {
+    name: String,
+    ok: usize,
+    err: usize,
+}
+
+fn transparency_summary(
     tool_calls: &[ToolExecutionResult],
     tool_calls_enabled: bool,
     memory_recall_enabled: bool,
     memory_recall_used: bool,
     memory_recall_hits: usize,
-) -> Vec<String> {
-    let mut parts = Vec::new();
+) -> TransparencySummary {
+    let mut summary = TransparencySummary::default();
     if tool_calls_enabled && !tool_calls.is_empty() {
-        parts.push(tool_summary_line(tool_calls));
+        summary.tool_groups = tool_summary_groups(tool_calls);
     }
     if memory_recall_enabled && memory_recall_used {
-        parts.push(memory_recall_summary_line(memory_recall_hits));
+        summary.memory_hits = Some(memory_recall_hits);
     }
-    if parts.is_empty() {
-        Vec::new()
-    } else {
-        vec![parts.join(" | ")]
-    }
+    summary
 }
 
-fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
+fn tool_summary_groups(tool_calls: &[ToolExecutionResult]) -> Vec<ToolSummaryGroup> {
     let mut order = Vec::new();
     let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
     for call in flatten_tool_calls(tool_calls) {
@@ -75,30 +90,59 @@ fn tool_summary_line(tool_calls: &[ToolExecutionResult]) -> String {
         }
     }
 
-    let groups = order
+    order
         .into_iter()
         .map(|name| {
             let (ok, err) = counts[name];
+            ToolSummaryGroup {
+                name: name.to_owned(),
+                ok,
+                err,
+            }
+        })
+        .collect()
+}
+
+fn format_tool_summary_plain(groups: &[ToolSummaryGroup]) -> String {
+    if groups.is_empty() {
+        return "tools: [none]".to_owned();
+    }
+    let rendered = groups
+        .iter()
+        .map(|group| {
             let mut parts = Vec::new();
-            if ok > 0 {
-                parts.push(format!("ok×{ok}"));
+            if group.ok > 0 {
+                parts.push(format!("ok×{}", group.ok));
             }
-            if err > 0 {
-                parts.push(format!("err×{err}"));
+            if group.err > 0 {
+                parts.push(format!("err×{}", group.err));
             }
-            format!("[{name} {}]", parts.join(" "))
+            format!("[{} {}]", group.name, parts.join(" "))
         })
         .collect::<Vec<_>>()
         .join(" ");
-    if groups.is_empty() {
-        "tools: [none]".to_owned()
-    } else {
-        format!("tools: {groups}")
-    }
+    format!("tools: {rendered}")
 }
 
-fn memory_recall_summary_line(hits: usize) -> String {
-    format!("memory: hits={hits}")
+fn format_tool_summary_discord(groups: &[ToolSummaryGroup]) -> String {
+    if groups.is_empty() {
+        return "tools [none]".to_owned();
+    }
+    let rendered = groups
+        .iter()
+        .map(|group| {
+            let mut parts = Vec::new();
+            if group.ok > 0 {
+                parts.push(format!("`ok×{}`", group.ok));
+            }
+            if group.err > 0 {
+                parts.push(format!("`err×{}`", group.err));
+            }
+            format!("[{} {}]", group.name, parts.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("tools {rendered}")
 }
 
 fn flatten_tool_calls(tool_calls: &[ToolExecutionResult]) -> Vec<&ToolExecutionResult> {
@@ -118,23 +162,33 @@ fn append_flattened<'a>(call: &'a ToolExecutionResult, out: &mut Vec<&'a ToolExe
 
 fn render_for_style(
     reply: &str,
-    summary_lines: &[String],
+    summary: &TransparencySummary,
     style: TransparencyRenderStyle,
 ) -> String {
-    if summary_lines.is_empty() {
+    if summary.is_empty() {
         return reply.to_owned();
     }
 
     match style {
         TransparencyRenderStyle::PlainFooter => {
-            format!("{reply}\n---\n{}", summary_lines.join("\n"))
+            let mut parts = Vec::new();
+            if !summary.tool_groups.is_empty() {
+                parts.push(format_tool_summary_plain(&summary.tool_groups));
+            }
+            if let Some(hits) = summary.memory_hits {
+                parts.push(format!("memory: hits={hits}"));
+            }
+            format!("{reply}\n---\n{}", parts.join(" | "))
         }
         TransparencyRenderStyle::DiscordSubtext => {
-            let subtext = summary_lines
-                .iter()
-                .map(|line| format!("-# {}", escape_discord_subtext(line)))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let mut parts = Vec::new();
+            if !summary.tool_groups.is_empty() {
+                parts.push(format_tool_summary_discord(&summary.tool_groups));
+            }
+            if let Some(hits) = summary.memory_hits {
+                parts.push(format!("memory `hits={hits}`"));
+            }
+            let subtext = format!("-# {}", escape_discord_subtext(&parts.join(" • ")));
             format!("{reply}\n{subtext}")
         }
     }
@@ -146,7 +200,10 @@ fn escape_discord_subtext(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransparencyRenderStyle, render_for_style, render_tool_call_transparency};
+    use super::{
+        ToolSummaryGroup, TransparencyRenderStyle, TransparencySummary, render_for_style,
+        render_tool_call_transparency,
+    };
     use crate::config::GatewayChannelKind;
     use crate::dispatch::ToolExecutionResult;
 
@@ -186,7 +243,7 @@ mod tests {
             nested_tool_calls: Vec::new(),
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("\n-# tools: [clock ok×1]"));
+        assert!(rendered.contains("\n-# tools [clock `ok×1`]"));
         assert!(!rendered.contains("okx1"));
     }
 
@@ -213,7 +270,7 @@ mod tests {
             },
         ];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [clock ok×1 err×1]"));
+        assert!(rendered.contains("-# tools [clock `ok×1` `err×1`]"));
         assert!(!rendered.contains("okx1"));
         assert!(!rendered.contains("errx1"));
     }
@@ -238,7 +295,7 @@ mod tests {
             }],
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [web\\_fetch err×1] [clock ok×1]"));
+        assert!(rendered.contains("-# tools [web\\_fetch `err×1`] [clock `ok×1`]"));
     }
 
     #[test]
@@ -253,18 +310,26 @@ mod tests {
             nested_tool_calls: Vec::new(),
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [web\\_fetch ok×1]"));
-        assert!(!rendered.contains("-# tools: [web_fetch ok×1]"));
+        assert!(rendered.contains("-# tools [web\\_fetch `ok×1`]"));
+        assert!(!rendered.contains("-# tools [web_fetch `ok×1`]"));
     }
 
     #[test]
     fn plain_footer_style_is_available_for_channel_fallbacks() {
+        let summary = TransparencySummary {
+            tool_groups: vec![ToolSummaryGroup {
+                name: "clock".to_owned(),
+                ok: 1,
+                err: 0,
+            }],
+            memory_hits: None,
+        };
         let rendered = render_for_style(
             "base reply",
-            &["tool calls: 1".to_owned()],
+            &summary,
             TransparencyRenderStyle::PlainFooter,
         );
-        assert_eq!(rendered, "base reply\n---\ntool calls: 1");
+        assert_eq!(rendered, "base reply\n---\ntools: [clock ok×1]");
     }
 
     #[test]
@@ -287,7 +352,7 @@ mod tests {
             }],
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [summon ok×1] [clock ok×1]"));
+        assert!(rendered.contains("-# tools [summon `ok×1`] [clock `ok×1`]"));
     }
 
     #[test]
@@ -318,7 +383,7 @@ mod tests {
             }],
         }];
         let rendered = render("base reply", &calls, true);
-        assert!(rendered.contains("-# tools: [task ok×1] [summon ok×1] [exec ok×1]"));
+        assert!(rendered.contains("-# tools [task `ok×1`] [summon `ok×1`] [exec `ok×1`]"));
     }
 
     #[test]
@@ -332,7 +397,7 @@ mod tests {
             2,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# memory: hits=2"));
+        assert!(rendered.contains("-# memory `hits=2`"));
     }
 
     #[test]
@@ -369,7 +434,7 @@ mod tests {
             1,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# tools: [clock ok×1] | memory: hits=1"));
+        assert!(rendered.contains("-# tools [clock `ok×1`] • memory `hits=1`"));
         assert!(!rendered.contains("\n-# memory"));
     }
 }
