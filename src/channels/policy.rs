@@ -1,4 +1,4 @@
-use crate::config::{GatewayChannelKind, InboundConfig};
+use crate::config::{GatewayChannelKind, RoutingConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InboundDecision {
@@ -18,7 +18,7 @@ pub(crate) struct InboundPolicyContext {
 }
 
 pub(crate) fn classify_inbound(
-    inbound_policy: &InboundConfig,
+    inbound_policy: &RoutingConfig,
     context: &InboundPolicyContext,
 ) -> InboundDecision {
     let policy = inbound_policy.resolve(
@@ -45,8 +45,8 @@ mod tests {
 
     use super::{InboundDecision, InboundPolicyContext, classify_inbound};
     use crate::config::{
-        ChannelInboundConfig, GatewayChannelKind, InboundConfig, InboundPolicyConfig,
-        WorkspaceInboundConfig,
+        ChannelRoutingConfig, GatewayChannelKind, InboundPolicyConfig, RoutingConfig,
+        WorkspaceRoutingConfig,
     };
 
     fn context(
@@ -68,13 +68,13 @@ mod tests {
 
     #[test]
     fn rejects_disallowed_user() {
-        let inbound_policy = InboundConfig {
+        let inbound_policy = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: Some(vec!["7".to_owned()]),
                 require_mentions: Some(false),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
 
         let decision = classify_inbound(
@@ -91,15 +91,15 @@ mod tests {
 
     #[test]
     fn rejects_disallowed_dm_user() {
-        let inbound_policy = InboundConfig {
+        let inbound_policy = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 ..InboundPolicyConfig::default()
             },
             channels: HashMap::from([(
                 GatewayChannelKind::Discord,
-                ChannelInboundConfig {
-                    policy: InboundPolicyConfig::default(),
+                ChannelRoutingConfig {
+                    defaults: InboundPolicyConfig::default(),
                     dm: InboundPolicyConfig {
                         agent: Some("default".to_owned()),
                         allow_from: Some(vec!["7".to_owned()]),
@@ -108,7 +108,6 @@ mod tests {
                     workspaces: HashMap::new(),
                 },
             )]),
-            ..InboundConfig::default()
         };
 
         let decision = classify_inbound(&inbound_policy, &context(None, "20", true, "9", true));
@@ -117,13 +116,13 @@ mod tests {
 
     #[test]
     fn rejects_when_mentions_required_but_missing() {
-        let inbound_policy = InboundConfig {
+        let inbound_policy = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
 
         let decision = classify_inbound(
@@ -140,13 +139,13 @@ mod tests {
 
     #[test]
     fn accepts_when_mentions_required_and_present() {
-        let inbound_policy = InboundConfig {
+        let inbound_policy = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
 
         let decision = classify_inbound(
@@ -163,7 +162,7 @@ mod tests {
 
     #[test]
     fn dm_ignores_mentions_requirement() {
-        let inbound_policy = InboundConfig {
+        let inbound_policy = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
@@ -171,8 +170,8 @@ mod tests {
             },
             channels: HashMap::from([(
                 GatewayChannelKind::Discord,
-                ChannelInboundConfig {
-                    policy: InboundPolicyConfig::default(),
+                ChannelRoutingConfig {
+                    defaults: InboundPolicyConfig::default(),
                     dm: InboundPolicyConfig {
                         agent: Some("default".to_owned()),
                         allow_from: Some(vec!["7".to_owned()]),
@@ -181,7 +180,6 @@ mod tests {
                     workspaces: HashMap::new(),
                 },
             )]),
-            ..InboundConfig::default()
         };
 
         let decision = classify_inbound(&inbound_policy, &context(None, "20", true, "7", false));
@@ -195,7 +193,7 @@ mod tests {
 
     #[test]
     fn channel_override_takes_precedence() {
-        let inbound_policy = InboundConfig {
+        let inbound_policy = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: Some(vec!["1".to_owned()]),
@@ -203,8 +201,8 @@ mod tests {
             },
             channels: HashMap::from([(
                 GatewayChannelKind::Discord,
-                ChannelInboundConfig {
-                    policy: InboundPolicyConfig {
+                ChannelRoutingConfig {
+                    defaults: InboundPolicyConfig {
                         agent: Some("reviewer".to_owned()),
                         allow_from: Some(vec!["2".to_owned()]),
                         require_mentions: Some(true),
@@ -212,8 +210,8 @@ mod tests {
                     dm: InboundPolicyConfig::default(),
                     workspaces: HashMap::from([(
                         "10".to_owned(),
-                        WorkspaceInboundConfig {
-                            policy: InboundPolicyConfig::default(),
+                        WorkspaceRoutingConfig {
+                            defaults: InboundPolicyConfig::default(),
                             channels: HashMap::from([(
                                 "20".to_owned(),
                                 InboundPolicyConfig {
@@ -226,7 +224,6 @@ mod tests {
                     )]),
                 },
             )]),
-            ..InboundConfig::default()
         };
 
         let decision = classify_inbound(

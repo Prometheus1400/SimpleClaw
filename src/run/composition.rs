@@ -149,10 +149,13 @@ impl ChannelFactory for DefaultChannelFactory {
         loaded: &LoadedConfig,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
-        for kind in &loaded.global.gateway.channels {
+        for (kind, config) in &loaded.global.gateway.channels {
+            if !config.enabled {
+                continue;
+            }
             let channel: Arc<dyn Channel> = match kind {
                 GatewayChannelKind::Discord => Arc::new(
-                    DiscordChannel::from_config(&loaded.global.discord)
+                    DiscordChannel::from_config(config)
                         .await
                         .wrap_err("failed to initialize discord channel")?,
                 ),
@@ -230,13 +233,18 @@ pub(crate) async fn assemble_runtime_state(
     let mut skill_factory = deps.skill_factory_builder.create_skill_factory(app_paths);
 
     for agent in &loaded.global.agents.list {
-        let agent_config = agent.runtime.clone();
+        let agent_config = agent.config.clone();
         let provider_key = agent_config
             .provider
             .as_deref()
             .unwrap_or(loaded.global.providers.default.as_str())
             .trim()
             .to_owned();
+        let effective_execution = loaded
+            .global
+            .execution
+            .defaults
+            .merge_with_overrides(&agent_config.execution);
         if provider_key.is_empty() {
             return Err(color_eyre::eyre::eyre!(
                 "agent '{}' has an empty provider key in config.yaml",
@@ -270,7 +278,8 @@ pub(crate) async fn assemble_runtime_state(
             AgentRuntimeConfig {
                 agent_id: agent.id.clone(),
                 provider_key,
-                execution_config: loaded.global.execution.clone(),
+                effective_execution,
+                owner_ids: loaded.global.execution.owner_ids.clone(),
                 agent_config,
                 workspace_root: agent.workspace.clone(),
                 app_base_dir: app_paths.base_dir.clone(),
@@ -302,7 +311,11 @@ pub(crate) async fn assemble_runtime_state(
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Gateway::new(channels, loaded.global.inbound.clone(), gateway_tx.clone());
+    let gateway = Gateway::new(
+        channels,
+        loaded.global.gateway.routing.clone(),
+        gateway_tx.clone(),
+    );
 
     let context = Arc::new(RuntimeContext {
         react_loop,

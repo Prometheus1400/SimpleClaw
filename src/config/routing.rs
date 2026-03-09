@@ -7,12 +7,12 @@ use super::gateway::GatewayChannelKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct InboundConfig {
+pub struct RoutingConfig {
     pub defaults: InboundPolicyConfig,
-    pub channels: HashMap<GatewayChannelKind, ChannelInboundConfig>,
+    pub channels: HashMap<GatewayChannelKind, ChannelRoutingConfig>,
 }
 
-impl Default for InboundConfig {
+impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             defaults: InboundPolicyConfig {
@@ -26,20 +26,20 @@ impl Default for InboundConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct ChannelInboundConfig {
-    #[serde(flatten)]
-    pub policy: InboundPolicyConfig,
+pub struct ChannelRoutingConfig {
+    #[serde(default)]
+    pub defaults: InboundPolicyConfig,
     #[serde(default)]
     pub dm: InboundPolicyConfig,
     #[serde(default)]
-    pub workspaces: HashMap<String, WorkspaceInboundConfig>,
+    pub workspaces: HashMap<String, WorkspaceRoutingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct WorkspaceInboundConfig {
-    #[serde(flatten)]
-    pub policy: InboundPolicyConfig,
+pub struct WorkspaceRoutingConfig {
+    #[serde(default)]
+    pub defaults: InboundPolicyConfig,
     #[serde(default)]
     pub channels: HashMap<String, InboundPolicyConfig>,
 }
@@ -62,7 +62,7 @@ pub struct InboundPolicy {
     pub require_mentions: bool,
 }
 
-impl InboundConfig {
+impl RoutingConfig {
     pub fn resolve(
         &self,
         source_channel: GatewayChannelKind,
@@ -73,7 +73,7 @@ impl InboundConfig {
         let mut effective = self.defaults.clone();
 
         if let Some(channel_scope) = self.channels.get(&source_channel) {
-            effective.apply_override(&channel_scope.policy);
+            effective.apply_override(&channel_scope.defaults);
             if is_dm {
                 effective.apply_override(&channel_scope.dm);
                 return effective.finalize(true);
@@ -82,7 +82,7 @@ impl InboundConfig {
                 && let Some(workspace) =
                     workspace_id.and_then(|id| channel_scope.workspaces.get(id))
             {
-                effective.apply_override(&workspace.policy);
+                effective.apply_override(&workspace.defaults);
                 if let Some(channel) = workspace.channels.get(channel_id) {
                     effective.apply_override(channel);
                 }

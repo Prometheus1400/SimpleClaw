@@ -135,9 +135,12 @@ pub async fn run_single_gateway_roundtrip(
         id: config.agent_id.clone(),
         name: config.agent_name.clone(),
         workspace: workspace_dir.clone(),
-        runtime: crate::config::AgentConfig::default(),
+        config: crate::config::AgentInnerConfig::default(),
     }];
-    global.gateway.channels = vec![GatewayChannelKind::Discord];
+    global.gateway.channels = HashMap::from([(
+        GatewayChannelKind::Discord,
+        crate::config::ChannelConfig::default(),
+    )]);
     let loaded = LoadedConfig { global };
 
     let app_base_dir = ephemeral_paths.root_dir.join("app");

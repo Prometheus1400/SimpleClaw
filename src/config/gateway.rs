@@ -1,17 +1,21 @@
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use super::defaults::default_gateway_channels;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GatewayConfig {
-    pub channels: Vec<GatewayChannelKind>,
+    pub channels: HashMap<GatewayChannelKind, ChannelConfig>,
+    pub routing: super::routing::RoutingConfig,
 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
+        let mut channels = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, ChannelConfig::default());
         Self {
-            channels: default_gateway_channels(),
+            channels,
+            routing: super::routing::RoutingConfig::default(),
         }
     }
 }
@@ -30,9 +34,19 @@ impl GatewayChannelKind {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiscordConfig {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChannelConfig {
+    pub enabled: bool,
     #[serde(default)]
     pub token: Option<String>,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token: None,
+        }
+    }
 }

@@ -10,7 +10,7 @@ use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
 use crate::channels::{Channel, ChannelInbound};
-use crate::config::DiscordConfig;
+use crate::config::ChannelConfig;
 use crate::error::FrameworkError;
 
 pub struct DiscordChannel {
@@ -19,12 +19,12 @@ pub struct DiscordChannel {
 }
 
 impl DiscordChannel {
-    pub async fn from_config(config: &DiscordConfig) -> Result<Self, FrameworkError> {
+    pub async fn from_config(config: &ChannelConfig) -> Result<Self, FrameworkError> {
         let token = match config.token.clone() {
             Some(token) if !token.trim().is_empty() => token,
             _ => {
                 return Err(FrameworkError::Config(
-                    "missing Discord token: set discord.token to a ${secret:<name>} reference"
+                    "missing Discord token: set gateway.channels.discord.token to a ${secret:<name>} reference"
                         .to_owned(),
                 ));
             }

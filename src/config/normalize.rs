@@ -1,8 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use super::agents::AgentsConfig;
 use super::agents::AgentEntryConfig;
+use super::agents::AgentsConfig;
 
 pub(super) fn normalize_agents_workspace_paths(agents: &mut AgentsConfig) {
     agents.list = agents
@@ -12,7 +12,7 @@ pub(super) fn normalize_agents_workspace_paths(agents: &mut AgentsConfig) {
             id: agent.id.clone(),
             name: agent.name.clone(),
             workspace: normalize_workspace_path(&agent.workspace),
-            runtime: agent.runtime.clone(),
+            config: agent.config.clone(),
         })
         .collect();
 }
