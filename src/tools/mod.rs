@@ -419,8 +419,9 @@ impl ProcessManager {
         workspace_root: &std::path::Path,
         sandbox: &ToolSandboxConfig,
     ) -> Result<(String, CompletionHandle), FrameworkError> {
-        let wrapped =
-            sandbox_runtime::wrap_command_for_exec(command, workspace_root, sandbox).await?;
+        let prepared =
+            sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
+        let (wrapped, manager) = prepared.into_parts();
 
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
@@ -447,7 +448,7 @@ impl ProcessManager {
 
         let started_at = Utc::now();
         let pid = Some(child.id());
-        let handle = CompletionHandle::Host(child);
+        let handle = CompletionHandle::HostSandboxed { child, manager };
         let entry = ProcessEntry {
             command: command.to_owned(),
             status: ProcessStatus::Running,
@@ -524,27 +525,45 @@ impl ProcessManager {
         self: &Arc<Self>,
         session_id: String,
         handle: CompletionHandle,
-        completion_tx: mpsc::Sender<InboundMessage>,
-        route: CompletionRoute,
+        completion_tx: Option<mpsc::Sender<InboundMessage>>,
+        route: Option<CompletionRoute>,
     ) {
         let pm = Arc::clone(self);
-        let trace_id = route.trace_id.clone();
+        let trace_id = route
+            .as_ref()
+            .map(|r| r.trace_id.clone())
+            .unwrap_or_else(|| "no-trace".to_owned());
+        let route_session = route
+            .as_ref()
+            .map(|r| r.session_key.clone())
+            .unwrap_or_else(|| session_id.clone());
         let span = info_span!(
             "process.completion_watcher",
             trace_id = %trace_id,
-            session_id = %route.session_key
+            session_id = %route_session
         );
         tokio::spawn(
             async move {
-                let exit_code = match handle {
+                let (exit_code, sandbox_manager) = match handle {
                     CompletionHandle::Host(mut child) => {
                         let status = tokio::task::spawn_blocking(move || child.wait())
                             .await
                             .ok()
                             .and_then(|r| r.ok());
-                        status.and_then(|s| s.code())
+                        (status.and_then(|s| s.code()), None)
+                    }
+                    CompletionHandle::HostSandboxed { mut child, manager } => {
+                        let status = tokio::task::spawn_blocking(move || child.wait())
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok());
+                        (status.and_then(|s| s.code()), Some(manager))
                     }
                 };
+
+                if let Some(manager) = sandbox_manager {
+                    manager.reset().await;
+                }
 
                 pm.mark_completed(&session_id, exit_code).await;
 
@@ -558,30 +577,34 @@ impl ProcessManager {
                     "[background process completed] session_id={} exit_code={} command={}",
                     session_id, code, command
                 );
-                let msg = InboundMessage {
-                    trace_id: route.trace_id.clone(),
-                    source_channel: route.source_channel,
-                    target_agent_id: route.target_agent_id,
-                    session_key: route.session_key,
-                    source_message_id: None,
-                    channel_id: route.channel_id,
-                    guild_id: route.guild_id,
-                    is_dm: route.is_dm,
-                    user_id: "system".to_owned(),
-                    username: "system".to_owned(),
-                    mentioned_bot: false,
-                    invoke: true,
-                    content,
-                };
-                if let Err(err) = completion_tx.send(msg).await {
-                    tracing::warn!(
-                        status = "failed",
-                        error_kind = "completion_send",
-                        error = %err,
-                        "failed to send background process completion message"
-                    );
+                if let (Some(tx), Some(route)) = (completion_tx, route) {
+                    let msg = InboundMessage {
+                        trace_id: route.trace_id.clone(),
+                        source_channel: route.source_channel,
+                        target_agent_id: route.target_agent_id,
+                        session_key: route.session_key,
+                        source_message_id: None,
+                        channel_id: route.channel_id,
+                        guild_id: route.guild_id,
+                        is_dm: route.is_dm,
+                        user_id: "system".to_owned(),
+                        username: "system".to_owned(),
+                        mentioned_bot: false,
+                        invoke: true,
+                        content,
+                    };
+                    if let Err(err) = tx.send(msg).await {
+                        tracing::warn!(
+                            status = "failed",
+                            error_kind = "completion_send",
+                            error = %err,
+                            "failed to send background process completion message"
+                        );
+                    } else {
+                        debug!(status = "completed", "process completion watcher");
+                    }
                 } else {
-                    debug!(status = "completed", "process completion watcher");
+                    debug!(status = "completed_no_route", "process completion watcher");
                 }
             }
             .instrument(span),
@@ -625,6 +648,10 @@ impl Default for ProcessManager {
 /// Handle passed to the completion watcher for event-driven (non-polling) wait.
 pub enum CompletionHandle {
     Host(std::process::Child),
+    HostSandboxed {
+        child: std::process::Child,
+        manager: std::sync::Arc<::sandbox_runtime::SandboxManager>,
+    },
 }
 
 #[derive(Debug)]
@@ -740,6 +767,7 @@ fn read_process_output_tail(path: &std::path::Path, max_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::{Duration, sleep};
     #[derive(Clone)]
     struct FakeTool {
         desc: &'static str,
@@ -953,5 +981,29 @@ mod tests {
         assert!(active.get("react").is_some());
         assert!(filtered.get("react").is_none());
         assert!(filtered.get("clock").is_some());
+    }
+
+    #[tokio::test]
+    async fn completion_watcher_marks_background_process_complete_without_route() {
+        let manager = Arc::new(ProcessManager::new());
+        let (session_id, handle) = manager
+            .spawn("echo hello", None)
+            .await
+            .expect("spawn should succeed");
+        manager.spawn_completion_watcher(session_id.clone(), handle, None, None);
+
+        for _ in 0..20 {
+            let snapshot = manager
+                .update(&session_id)
+                .await
+                .expect("update should succeed");
+            if snapshot.status != ProcessStatus::Running {
+                assert_eq!(snapshot.status, ProcessStatus::Completed);
+                return;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        panic!("background process did not complete in time");
     }
 }
