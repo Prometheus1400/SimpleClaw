@@ -350,16 +350,9 @@ mod tests {
     #[tokio::test]
     async fn execute_tool_proxies_calls() {
         let ctx = test_ctx().await;
-        let result = execute_tool_with_sandbox(
-            &DummyTool {
-                name: "clock",
-            },
-            &ctx,
-            "{}",
-            "s",
-        )
-        .await
-        .expect("tool execution should succeed");
+        let result = execute_tool_with_sandbox(&DummyTool { name: "clock" }, &ctx, "{}", "s")
+            .await
+            .expect("tool execution should succeed");
         assert_eq!(result.output, "ok");
         assert!(result.nested_tool_calls.is_empty());
     }

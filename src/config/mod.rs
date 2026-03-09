@@ -33,8 +33,8 @@ pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, Pro
 pub use routing::RoutingConfig;
 #[allow(unused_imports)]
 pub use tools::{
-    ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemoryToolConfig,
-    MemorizeToolConfig, ProcessToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
+    ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemorizeToolConfig,
+    MemoryToolConfig, ProcessToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
     TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchToolConfig,
 };
 
@@ -616,6 +616,7 @@ skills:
                     tools: ToolsConfig {
                         web_search: Some(WebSearchToolConfig {
                             enabled: true,
+                            owner_restricted: true,
                             timeout_seconds: Some(0),
                         }),
                         ..ToolsConfig::default()
@@ -640,6 +641,7 @@ skills:
                     tools: ToolsConfig {
                         memory: Some(MemoryToolConfig {
                             enabled: true,
+                            owner_restricted: true,
                             default_top_k: Some(0),
                             max_top_k: None,
                         }),
@@ -665,6 +667,7 @@ skills:
                     tools: ToolsConfig {
                         web_fetch: Some(WebFetchToolConfig {
                             enabled: true,
+                            owner_restricted: true,
                             timeout_seconds: Some(10),
                             max_chars: Some(0),
                         }),

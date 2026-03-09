@@ -93,10 +93,9 @@ impl AgentInvoker for DirectAgentInvoker {
             .cloned()
             .ok_or_else(|| FrameworkError::Tool("current agent memory unavailable".to_owned()))?;
         let mut worker_agent_config = current_config.agent_config.clone();
-        worker_agent_config.tools =
-            worker_agent_config
-                .tools
-                .with_disabled(&["summon", "task", "memorize", "forget"]);
+        worker_agent_config.tools = worker_agent_config
+            .tools
+            .with_disabled(&["summon", "task", "memorize", "forget"]);
         let params = RunParams {
             provider_key: &current_config.provider_key,
             agent_config: &worker_agent_config,

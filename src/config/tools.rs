@@ -5,6 +5,10 @@ fn default_enabled() -> bool {
     true
 }
 
+fn default_owner_restricted() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
@@ -29,7 +33,12 @@ impl ToolsConfig {
         if self.memory.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("memory".to_owned());
         }
-        if self.memorize.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+        if self
+            .memorize
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(true)
+        {
             names.push("memorize".to_owned());
         }
         if self.forget.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
@@ -41,13 +50,23 @@ impl ToolsConfig {
         if self.task.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("task".to_owned());
         }
-        if self.web_search.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+        if self
+            .web_search
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(true)
+        {
             names.push("web_search".to_owned());
         }
         if self.clock.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("clock".to_owned());
         }
-        if self.web_fetch.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+        if self
+            .web_fetch
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(true)
+        {
             names.push("web_fetch".to_owned());
         }
         if self.read.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
@@ -85,6 +104,25 @@ impl ToolsConfig {
             _ => return None,
         };
         Some(value)
+    }
+
+    pub fn owner_restricted_for_tool(&self, name: &str) -> Option<bool> {
+        let owner_restricted = match name {
+            "read" => self.read.clone().unwrap_or_default().owner_restricted,
+            "edit" => self.edit.clone().unwrap_or_default().owner_restricted,
+            "exec" => self.exec.clone().unwrap_or_default().owner_restricted,
+            "process" => self.process.clone().unwrap_or_default().owner_restricted,
+            "web_search" => self.web_search.clone().unwrap_or_default().owner_restricted,
+            "web_fetch" => self.web_fetch.clone().unwrap_or_default().owner_restricted,
+            "memory" => self.memory.clone().unwrap_or_default().owner_restricted,
+            "memorize" => self.memorize.clone().unwrap_or_default().owner_restricted,
+            "forget" => self.forget.clone().unwrap_or_default().owner_restricted,
+            "summon" => self.summon.clone().unwrap_or_default().owner_restricted,
+            "task" => self.task.clone().unwrap_or_default().owner_restricted,
+            "clock" => self.clock.clone().unwrap_or_default().owner_restricted,
+            _ => return None,
+        };
+        Some(owner_restricted)
     }
 
     pub fn with_disabled(&self, names: &[&str]) -> Self {
@@ -143,6 +181,8 @@ impl Default for ToolSandboxConfig {
 pub struct ReadToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub timeout_seconds: Option<u64>,
     pub sandbox: ToolSandboxConfig,
 }
@@ -151,6 +191,7 @@ impl Default for ReadToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             timeout_seconds: None,
             sandbox: ToolSandboxConfig::default(),
         }
@@ -162,6 +203,8 @@ impl Default for ReadToolConfig {
 pub struct EditToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub timeout_seconds: Option<u64>,
     pub sandbox: ToolSandboxConfig,
 }
@@ -170,6 +213,7 @@ impl Default for EditToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             timeout_seconds: None,
             sandbox: ToolSandboxConfig::default(),
         }
@@ -181,6 +225,8 @@ impl Default for EditToolConfig {
 pub struct ExecToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub timeout_seconds: Option<u64>,
     pub allow_background: bool,
     pub sandbox: ToolSandboxConfig,
@@ -190,6 +236,7 @@ impl Default for ExecToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             timeout_seconds: None,
             allow_background: true,
             sandbox: ToolSandboxConfig::default(),
@@ -202,12 +249,15 @@ impl Default for ExecToolConfig {
 pub struct ProcessToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
 }
 
 impl Default for ProcessToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
         }
     }
 }
@@ -217,6 +267,8 @@ impl Default for ProcessToolConfig {
 pub struct WebSearchToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub timeout_seconds: Option<u64>,
 }
 
@@ -224,6 +276,7 @@ impl Default for WebSearchToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             timeout_seconds: None,
         }
     }
@@ -234,6 +287,8 @@ impl Default for WebSearchToolConfig {
 pub struct WebFetchToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub timeout_seconds: Option<u64>,
     pub max_chars: Option<u32>,
 }
@@ -242,6 +297,7 @@ impl Default for WebFetchToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             timeout_seconds: None,
             max_chars: None,
         }
@@ -253,6 +309,8 @@ impl Default for WebFetchToolConfig {
 pub struct MemoryToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub default_top_k: Option<u32>,
     pub max_top_k: Option<u32>,
 }
@@ -261,6 +319,7 @@ impl Default for MemoryToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             default_top_k: None,
             max_top_k: None,
         }
@@ -272,12 +331,15 @@ impl Default for MemoryToolConfig {
 pub struct MemorizeToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
 }
 
 impl Default for MemorizeToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
         }
     }
 }
@@ -287,12 +349,15 @@ impl Default for MemorizeToolConfig {
 pub struct ForgetToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
 }
 
 impl Default for ForgetToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
         }
     }
 }
@@ -302,6 +367,8 @@ impl Default for ForgetToolConfig {
 pub struct SummonToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub allowed: Vec<String>,
 }
 
@@ -309,6 +376,7 @@ impl Default for SummonToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             allowed: Vec::new(),
         }
     }
@@ -319,6 +387,8 @@ impl Default for SummonToolConfig {
 pub struct TaskToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
     pub worker_max_steps: Option<u32>,
 }
 
@@ -326,6 +396,7 @@ impl Default for TaskToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
             worker_max_steps: None,
         }
     }
@@ -336,12 +407,15 @@ impl Default for TaskToolConfig {
 pub struct ClockToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
 }
 
 impl Default for ClockToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
         }
     }
 }

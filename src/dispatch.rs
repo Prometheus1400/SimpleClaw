@@ -8,8 +8,6 @@ use crate::providers::{Message, ProviderResponse, Role, ToolCall, ToolDefinition
 use crate::tools::sandbox::execute_tool_with_sandbox;
 use crate::tools::{ActiveTools, ToolExecEnv};
 
-const OWNER_RESTRICTED_TOOLS: &[&str] =
-    &["exec", "process", "forget", "summon", "edit", "memorize"];
 const TOOL_OUTPUT_LOG_PREVIEW_CHARS: usize = 500;
 
 pub(crate) struct ParsedToolCall {
@@ -62,7 +60,10 @@ pub(crate) trait ToolDispatcher: Send + Sync {
 
             let (observation, nested_tool_calls, status) =
                 match active_tools.get(call.name.as_str()) {
-                    Some(tool) => match enforce_tool_authorization(call.name.as_str(), tool_ctx) {
+                    Some(tool) => match enforce_tool_authorization(
+                        active_tools.owner_restricted(call.name.as_str()),
+                        tool_ctx,
+                    ) {
                         Ok(()) => match execute_tool_with_sandbox(
                             tool.as_ref(),
                             tool_ctx,
@@ -135,10 +136,10 @@ fn preview_for_log(value: &str, max_chars: usize) -> String {
 }
 
 fn enforce_tool_authorization(
-    tool_name: &str,
+    owner_restricted: bool,
     tool_ctx: &ToolExecEnv,
 ) -> Result<(), FrameworkError> {
-    if !OWNER_RESTRICTED_TOOLS.contains(&tool_name) {
+    if !owner_restricted {
         return Ok(());
     }
     if tool_ctx.owner_ids.is_empty() {
@@ -157,11 +158,11 @@ fn enforce_tool_authorization(
 
 #[cfg(test)]
 fn enforce_tool_authorization_for_identity(
-    tool_name: &str,
+    owner_restricted: bool,
     user_id: &str,
     owner_ids: &[String],
 ) -> Result<(), FrameworkError> {
-    if !OWNER_RESTRICTED_TOOLS.contains(&tool_name) {
+    if !owner_restricted {
         return Ok(());
     }
     if owner_ids.is_empty() {
@@ -616,7 +617,7 @@ mod tests {
 
     #[test]
     fn restricted_tool_rejects_empty_owner_ids() {
-        let result = enforce_tool_authorization_for_identity("exec", "u1", &[]);
+        let result = enforce_tool_authorization_for_identity(true, "u1", &[]);
         assert!(result.is_err());
         assert!(
             result
@@ -629,7 +630,7 @@ mod tests {
     #[test]
     fn restricted_tool_rejects_non_owner() {
         let owner_ids = vec!["owner-1".to_owned()];
-        let result = enforce_tool_authorization_for_identity("exec", "u1", &owner_ids);
+        let result = enforce_tool_authorization_for_identity(true, "u1", &owner_ids);
         assert!(result.is_err());
         assert!(
             result
@@ -642,27 +643,27 @@ mod tests {
     #[test]
     fn restricted_tool_allows_owner() {
         let owner_ids = vec!["owner-1".to_owned()];
-        let result = enforce_tool_authorization_for_identity("exec", "owner-1", &owner_ids);
+        let result = enforce_tool_authorization_for_identity(true, "owner-1", &owner_ids);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn edit_tool_is_owner_restricted() {
+    fn owner_restricted_flag_denies_non_owner() {
         let owner_ids = vec!["owner-1".to_owned()];
-        let result = enforce_tool_authorization_for_identity("edit", "u1", &owner_ids);
+        let result = enforce_tool_authorization_for_identity(true, "u1", &owner_ids);
         assert!(result.is_err());
     }
 
     #[test]
-    fn memorize_tool_is_owner_restricted() {
+    fn owner_restricted_flag_allows_owner() {
         let owner_ids = vec!["owner-1".to_owned()];
-        let result = enforce_tool_authorization_for_identity("memorize", "u1", &owner_ids);
-        assert!(result.is_err());
+        let result = enforce_tool_authorization_for_identity(true, "owner-1", &owner_ids);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn unrestricted_tool_ignores_owner_rules() {
-        let result = enforce_tool_authorization_for_identity("read", "u1", &[]);
+        let result = enforce_tool_authorization_for_identity(false, "u1", &[]);
         assert!(result.is_ok());
     }
 }

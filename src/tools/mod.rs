@@ -191,6 +191,7 @@ impl ToolFactory {
     ) -> Result<ActiveTools, FrameworkError> {
         let mut ordered = Vec::new();
         let mut by_name = HashMap::new();
+        let mut owner_restricted_by_name = HashMap::new();
         let mut seen = HashSet::new();
 
         for name in tools_config.enabled_tool_names() {
@@ -208,7 +209,11 @@ impl ToolFactory {
             }
             let tool: Arc<dyn Tool> = Arc::from(tool);
             ordered.push(Arc::clone(&tool));
-            by_name.insert(name, tool);
+            by_name.insert(name.clone(), tool);
+            let owner_restricted = tools_config
+                .owner_restricted_for_tool(&name)
+                .unwrap_or(true);
+            owner_restricted_by_name.insert(name, owner_restricted);
         }
 
         for tool in skill_tools {
@@ -218,15 +223,21 @@ impl ToolFactory {
             }
             ordered.push(Arc::clone(tool));
             by_name.insert(name, Arc::clone(tool));
+            owner_restricted_by_name.insert(tool.name().to_owned(), false);
         }
 
-        Ok(ActiveTools { ordered, by_name })
+        Ok(ActiveTools {
+            ordered,
+            by_name,
+            owner_restricted_by_name,
+        })
     }
 }
 
 pub(crate) struct ActiveTools {
     ordered: Vec<Arc<dyn Tool>>,
     by_name: HashMap<String, Arc<dyn Tool>>,
+    owner_restricted_by_name: HashMap<String, bool>,
 }
 
 impl ActiveTools {
@@ -236,6 +247,13 @@ impl ActiveTools {
 
     pub(crate) fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.by_name.get(name)
+    }
+
+    pub(crate) fn owner_restricted(&self, name: &str) -> bool {
+        self.owner_restricted_by_name
+            .get(name)
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -719,6 +737,35 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct NamedTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn description(&self) -> &'static str {
+            "named"
+        }
+
+        fn input_schema_json(&self) -> &'static str {
+            "{\"type\":\"null\"}"
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &ToolExecEnv,
+            _args_json: &str,
+            _session_id: &str,
+        ) -> Result<String, FrameworkError> {
+            Ok("ok".to_owned())
+        }
+    }
+
     fn only_process_enabled() -> ToolsConfig {
         ToolsConfig {
             read: Some(crate::config::ReadToolConfig {
@@ -733,7 +780,10 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
-            process: Some(crate::config::ProcessToolConfig { enabled: true }),
+            process: Some(crate::config::ProcessToolConfig {
+                enabled: true,
+                ..Default::default()
+            }),
             web_search: Some(crate::config::WebSearchToolConfig {
                 enabled: false,
                 ..Default::default()
@@ -746,8 +796,14 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
-            memorize: Some(crate::config::MemorizeToolConfig { enabled: false }),
-            forget: Some(crate::config::ForgetToolConfig { enabled: false }),
+            memorize: Some(crate::config::MemorizeToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            forget: Some(crate::config::ForgetToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
             summon: Some(crate::config::SummonToolConfig {
                 enabled: false,
                 ..Default::default()
@@ -756,7 +812,10 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
-            clock: Some(crate::config::ClockToolConfig { enabled: false }),
+            clock: Some(crate::config::ClockToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
             skills: Some(crate::config::SkillsToolConfig {
                 enabled: false,
                 ..Default::default()
@@ -793,5 +852,45 @@ mod tests {
     fn tool_ctx_owner_allowed_when_user_missing() {
         let owner_ids = vec!["owner-1".to_owned(), "owner-2".to_owned()];
         assert!(!ToolExecEnv::owner_allowed("user-3", &owner_ids));
+    }
+
+    #[test]
+    fn resolve_active_uses_owner_restricted_flag_from_config() {
+        let mut factory = ToolFactory::new();
+        factory.register_builtin(Box::new(NamedTool { name: "clock" }));
+        let mut config = only_process_enabled();
+        config.process = Some(crate::config::ProcessToolConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        config.clock = Some(crate::config::ClockToolConfig {
+            enabled: true,
+            owner_restricted: false,
+        });
+
+        let active = factory.resolve_active(&config, &[]).expect("resolve tools");
+        assert!(!active.owner_restricted("clock"));
+    }
+
+    #[test]
+    fn resolve_active_marks_skill_tools_unrestricted() {
+        let mut factory = ToolFactory::new();
+        factory.register_builtin(Box::new(NamedTool { name: "clock" }));
+        let mut config = only_process_enabled();
+        config.process = Some(crate::config::ProcessToolConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        config.clock = Some(crate::config::ClockToolConfig {
+            enabled: true,
+            owner_restricted: true,
+        });
+        let skill_tool: Arc<dyn Tool> = Arc::new(NamedTool { name: "skill_demo" });
+
+        let active = factory
+            .resolve_active(&config, &[skill_tool])
+            .expect("resolve tools");
+        assert!(active.owner_restricted("clock"));
+        assert!(!active.owner_restricted("skill_demo"));
     }
 }

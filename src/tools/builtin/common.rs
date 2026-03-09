@@ -26,10 +26,7 @@ pub(super) fn parse_simple_text_arg(args_json: &str) -> String {
 
 #[derive(Debug)]
 pub(super) enum MemoryAction {
-    Query {
-        query: String,
-        top_k: Option<usize>,
-    },
+    Query { query: String, top_k: Option<usize> },
     List { kind: Option<String>, limit: usize },
 }
 

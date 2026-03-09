@@ -79,7 +79,8 @@ impl Tool for SummonTool {
 
 impl SummonTool {
     fn target_allowed(&self, target: &str) -> bool {
-        self.config.allowed.is_empty() || self.config.allowed.iter().any(|allowed| allowed == target)
+        self.config.allowed.is_empty()
+            || self.config.allowed.iter().any(|allowed| allowed == target)
     }
 }
 

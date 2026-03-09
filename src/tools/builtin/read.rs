@@ -201,7 +201,8 @@ fn sandbox_allowed_roots(
             continue;
         }
         let expanded_input = expand_env_vars(extra);
-        let expanded = expand_home_dir(&expanded_input).unwrap_or_else(|| PathBuf::from(expanded_input));
+        let expanded =
+            expand_home_dir(&expanded_input).unwrap_or_else(|| PathBuf::from(expanded_input));
         let absolute = if expanded.is_absolute() {
             expanded
         } else {
@@ -406,9 +407,13 @@ mod tests {
             std::env::set_var("SIMPLECLAW_READ_TEST_DIR", &env_root);
         }
 
-        let resolved =
-            resolve_path_for_read("$SIMPLECLAW_READ_TEST_DIR/token.txt", &workspace, false, &[])
-                .expect("env path should resolve");
+        let resolved = resolve_path_for_read(
+            "$SIMPLECLAW_READ_TEST_DIR/token.txt",
+            &workspace,
+            false,
+            &[],
+        )
+        .expect("env path should resolve");
         assert_eq!(resolved, env_root.join("token.txt"));
 
         let _ = fs::remove_dir_all(&workspace);

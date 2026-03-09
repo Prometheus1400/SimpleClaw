@@ -72,13 +72,25 @@ fn validate_tools_config(agent_id: &str, tools: &ToolsConfig) -> Result<(), Fram
         validate_optional_nonzero_u32(agent_id, "tools.web_fetch.max_chars", web_fetch.max_chars)?;
     }
     if let Some(read) = &tools.read {
-        validate_optional_nonzero_u64(agent_id, "tools.read.timeout_seconds", read.timeout_seconds)?;
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.read.timeout_seconds",
+            read.timeout_seconds,
+        )?;
     }
     if let Some(edit) = &tools.edit {
-        validate_optional_nonzero_u64(agent_id, "tools.edit.timeout_seconds", edit.timeout_seconds)?;
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.edit.timeout_seconds",
+            edit.timeout_seconds,
+        )?;
     }
     if let Some(exec) = &tools.exec {
-        validate_optional_nonzero_u64(agent_id, "tools.exec.timeout_seconds", exec.timeout_seconds)?;
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.exec.timeout_seconds",
+            exec.timeout_seconds,
+        )?;
     }
     Ok(())
 }

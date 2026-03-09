@@ -58,7 +58,11 @@ impl Tool for ExecTool {
         if args.background {
             let (session_id, handle) = if self.config.sandbox.enabled {
                 ctx.process_manager
-                    .spawn_sandboxed(args.command.trim(), &ctx.workspace_root, &self.config.sandbox)
+                    .spawn_sandboxed(
+                        args.command.trim(),
+                        &ctx.workspace_root,
+                        &self.config.sandbox,
+                    )
                     .await?
             } else {
                 ctx.process_manager
@@ -108,17 +112,14 @@ async fn exec_with_sandbox_runtime(
         workspace_root,
     )?);
 
-    let output = timeout(
-        Duration::from_secs(timeout_seconds),
-        runner.output(),
-    )
-    .await
-    .map_err(|_| {
-        FrameworkError::Tool(format!(
-            "exec timed out after {timeout_seconds}s in sandbox runtime"
-        ))
-    })?
-    .map_err(|e| FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}")))?;
+    let output = timeout(Duration::from_secs(timeout_seconds), runner.output())
+        .await
+        .map_err(|_| {
+            FrameworkError::Tool(format!(
+                "exec timed out after {timeout_seconds}s in sandbox runtime"
+            ))
+        })?
+        .map_err(|e| FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
