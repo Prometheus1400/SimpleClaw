@@ -126,4 +126,4 @@ agents:
             worker_max_steps: 4
           skills:
             enabled: true
-            ids: [code_review, release_checklist]
+            disabled_skills: [code_review, release_checklist]

@@ -201,7 +201,7 @@ Agent-specific behavior is embedded in `agents.list[*]` entries:
 - provider override
 - sandbox mode
 - enabled tools
-- enabled skills
+- skills enabled by default, with an optional disabled list
 
 Secrets in config must be `${secret:<name>}` and resolve from:
 1. environment variable `<name>`

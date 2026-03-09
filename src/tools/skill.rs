@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -129,7 +129,7 @@ pub fn load_skill_tools(
     agent_workspace: &Path,
     app_base_dir: &Path,
 ) -> Result<LoadedSkillTools, FrameworkError> {
-    let skill_ids = normalized_skill_ids(skills)?;
+    let skill_ids = active_skill_ids(skills, agent_workspace, app_base_dir)?;
     let mut stats = SkillToolLoadStats {
         requested: skill_ids.len(),
         loaded: 0,
@@ -215,17 +215,30 @@ fn resolve_skill_path(
     None
 }
 
-fn normalized_skill_ids(skills: &SkillsToolConfig) -> Result<Vec<String>, FrameworkError> {
+fn active_skill_ids(
+    skills: &SkillsToolConfig,
+    agent_workspace: &Path,
+    base_dir: &Path,
+) -> Result<Vec<String>, FrameworkError> {
     if !skills.enabled {
         return Ok(Vec::new());
     }
+
+    let disabled_skill_ids = normalized_disabled_skill_ids(skills)?;
+    let mut discovered = discover_skill_ids(agent_workspace, base_dir)?;
+    discovered.retain(|skill_id| !disabled_skill_ids.contains(skill_id));
+    Ok(discovered)
+}
+
+fn normalized_disabled_skill_ids(
+    skills: &SkillsToolConfig,
+) -> Result<HashSet<String>, FrameworkError> {
     let mut seen = HashSet::new();
-    let mut ids = Vec::new();
-    for raw_id in &skills.ids {
+    for raw_id in &skills.disabled_skills {
         let skill_id = raw_id.trim();
         if skill_id.is_empty() {
             return Err(FrameworkError::Config(
-                "tools.skills.ids entries must be non-empty".to_owned(),
+                "tools.skills.disabled_skills entries must be non-empty".to_owned(),
             ));
         }
         if !is_valid_skill_id(skill_id) {
@@ -233,11 +246,53 @@ fn normalized_skill_ids(skills: &SkillsToolConfig) -> Result<Vec<String>, Framew
                 "invalid skill id '{skill_id}'; only letters, numbers, '-' and '_' are allowed"
             )));
         }
-        if seen.insert(skill_id.to_owned()) {
-            ids.push(skill_id.to_owned());
-        }
+        seen.insert(skill_id.to_owned());
     }
-    Ok(ids)
+    Ok(seen)
+}
+
+fn discover_skill_ids(
+    agent_workspace: &Path,
+    base_dir: &Path,
+) -> Result<Vec<String>, FrameworkError> {
+    let mut discovered = BTreeSet::new();
+    collect_skill_ids_from_root(&agent_workspace.join("skills"), &mut discovered)?;
+    collect_skill_ids_from_root(&base_dir.join("skills"), &mut discovered)?;
+    Ok(discovered.into_iter().collect())
+}
+
+fn collect_skill_ids_from_root(
+    root: &Path,
+    discovered: &mut BTreeSet<String>,
+) -> Result<(), FrameworkError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let skill_id = entry.file_name().to_string_lossy().into_owned();
+        if !entry.path().join("SKILL.md").exists() {
+            continue;
+        }
+
+        if !is_valid_skill_id(&skill_id) {
+            return Err(FrameworkError::Config(format!(
+                "invalid skill id '{skill_id}'; only letters, numbers, '-' and '_' are allowed"
+            )));
+        }
+
+        discovered.insert(skill_id);
+    }
+
+    Ok(())
 }
 
 fn is_valid_skill_id(skill_id: &str) -> bool {
@@ -264,7 +319,7 @@ mod tests {
 
         let skills = SkillsToolConfig {
             enabled: true,
-            ids: vec!["research".to_owned()],
+            disabled_skills: Vec::new(),
         };
         let loaded =
             load_skill_tools("planner", &skills, &workspace, &base_dir).expect("load skills");
@@ -302,11 +357,46 @@ mod tests {
 
         let skills = SkillsToolConfig {
             enabled: true,
-            ids: vec![
+            disabled_skills: Vec::new(),
+        };
+        let loaded =
+            load_skill_tools("planner", &skills, &base_dir, &base_dir).expect("load skills");
+
+        let names: Vec<String> = loaded
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        assert_eq!(names, vec!["skill_ok".to_owned()]);
+        assert_eq!(
+            loaded.stats,
+            SkillToolLoadStats {
+                requested: 2,
+                loaded: 1,
+                skipped_missing: 0,
+                skipped_empty: 1
+            }
+        );
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn disables_discovered_skills() {
+        let base_dir = unique_temp_dir("skill_tool_disabled");
+        let ok_path = base_dir.join("skills/ok/SKILL.md");
+        let skip_path = base_dir.join("skills/skip_me/SKILL.md");
+        fs::create_dir_all(ok_path.parent().expect("ok parent")).expect("ok dir");
+        fs::create_dir_all(skip_path.parent().expect("skip parent")).expect("skip dir");
+        fs::write(&ok_path, "ok markdown\n").expect("write ok skill");
+        fs::write(&skip_path, "skip markdown\n").expect("write skip skill");
+
+        let skills = SkillsToolConfig {
+            enabled: true,
+            disabled_skills: vec![
+                "skip_me".to_owned(),
                 "missing".to_owned(),
-                "empty".to_owned(),
-                "ok".to_owned(),
-                "ok".to_owned(),
+                "skip_me".to_owned(),
             ],
         };
         let loaded =
@@ -321,10 +411,10 @@ mod tests {
         assert_eq!(
             loaded.stats,
             SkillToolLoadStats {
-                requested: 3,
+                requested: 1,
                 loaded: 1,
-                skipped_missing: 1,
-                skipped_empty: 1
+                skipped_missing: 0,
+                skipped_empty: 0
             }
         );
 
@@ -332,11 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_skill_id() {
+    fn rejects_invalid_disabled_skill_id() {
         let base_dir = unique_temp_dir("skill_tool_invalid");
         let skills = SkillsToolConfig {
             enabled: true,
-            ids: vec!["bad/skill".to_owned()],
+            disabled_skills: vec!["bad/skill".to_owned()],
         };
         let err =
             load_skill_tools("planner", &skills, &base_dir, &base_dir).expect_err("invalid id");
