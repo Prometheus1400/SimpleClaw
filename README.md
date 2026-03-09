@@ -152,6 +152,7 @@ sequenceDiagram
 - Owner restriction is configured per built-in tool via `owner_restricted` (default: `true`).
 - Dynamic skill tools are not owner-restricted.
 - If `runtime.owner_ids` is empty, owner-restricted tools fail as misconfigured.
+- `tools.summon.allowed` is a strict allowlist. Empty or omitted means no summon targets are allowed.
 - Sandbox gate (`tools/sandbox.rs`) enforces sandbox-aware tools when `sandbox=on`.
 
 ### 5) Background process completion is an inbound event

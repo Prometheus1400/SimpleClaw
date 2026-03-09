@@ -79,8 +79,7 @@ impl Tool for SummonTool {
 
 impl SummonTool {
     fn target_allowed(&self, target: &str) -> bool {
-        self.config.allowed.is_empty()
-            || self.config.allowed.iter().any(|allowed| allowed == target)
+        self.config.allowed.iter().any(|allowed| allowed == target)
     }
 }
 
@@ -89,10 +88,10 @@ mod tests {
     use super::SummonTool;
 
     #[test]
-    fn empty_allowlist_allows_any_target() {
+    fn empty_allowlist_denies_any_target() {
         let tool = SummonTool::default();
-        assert!(tool.target_allowed("planner"));
-        assert!(tool.target_allowed("reviewer"));
+        assert!(!tool.target_allowed("planner"));
+        assert!(!tool.target_allowed("reviewer"));
     }
 
     #[test]
