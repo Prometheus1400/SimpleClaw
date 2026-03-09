@@ -250,7 +250,8 @@ mod tests {
 
     #[test]
     fn input_schema_avoids_conditional_keywords() {
-        let path = std::env::temp_dir().join(format!("simpleclaw-cron-schema-{}.db", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("simpleclaw-cron-schema-{}.db", Uuid::new_v4()));
         let tool = CronTool::new(Arc::new(Mutex::new(
             CronStore::open(&path).expect("cron store"),
         )));
