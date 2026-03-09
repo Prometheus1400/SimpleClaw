@@ -349,3 +349,290 @@ pub(crate) fn agent_workspace_memory_paths(workspace: &Path) -> (PathBuf, PathBu
     let long_term_path = memory_dir.join("long_term_memory.db");
     (memory_dir, short_term_path, long_term_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use async_trait::async_trait;
+
+    use super::{
+        ChannelFactory, MemoryFactory, ProviderFactoryBuilder, RuntimeDependencies,
+        agent_workspace_memory_paths, assemble_runtime_state,
+    };
+    use crate::config::{
+        AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig, MemoryRecallConfig,
+    };
+    use crate::memory::{
+        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory, MemoryRecallHit,
+        MemoryStoreScope, StoredMessage, StoredRole,
+    };
+    use crate::paths::AppPaths;
+    use crate::providers::{Provider, ProviderFactory, ProviderResponse, ToolDefinition};
+    use crate::error::FrameworkError;
+
+    #[derive(Default)]
+    struct NoopMemory;
+
+    #[async_trait]
+    impl Memory for NoopMemory {
+        async fn append_message(
+            &self,
+            _session_id: &str,
+            _role: StoredRole,
+            _content: &str,
+            _username: Option<&str>,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn semantic_query_combined(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _top_k: usize,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+        ) -> Result<Vec<String>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn query_recall_hits(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _config: &MemoryRecallConfig,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+            _prefer_long_term: bool,
+        ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn semantic_forget_long_term(
+            &self,
+            _query: &str,
+            _similarity_threshold: f32,
+            _max_matches: usize,
+            _kind_filter: Option<&str>,
+            _commit: bool,
+        ) -> Result<LongTermForgetResult, FrameworkError> {
+            Ok(LongTermForgetResult {
+                matches: Vec::new(),
+                deleted_count: 0,
+                similarity_threshold: 0.0,
+                max_matches: 0,
+                kind_filter: None,
+            })
+        }
+
+        async fn recent_messages(
+            &self,
+            _session_id: &str,
+            _limit: usize,
+        ) -> Result<Vec<StoredMessage>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn memorize(
+            &self,
+            _session_id: &str,
+            _content: &str,
+            _kind: &str,
+            _importance: u8,
+        ) -> Result<MemorizeResult, FrameworkError> {
+            Ok(MemorizeResult::Inserted)
+        }
+
+        async fn list_long_term_facts(
+            &self,
+            _kind_filter: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<LongTermFactSummary>, FrameworkError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl Provider for StubProvider {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _history: &[crate::providers::Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            Ok(ProviderResponse {
+                output_text: Some("ok".to_owned()),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    struct StaticProviderBuilder {
+        include_default: bool,
+    }
+
+    #[async_trait]
+    impl ProviderFactoryBuilder for StaticProviderBuilder {
+        async fn create_provider_factory(
+            &self,
+            _loaded: &LoadedConfig,
+        ) -> color_eyre::Result<ProviderFactory> {
+            let entries = if self.include_default {
+                HashMap::from([(
+                    "default".to_owned(),
+                    (Box::new(StubProvider) as Box<dyn Provider>, true),
+                )])
+            } else {
+                HashMap::new()
+            };
+            Ok(ProviderFactory::from_parts(entries))
+        }
+    }
+
+    struct StaticMemoryFactory;
+
+    #[async_trait]
+    impl MemoryFactory for StaticMemoryFactory {
+        async fn create_memory(
+            &self,
+            _agent: &AgentEntryConfig,
+            _loaded: &LoadedConfig,
+        ) -> color_eyre::Result<DynMemory> {
+            Ok(Arc::new(NoopMemory))
+        }
+    }
+
+    struct EmptyChannelFactory;
+
+    #[async_trait]
+    impl ChannelFactory for EmptyChannelFactory {
+        async fn create_channels(
+            &self,
+            _loaded: &LoadedConfig,
+        ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn crate::channels::Channel>>> {
+            Ok(HashMap::new())
+        }
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("simpleclaw_{prefix}_{nanos}"));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn test_loaded_config() -> LoadedConfig {
+        let workspace = temp_dir("composition_workspace");
+        let mut global = GlobalConfig::default();
+        global.agents.list = vec![AgentEntryConfig {
+            id: "default".to_owned(),
+            name: "Default".to_owned(),
+            workspace,
+            config: crate::config::AgentInnerConfig::default(),
+        }];
+        LoadedConfig { global }
+    }
+
+    fn test_app_paths() -> AppPaths {
+        let base_dir = temp_dir("composition_app");
+        AppPaths {
+            base_dir: base_dir.clone(),
+            config_path: base_dir.join("config.yaml"),
+            secrets_path: base_dir.join("secrets.yaml"),
+            db_path: base_dir.join("db/short.db"),
+            long_term_db_path: base_dir.join("db/long.db"),
+            cron_db_path: base_dir.join("db/cron.db"),
+            fastembed_cache_dir: base_dir.join(".fastembed"),
+            logs_dir: base_dir.join("logs"),
+            log_path: base_dir.join("logs/service.log"),
+            run_dir: base_dir.join("run"),
+            pid_path: base_dir.join("run/service.pid"),
+        }
+    }
+
+    #[test]
+    fn agent_workspace_memory_paths_uses_simpleclaw_memory_layout() {
+        let workspace = PathBuf::from("/tmp/workspace");
+        let (memory_dir, short_term_path, long_term_path) = agent_workspace_memory_paths(&workspace);
+
+        assert_eq!(memory_dir, workspace.join(".simpleclaw").join("memory"));
+        assert_eq!(short_term_path, memory_dir.join("short_term_memory.db"));
+        assert_eq!(long_term_path, memory_dir.join("long_term_memory.db"));
+    }
+
+    #[tokio::test]
+    async fn assemble_runtime_state_builds_runtime_directory_and_safe_reply() {
+        let loaded = test_loaded_config();
+        let app_paths = test_app_paths();
+        let deps = RuntimeDependencies {
+            provider_factory_builder: Arc::new(StaticProviderBuilder {
+                include_default: true,
+            }),
+            memory_factory: Arc::new(StaticMemoryFactory),
+            channel_factory: Arc::new(EmptyChannelFactory),
+            ..RuntimeDependencies::default()
+        };
+
+        let (state, _rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
+            .await
+            .expect("runtime state should assemble");
+
+        assert_eq!(state.runtimes.len(), 1);
+        assert!(state.runtimes.contains_key("default"));
+        assert_eq!(state.context.safe_error_reply, loaded.global.execution.defaults.safe_error_reply);
+        assert!(state.context.agents.config("default").is_some());
+        assert!(state.context.agents.memory("default").is_some());
+    }
+
+    #[tokio::test]
+    async fn assemble_runtime_state_rejects_empty_provider_key() {
+        let mut loaded = test_loaded_config();
+        loaded.global.agents.list[0].config.provider = Some("   ".to_owned());
+        let app_paths = test_app_paths();
+        let deps = RuntimeDependencies {
+            provider_factory_builder: Arc::new(StaticProviderBuilder {
+                include_default: true,
+            }),
+            memory_factory: Arc::new(StaticMemoryFactory),
+            channel_factory: Arc::new(EmptyChannelFactory),
+            ..RuntimeDependencies::default()
+        };
+
+        let err = assemble_runtime_state(&loaded, &app_paths, &deps)
+            .await
+            .err()
+            .expect("empty provider key should fail");
+
+        assert!(err.to_string().contains("empty provider key"));
+    }
+
+    #[tokio::test]
+    async fn assemble_runtime_state_rejects_missing_provider_registration() {
+        let loaded = test_loaded_config();
+        let app_paths = test_app_paths();
+        let deps = RuntimeDependencies {
+            provider_factory_builder: Arc::new(StaticProviderBuilder {
+                include_default: false,
+            }),
+            memory_factory: Arc::new(StaticMemoryFactory),
+            channel_factory: Arc::new(EmptyChannelFactory),
+            ..RuntimeDependencies::default()
+        };
+
+        let err = assemble_runtime_state(&loaded, &app_paths, &deps)
+            .await
+            .err()
+            .expect("missing provider should fail");
+
+        assert!(err.to_string().contains("unknown provider key 'default'"));
+    }
+}

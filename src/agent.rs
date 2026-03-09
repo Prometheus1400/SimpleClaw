@@ -398,11 +398,263 @@ pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
-    use crate::channels::InboundMessage;
-    use crate::config::GatewayChannelKind;
-    use crate::memory::{MemoryHitStore, MemoryRecallHit};
+    use std::collections::HashMap;
+    use std::future::pending;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{format_recalled_memory, inject_caller_context};
+    use async_trait::async_trait;
+    use tokio::sync::{Mutex, mpsc};
+
+    use crate::channels::InboundMessage;
+    use crate::channels::{Channel, ChannelInbound};
+    use crate::config::{
+        AgentInnerConfig, ExecutionDefaultsConfig, GatewayChannelKind, MemoryRecallConfig,
+        RoutingConfig,
+    };
+    use crate::error::FrameworkError;
+    use crate::gateway::Gateway;
+    use crate::memory::{
+        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory,
+        MemoryHitStore, MemoryRecallHit, MemoryStoreScope, StoredMessage, StoredRole,
+    };
+    use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
+    use crate::react::ReactLoop;
+    use crate::tools::skill::SkillFactory;
+    use crate::tools::{AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory};
+
+    use super::{
+        AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, format_recalled_memory,
+        inject_caller_context,
+    };
+
+    #[derive(Default)]
+    struct FakeMemory {
+        appended: Mutex<Vec<(String, StoredRole, String, Option<String>)>>,
+        recent_messages: Mutex<Vec<StoredMessage>>,
+        recall_hits: Mutex<Vec<MemoryRecallHit>>,
+    }
+
+    impl FakeMemory {
+        async fn appended(&self) -> Vec<(String, StoredRole, String, Option<String>)> {
+            self.appended.lock().await.clone()
+        }
+
+        async fn set_recent_messages(&self, messages: Vec<StoredMessage>) {
+            *self.recent_messages.lock().await = messages;
+        }
+
+        async fn set_recall_hits(&self, hits: Vec<MemoryRecallHit>) {
+            *self.recall_hits.lock().await = hits;
+        }
+    }
+
+    #[async_trait]
+    impl Memory for FakeMemory {
+        async fn append_message(
+            &self,
+            session_id: &str,
+            role: StoredRole,
+            content: &str,
+            username: Option<&str>,
+        ) -> Result<(), FrameworkError> {
+            self.appended.lock().await.push((
+                session_id.to_owned(),
+                role,
+                content.to_owned(),
+                username.map(str::to_owned),
+            ));
+            Ok(())
+        }
+
+        async fn semantic_query_combined(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _top_k: usize,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+        ) -> Result<Vec<String>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn query_recall_hits(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _config: &MemoryRecallConfig,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+            _prefer_long_term: bool,
+        ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+            Ok(self.recall_hits.lock().await.clone())
+        }
+
+        async fn semantic_forget_long_term(
+            &self,
+            _query: &str,
+            _similarity_threshold: f32,
+            _max_matches: usize,
+            _kind_filter: Option<&str>,
+            _commit: bool,
+        ) -> Result<LongTermForgetResult, FrameworkError> {
+            Ok(LongTermForgetResult {
+                similarity_threshold: 0.0,
+                max_matches: 0,
+                kind_filter: None,
+                deleted_count: 0,
+                matches: Vec::new(),
+            })
+        }
+
+        async fn recent_messages(
+            &self,
+            _session_id: &str,
+            _limit: usize,
+        ) -> Result<Vec<StoredMessage>, FrameworkError> {
+            Ok(self.recent_messages.lock().await.clone())
+        }
+
+        async fn memorize(
+            &self,
+            _session_id: &str,
+            _content: &str,
+            _kind: &str,
+            _importance: u8,
+        ) -> Result<MemorizeResult, FrameworkError> {
+            Ok(MemorizeResult::Inserted)
+        }
+
+        async fn list_long_term_facts(
+            &self,
+            _kind_filter: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<LongTermFactSummary>, FrameworkError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct RecordingProvider {
+        reply: String,
+        calls: AtomicUsize,
+        system_prompts: Mutex<Vec<String>>,
+        histories: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl RecordingProvider {
+        fn new(reply: impl Into<String>) -> Self {
+            Self {
+                reply: reply.into(),
+                calls: AtomicUsize::new(0),
+                system_prompts: Mutex::new(Vec::new()),
+                histories: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn system_prompts(&self) -> Vec<String> {
+            self.system_prompts.lock().await.clone()
+        }
+
+        async fn histories(&self) -> Vec<Vec<Message>> {
+            self.histories.lock().await.clone()
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RecordingProvider {
+        async fn generate(
+            &self,
+            system_prompt: &str,
+            history: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.system_prompts
+                .lock()
+                .await
+                .push(system_prompt.to_owned());
+            self.histories.lock().await.push(history.to_vec());
+            Ok(ProviderResponse {
+                output_text: Some(self.reply.clone()),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    struct ForwardProvider {
+        inner: Arc<dyn Provider>,
+    }
+
+    #[async_trait]
+    impl Provider for ForwardProvider {
+        async fn generate(
+            &self,
+            system_prompt: &str,
+            history: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            self.inner.generate(system_prompt, history, tools).await
+        }
+    }
+
+    struct NoopInvoker;
+
+    #[async_trait]
+    impl AgentInvoker for NoopInvoker {
+        async fn invoke_agent(
+            &self,
+            _request: AgentInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Err(FrameworkError::Tool(
+                "agent invocation should not occur in this test".to_owned(),
+            ))
+        }
+
+        async fn invoke_worker(
+            &self,
+            _request: crate::tools::WorkerInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Err(FrameworkError::Tool(
+                "worker invocation should not occur in this test".to_owned(),
+            ))
+        }
+    }
+
+    struct QuietChannel;
+
+    #[async_trait]
+    impl Channel for QuietChannel {
+        async fn send_message(
+            &self,
+            _channel_id: &str,
+            _content: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn broadcast_typing(&self, _channel_id: &str) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn listen(&self) -> Result<ChannelInbound, FrameworkError> {
+            pending::<Result<ChannelInbound, FrameworkError>>().await
+        }
+    }
 
     fn test_inbound(is_dm: bool, guild_id: Option<&str>) -> InboundMessage {
         InboundMessage {
@@ -419,6 +671,70 @@ mod tests {
             mentioned_bot: false,
             invoke: false,
             content: "hello".to_owned(),
+        }
+    }
+
+    fn test_runtime_config() -> AgentRuntimeConfig {
+        let mut agent_config = AgentInnerConfig::default();
+        agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
+        AgentRuntimeConfig {
+            agent_id: "agent-1".to_owned(),
+            provider_key: "default".to_owned(),
+            effective_execution: ExecutionDefaultsConfig {
+                history_messages: 3,
+                ..ExecutionDefaultsConfig::default()
+            },
+            owner_ids: vec!["user-123".to_owned()],
+            agent_config,
+            workspace_root: PathBuf::from("/tmp/simpleclaw-agent-test"),
+            app_base_dir: PathBuf::from("/tmp/simpleclaw-agent-app"),
+            system_prompt: "base prompt".to_owned(),
+        }
+    }
+
+    fn test_gateway() -> Arc<Gateway> {
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, Arc::new(QuietChannel));
+        let (tx, _rx) = mpsc::channel(1);
+        Arc::new(Gateway::new(channels, RoutingConfig::default(), tx))
+    }
+
+    fn test_react_loop(provider: Arc<dyn Provider>) -> Arc<ReactLoop> {
+        let react_loop = Arc::new(ReactLoop::new(
+            ProviderFactory::from_parts(HashMap::from([(
+                "default".to_owned(),
+                (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
+            )])),
+            default_factory(),
+            SkillFactory::new(PathBuf::from("/tmp/simpleclaw-skill-test")),
+        ));
+        react_loop.set_invoker(Arc::new(NoopInvoker));
+        react_loop
+    }
+
+    fn test_runtime_context(memory: DynMemory, react_loop: Arc<ReactLoop>) -> RuntimeContext {
+        let directory = Arc::new(AgentDirectory::new(
+            HashMap::from([("agent-1".to_owned(), test_runtime_config())]),
+            HashMap::from([("agent-1".to_owned(), memory)]),
+        ));
+        let gateway = test_gateway();
+        let (completion_tx, _completion_rx) = mpsc::channel(4);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        let cron_path = std::env::temp_dir().join(format!("simpleclaw_agent_cron_{nanos}.db"));
+        RuntimeContext {
+            react_loop,
+            gateway,
+            agents: directory,
+            process_manager: Arc::new(ProcessManager::new()),
+            cron_store: Arc::new(std::sync::Mutex::new(
+                crate::tools::builtin::cron::CronStore::open(&cron_path)
+                    .expect("cron store should open"),
+            )),
+            completion_tx,
+            safe_error_reply: "safe reply".to_owned(),
         }
     }
 
@@ -486,5 +802,88 @@ mod tests {
 
         assert!(output.contains("trigger: scheduled_cron"));
         assert!(output.contains("Speaker: **cron** (id: system)"));
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_persists_user_and_assistant_messages_and_seeds_history() {
+        let memory_impl = Arc::new(FakeMemory::default());
+        memory_impl
+            .set_recent_messages(vec![StoredMessage {
+                role: StoredRole::Assistant,
+                content: "previous reply".to_owned(),
+                username: None,
+            }])
+            .await;
+        let provider_impl = Arc::new(RecordingProvider::new("final reply"));
+        let memory: DynMemory = memory_impl.clone();
+        let provider: Arc<dyn Provider> = provider_impl.clone();
+        let context = test_runtime_context(memory, test_react_loop(provider));
+        let runtime = AgentRuntime::new(test_runtime_config());
+
+        let outcome = runtime
+            .run(&test_inbound(false, Some("guild-789")), "sess-1", &context)
+            .await
+            .expect("runtime should succeed");
+
+        assert_eq!(outcome.reply, "final reply");
+        assert_eq!(provider_impl.call_count(), 1);
+
+        let appended = memory_impl.appended().await;
+        assert_eq!(appended.len(), 2);
+        assert_eq!(appended[0].1, StoredRole::User);
+        assert_eq!(appended[0].2, "hello");
+        assert_eq!(appended[0].3.as_deref(), Some("kaleb"));
+        assert_eq!(appended[1].1, StoredRole::Assistant);
+        assert_eq!(appended[1].2, "final reply");
+
+        let histories = provider_impl.histories().await;
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[0].len(), 1);
+        assert_eq!(histories[0][0].role, crate::providers::Role::Assistant);
+        assert_eq!(histories[0][0].content, "previous reply");
+
+        let prompts = provider_impl.system_prompts().await;
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("# CURRENT CONTEXT"));
+        assert!(prompts[0].contains("guild_id: guild-789"));
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_skips_assistant_persist_for_no_reply_and_reports_memory_recall_hits() {
+        let memory_impl = Arc::new(FakeMemory::default());
+        memory_impl
+            .set_recall_hits(vec![MemoryRecallHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Prefers short answers".to_owned(),
+                kind: Some("preferences".to_owned()),
+                importance: Some(5),
+                raw_similarity: 0.9,
+                final_score: 0.85,
+            }])
+            .await;
+        let provider_impl = Arc::new(RecordingProvider::new("NO_REPLY"));
+        let memory: DynMemory = memory_impl.clone();
+        let provider: Arc<dyn Provider> = provider_impl.clone();
+        let mut config = test_runtime_config();
+        config.effective_execution.memory_recall.enabled = true;
+        let context = test_runtime_context(memory, test_react_loop(provider));
+        let runtime = AgentRuntime::new(config);
+
+        let outcome = runtime
+            .run(&test_inbound(false, None), "sess-2", &context)
+            .await
+            .expect("runtime should succeed");
+
+        assert_eq!(outcome.reply, "NO_REPLY");
+        assert!(outcome.memory_recall_used);
+        assert_eq!(outcome.memory_recall_hits, 1);
+
+        let appended = memory_impl.appended().await;
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].1, StoredRole::User);
+
+        let prompts = provider_impl.system_prompts().await;
+        assert!(prompts[0].contains("# POTENTIALLY RELEVANT LONG-TERM MEMORY"));
+        assert!(prompts[0].contains("Prefers short answers"));
     }
 }
