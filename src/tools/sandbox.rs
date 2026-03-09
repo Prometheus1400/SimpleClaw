@@ -18,7 +18,6 @@ use super::{Tool, ToolExecEnv, ToolRunOutput};
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
 const WASM_TMP_MOUNT: &str = "/tmp";
-const SANDBOX_ENFORCED_TOOLS: &[&str] = &["read", "edit", "exec"];
 static WASM_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct WasmGuestOutput {
@@ -33,13 +32,6 @@ pub async fn execute_tool_with_sandbox(
     args_json: &str,
     session_id: &str,
 ) -> Result<ToolRunOutput, FrameworkError> {
-    if ctx.sandbox.enabled && SANDBOX_ENFORCED_TOOLS.contains(&tool.name()) && !tool.sandbox_aware()
-    {
-        return Err(FrameworkError::Tool(format!(
-            "tool '{}' is not available in sandbox mode",
-            tool.name()
-        )));
-    }
     tool.execute_with_trace(ctx, args_json, session_id).await
 }
 
@@ -256,7 +248,7 @@ impl Drop for IsolatedTmpDir {
 #[cfg(test)]
 mod tests {
     use super::{execute_tool_with_sandbox, resolve_guest_artifact_path};
-    use crate::config::{AgentSandboxConfig, DatabaseConfig};
+    use crate::config::DatabaseConfig;
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
     use crate::tools::{
@@ -276,9 +268,9 @@ mod tests {
         assert!(err.to_string().contains("missing wasm artifact"));
     }
 
+    #[derive(Clone)]
     struct DummyTool {
         name: &'static str,
-        aware: bool,
     }
 
     struct NoopInvoker;
@@ -320,10 +312,6 @@ mod tests {
             "{}"
         }
 
-        fn sandbox_aware(&self) -> bool {
-            self.aware
-        }
-
         async fn execute(
             &self,
             _ctx: &ToolExecEnv,
@@ -334,7 +322,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx(enabled: bool) -> ToolExecEnv {
+    async fn test_ctx() -> ToolExecEnv {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -349,10 +337,6 @@ mod tests {
         ToolExecEnv {
             agent_id: "test-agent".to_owned(),
             memory: Arc::new(memory),
-            sandbox: AgentSandboxConfig {
-                enabled,
-                ..AgentSandboxConfig::default()
-            },
             workspace_root: PathBuf::from("."),
             user_id: "u".to_owned(),
             owner_ids: vec![],
@@ -364,54 +348,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_mode_rejects_non_aware_tools() {
-        let ctx = test_ctx(true).await;
-        let err = execute_tool_with_sandbox(
-            &DummyTool {
-                name: "read",
-                aware: false,
-            },
-            &ctx,
-            "{}",
-            "s",
-        )
-        .await
-        .expect_err("sandbox should reject non-aware tools");
-        assert!(err.to_string().contains("not available in sandbox mode"));
-    }
-
-    #[tokio::test]
-    async fn sandbox_on_allows_non_enforced_non_aware_tools() {
-        let ctx = test_ctx(true).await;
-        let result = execute_tool_with_sandbox(
-            &DummyTool {
-                name: "clock",
-                aware: false,
-            },
-            &ctx,
-            "{}",
-            "s",
-        )
-        .await
-        .expect("sandbox should allow non-enforced tools");
-        assert_eq!(result.output, "ok");
-        assert!(result.nested_tool_calls.is_empty());
-    }
-
-    #[tokio::test]
-    async fn sandbox_off_allows_non_aware_tools() {
-        let ctx = test_ctx(false).await;
-        let result = execute_tool_with_sandbox(
-            &DummyTool {
-                name: "read",
-                aware: false,
-            },
-            &ctx,
-            "{}",
-            "s",
-        )
-        .await
-        .expect("sandbox off should allow execution");
+    async fn execute_tool_proxies_calls() {
+        let ctx = test_ctx().await;
+        let result = execute_tool_with_sandbox(&DummyTool { name: "clock" }, &ctx, "{}", "s")
+            .await
+            .expect("tool execution should succeed");
         assert_eq!(result.output, "ok");
         assert!(result.nested_tool_calls.is_empty());
     }

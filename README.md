@@ -149,8 +149,9 @@ sequenceDiagram
 - Caller context is always injected (`CURRENT SPEAKER` with user id/name).
 
 ### 4) Tool execution security controls
-- Owner-restricted tools: `exec`, `process`, `forget`, `summon`, `edit`, `memorize`.
-- If `runtime.owner_ids` is empty, these tools fail as misconfigured.
+- Owner restriction is configured per built-in tool via `owner_restricted` (default: `true`).
+- Dynamic skill tools are not owner-restricted.
+- If `runtime.owner_ids` is empty, owner-restricted tools fail as misconfigured.
 - Sandbox gate (`tools/sandbox.rs`) enforces sandbox-aware tools when `sandbox=on`.
 
 ### 5) Background process completion is an inbound event
@@ -172,7 +173,7 @@ flowchart TD
 
     C --> F{"Tool known?"}
     F -->|"No"| G["tool_error: unknown tool"]
-    F -->|"Yes"| H{"Owner restricted?"}
+    F -->|"Yes"| H{"owner_restricted config?"}
     H -->|"Denied"| I["tool_error: permission denied"]
     H -->|"Allowed"| J["execute_tool_with_sandbox"]
     J --> K["Tool output"]

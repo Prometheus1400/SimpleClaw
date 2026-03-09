@@ -4,15 +4,16 @@ use sandbox_common::{EditArgs, apply_edit_command_at_path};
 use sandbox_common::{apply_create as shared_apply_create, apply_replace as shared_apply_replace};
 use std::time::Duration;
 
+use crate::config::EditToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::run_wasm_guest;
 use crate::tools::{Tool, ToolExecEnv};
 
-use super::read::resolve_path_for_read;
+use super::read::{path_within_workspace, resolve_path_for_read};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EditTool {
-    LocalFileEditor,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditTool {
+    config: EditToolConfig,
 }
 
 #[async_trait]
@@ -29,8 +30,10 @@ impl Tool for EditTool {
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\",\"insert\",\"delete\",\"append\"]},\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},\"new_text\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\",\"minimum\":1},\"replace_all\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"dry_run\":{\"type\":\"boolean\"}},\"required\":[\"command\",\"path\"]}"
     }
 
-    fn sandbox_aware(&self) -> bool {
-        true
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config)
+            .map_err(|e| FrameworkError::Config(format!("tools.edit config is invalid: {e}")))?;
+        Ok(())
     }
 
     async fn execute(
@@ -39,13 +42,23 @@ impl Tool for EditTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
-        if ctx.sandbox.enabled {
+        let args: EditArgs = serde_json::from_str(args_json)
+            .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
+
+        let path = resolve_path_for_read(
+            &args.path,
+            &ctx.workspace_root,
+            self.config.sandbox.enabled,
+            &self.config.sandbox.extra_writable_paths,
+        )?;
+
+        if self.config.sandbox.enabled && path_within_workspace(&path, &ctx.workspace_root)? {
             let output = run_wasm_guest(
                 &ctx.workspace_root,
                 "edit_tool.wasm",
                 &[],
                 args_json.as_bytes(),
-                Duration::from_secs(15),
+                Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
             )
             .await?;
             if output.exit_code != 0 {
@@ -58,10 +71,6 @@ impl Tool for EditTool {
             return Ok(output.stdout);
         }
 
-        let args: EditArgs = serde_json::from_str(args_json)
-            .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
-
-        let path = resolve_path_for_read(&args.path, &ctx.workspace_root, ctx.sandbox.enabled)?;
         apply_edit_command_at_path(&args, &path).map_err(|e| FrameworkError::Tool(e.to_string()))
     }
 }
@@ -198,6 +207,7 @@ mod tests {
             outside.join("secrets.txt").to_string_lossy().as_ref(),
             &workspace,
             true,
+            &[],
         )
         .expect_err("outside path should be denied");
         assert!(err.to_string().contains("path denied by sandbox"));

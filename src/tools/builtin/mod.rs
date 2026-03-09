@@ -12,23 +12,21 @@ mod task;
 mod web_fetch;
 mod web_search;
 
-use std::sync::Arc;
-
 use crate::tools::Tool;
 
-pub(crate) fn builtin_tools() -> Vec<Arc<dyn Tool>> {
+pub(crate) fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
-        Arc::new(memory::MemoryTool::SemanticQuery),
-        Arc::new(memorize::MemorizeTool::LongTermStore),
-        Arc::new(forget::ForgetTool::LongTermSemanticPrune),
-        Arc::new(summon::SummonTool::Handoff),
-        Arc::new(task::TaskTool::Worker),
-        Arc::new(web_search::WebSearchTool::DuckDuckGo),
-        Arc::new(clock::ClockTool::UtcNow),
-        Arc::new(web_fetch::WebFetchTool::HttpFetch),
-        Arc::new(read::ReadTool::LocalFile),
-        Arc::new(edit::EditTool::LocalFileEditor),
-        Arc::new(exec::ExecTool::ShellCommand),
-        Arc::new(process::ProcessTool::Lifecycle),
+        Box::new(memory::MemoryTool::default()),
+        Box::new(memorize::MemorizeTool::LongTermStore),
+        Box::new(forget::ForgetTool::LongTermSemanticPrune),
+        Box::new(summon::SummonTool::default()),
+        Box::new(task::TaskTool::default()),
+        Box::new(web_search::WebSearchTool::default()),
+        Box::new(clock::ClockTool::UtcNow),
+        Box::new(web_fetch::WebFetchTool::default()),
+        Box::new(read::ReadTool::default()),
+        Box::new(edit::EditTool::default()),
+        Box::new(exec::ExecTool::default()),
+        Box::new(process::ProcessTool::Lifecycle),
     ]
 }

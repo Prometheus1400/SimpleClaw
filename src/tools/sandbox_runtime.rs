@@ -3,13 +3,13 @@ use std::path::Path;
 use sandbox_runtime::{FilesystemConfig, NetworkConfig, SandboxManager, SandboxRuntimeConfig};
 use tokio::runtime::Builder;
 
-use crate::config::{AgentSandboxConfig, SandboxNetworkMode};
+use crate::config::ToolSandboxConfig;
 use crate::error::FrameworkError;
 
 pub async fn wrap_command_for_exec(
     user_command: &str,
     workspace_root: &Path,
-    sandbox: &AgentSandboxConfig,
+    sandbox: &ToolSandboxConfig,
 ) -> Result<String, FrameworkError> {
     let workspace = crate::tools::sandbox::normalize_workspace_root(workspace_root)?;
     let command = user_command.to_owned();
@@ -23,9 +23,10 @@ pub async fn wrap_command_for_exec(
 
 fn build_runtime_config(
     workspace_root: &Path,
-    sandbox: &AgentSandboxConfig,
+    sandbox: &ToolSandboxConfig,
 ) -> SandboxRuntimeConfig {
-    let network = if sandbox.network.mode == SandboxNetworkMode::Enabled {
+    let network_enabled = sandbox.network_enabled.unwrap_or(false);
+    let network = if network_enabled {
         NetworkConfig::default()
     } else {
         NetworkConfig {
@@ -47,16 +48,16 @@ fn build_runtime_config(
     }
 }
 
-fn build_write_allow_paths(workspace_root: &Path, sandbox: &AgentSandboxConfig) -> Vec<String> {
+fn build_write_allow_paths(workspace_root: &Path, sandbox: &ToolSandboxConfig) -> Vec<String> {
     let mut allow = vec![workspace_root.display().to_string(), "/tmp".to_owned()];
-    allow.extend(sandbox.filesystem.extra_writable_paths.iter().cloned());
+    allow.extend(sandbox.extra_writable_paths.iter().cloned());
     allow
 }
 
 fn wrap_command_for_exec_blocking(
     user_command: &str,
     workspace_root: &Path,
-    sandbox: &AgentSandboxConfig,
+    sandbox: &ToolSandboxConfig,
 ) -> Result<String, FrameworkError> {
     let runtime_cfg = build_runtime_config(workspace_root, sandbox);
     let manager = SandboxManager::new();

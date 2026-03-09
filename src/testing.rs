@@ -128,16 +128,19 @@ pub async fn run_single_gateway_roundtrip(
     fs::create_dir_all(&workspace_dir).wrap_err("failed to create test workspace")?;
 
     let mut global = GlobalConfig::default();
-    global.runtime.memory_preinject.enabled = false;
-    global.runtime.max_steps = config.max_steps;
+    global.execution.defaults.memory_preinject.enabled = false;
+    global.execution.defaults.max_steps = config.max_steps;
     global.agents.default = config.agent_id.clone();
     global.agents.list = vec![AgentEntryConfig {
         id: config.agent_id.clone(),
         name: config.agent_name.clone(),
         workspace: workspace_dir.clone(),
-        runtime: crate::config::AgentConfig::default(),
+        config: crate::config::AgentInnerConfig::default(),
     }];
-    global.gateway.channels = vec![GatewayChannelKind::Discord];
+    global.gateway.channels = HashMap::from([(
+        GatewayChannelKind::Discord,
+        crate::config::ChannelConfig::default(),
+    )]);
     let loaded = LoadedConfig { global };
 
     let app_base_dir = ephemeral_paths.root_dir.join("app");

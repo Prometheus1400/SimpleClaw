@@ -1,6 +1,6 @@
 use crate::channels::policy::InboundDecision;
 use crate::channels::{ChannelInbound, InboundMessage};
-use crate::config::{GatewayChannelKind, InboundConfig};
+use crate::config::{GatewayChannelKind, RoutingConfig};
 
 use super::policy::evaluate_inbound_policy;
 use super::session::build_session_key;
@@ -8,7 +8,7 @@ use super::session::build_session_key;
 pub(super) fn route_inbound(
     kind: GatewayChannelKind,
     inbound: ChannelInbound,
-    inbound_policy: &InboundConfig,
+    inbound_policy: &RoutingConfig,
 ) -> Option<InboundMessage> {
     let decision = evaluate_inbound_policy(kind, &inbound, inbound_policy);
     let (target_agent_id, invoke) = match decision {
@@ -40,7 +40,7 @@ mod tests {
     use super::route_inbound;
     use crate::channels::ChannelInbound;
     use crate::config::{
-        ChannelInboundConfig, GatewayChannelKind, InboundConfig, InboundPolicyConfig,
+        ChannelRoutingConfig, GatewayChannelKind, InboundPolicyConfig, RoutingConfig,
     };
 
     #[test]
@@ -57,7 +57,7 @@ mod tests {
         let message = route_inbound(
             GatewayChannelKind::Discord,
             inbound,
-            &InboundConfig::default(),
+            &RoutingConfig::default(),
         )
         .expect("message should be routed");
         assert!(message.invoke);
@@ -76,11 +76,11 @@ mod tests {
             mentioned_bot: false,
             content: "hello".to_owned(),
         };
-        let policy = InboundConfig {
+        let policy = RoutingConfig {
             channels: HashMap::from([(
                 GatewayChannelKind::Discord,
-                ChannelInboundConfig {
-                    policy: InboundPolicyConfig::default(),
+                ChannelRoutingConfig {
+                    defaults: InboundPolicyConfig::default(),
                     dm: InboundPolicyConfig {
                         allow_from: Some(vec!["999".to_owned()]),
                         ..InboundPolicyConfig::default()
@@ -88,7 +88,7 @@ mod tests {
                     workspaces: HashMap::new(),
                 },
             )]),
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
         let message = route_inbound(GatewayChannelKind::Discord, inbound, &policy);
         assert!(message.is_none());

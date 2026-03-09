@@ -239,7 +239,7 @@ fn load_configured_log_level() -> LogLevel {
         Ok(content) => content,
         Err(err) => {
             eprintln!(
-                "warning: failed to read {} for runtime.log_level: {err}",
+                "warning: failed to read {} for execution.log_level: {err}",
                 paths.config_path.display()
             );
             return LogLevel::default();
@@ -247,10 +247,10 @@ fn load_configured_log_level() -> LogLevel {
     };
 
     match serde_yaml::from_str::<GlobalConfig>(&content) {
-        Ok(global) => global.runtime.log_level,
+        Ok(global) => global.execution.log_level,
         Err(err) => {
             eprintln!(
-                "warning: failed to parse {} for runtime.log_level: {err}",
+                "warning: failed to parse {} for execution.log_level: {err}",
                 paths.config_path.display()
             );
             LogLevel::default()

@@ -6,7 +6,7 @@ use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
 use crate::channels::{Channel, InboundMessage};
-use crate::config::{GatewayChannelKind, InboundConfig};
+use crate::config::{GatewayChannelKind, RoutingConfig};
 use crate::error::FrameworkError;
 
 mod policy;
@@ -21,7 +21,7 @@ pub struct Gateway {
 impl Gateway {
     pub fn new(
         channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
-        inbound_policy: InboundConfig,
+        inbound_policy: RoutingConfig,
         inbound_tx: mpsc::Sender<InboundMessage>,
     ) -> Self {
         for (kind, channel) in &channels {
@@ -109,7 +109,7 @@ mod tests {
 
     use super::Gateway;
     use crate::channels::{Channel, ChannelInbound};
-    use crate::config::{GatewayChannelKind, InboundConfig};
+    use crate::config::{GatewayChannelKind, RoutingConfig};
     use crate::error::FrameworkError;
 
     struct SingleInboundChannel {
@@ -155,7 +155,7 @@ mod tests {
         let mut channels = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
         let (tx, mut rx) = mpsc::channel(1);
-        let _gateway = Gateway::new(channels, InboundConfig::default(), tx);
+        let _gateway = Gateway::new(channels, RoutingConfig::default(), tx);
         let next = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("gateway should emit normalized inbound")

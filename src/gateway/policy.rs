@@ -1,11 +1,11 @@
 use crate::channels::ChannelInbound;
 use crate::channels::policy::{InboundDecision, InboundPolicyContext, classify_inbound};
-use crate::config::{GatewayChannelKind, InboundConfig};
+use crate::config::{GatewayChannelKind, RoutingConfig};
 
 pub(super) fn evaluate_inbound_policy(
     kind: GatewayChannelKind,
     inbound: &ChannelInbound,
-    inbound_policy: &InboundConfig,
+    inbound_policy: &RoutingConfig,
 ) -> InboundDecision {
     let context = InboundPolicyContext {
         source_channel: kind,

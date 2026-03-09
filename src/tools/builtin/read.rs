@@ -4,15 +4,16 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::config::ReadToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::{normalize_workspace_root, run_wasm_guest, workspace_guest_mount_path};
 use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_simple_text_arg;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadTool {
-    LocalFile,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadTool {
+    config: ReadToolConfig,
 }
 
 #[async_trait]
@@ -29,8 +30,10 @@ impl Tool for ReadTool {
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
     }
 
-    fn sandbox_aware(&self) -> bool {
-        true
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config)
+            .map_err(|e| FrameworkError::Config(format!("tools.read config is invalid: {e}")))?;
+        Ok(())
     }
 
     async fn execute(
@@ -40,15 +43,21 @@ impl Tool for ReadTool {
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
         let raw_path = parse_simple_text_arg(args_json);
-        let path = resolve_path_for_read(&raw_path, &ctx.workspace_root, ctx.sandbox.enabled)?;
-        if ctx.sandbox.enabled {
+        let sandbox_enabled = self.config.sandbox.enabled;
+        let path = resolve_path_for_read(
+            &raw_path,
+            &ctx.workspace_root,
+            sandbox_enabled,
+            &self.config.sandbox.extra_readable_paths,
+        )?;
+        if sandbox_enabled && path_within_workspace(&path, &ctx.workspace_root)? {
             let guest_path = host_path_to_workspace_guest_path(&path, &ctx.workspace_root)?;
             let output = run_wasm_guest(
                 &ctx.workspace_root,
                 "read_tool.wasm",
                 &[guest_path],
                 &[],
-                Duration::from_secs(10),
+                Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
             )
             .await?;
             if output.exit_code != 0 {
@@ -89,6 +98,7 @@ pub(super) fn resolve_path_for_read(
     raw_path: &str,
     workspace_root: &Path,
     sandbox_enabled: bool,
+    extra_readable_paths: &[String],
 ) -> Result<PathBuf, FrameworkError> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
@@ -108,19 +118,18 @@ pub(super) fn resolve_path_for_read(
     let normalized_path = normalize_absolute_path(&absolute);
 
     if sandbox_enabled {
-        let workspace_absolute = if workspace_root.is_absolute() {
-            workspace_root.to_path_buf()
-        } else {
-            env::current_dir()
-                .map_err(FrameworkError::Io)?
-                .join(workspace_root)
-        };
-        let normalized_workspace = normalize_absolute_path(&workspace_absolute);
-        if !normalized_path.starts_with(&normalized_workspace) {
+        let allowed_roots = sandbox_allowed_roots(workspace_root, extra_readable_paths)?;
+        let is_allowed = allowed_roots
+            .iter()
+            .any(|allowed_root| normalized_path.starts_with(allowed_root));
+        if !is_allowed {
             return Err(FrameworkError::Tool(format!(
                 "read path denied by sandbox: path={} workspace={}",
                 normalized_path.display(),
-                normalized_workspace.display()
+                allowed_roots
+                    .first()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| workspace_root.display().to_string())
             )));
         }
     }
@@ -156,6 +165,52 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+pub(super) fn path_within_workspace(
+    normalized_path: &Path,
+    workspace_root: &Path,
+) -> Result<bool, FrameworkError> {
+    let workspace_absolute = if workspace_root.is_absolute() {
+        workspace_root.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(FrameworkError::Io)?
+            .join(workspace_root)
+    };
+    let normalized_workspace = normalize_absolute_path(&workspace_absolute);
+    Ok(normalized_path.starts_with(&normalized_workspace))
+}
+
+fn sandbox_allowed_roots(
+    workspace_root: &Path,
+    extra_readable_paths: &[String],
+) -> Result<Vec<PathBuf>, FrameworkError> {
+    let workspace_absolute = if workspace_root.is_absolute() {
+        workspace_root.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(FrameworkError::Io)?
+            .join(workspace_root)
+    };
+    let normalized_workspace = normalize_absolute_path(&workspace_absolute);
+    let mut roots = vec![normalized_workspace.clone()];
+    for extra in extra_readable_paths {
+        let extra = extra.trim();
+        if extra.is_empty() {
+            continue;
+        }
+        let expanded_input = expand_env_vars(extra);
+        let expanded =
+            expand_home_dir(&expanded_input).unwrap_or_else(|| PathBuf::from(expanded_input));
+        let absolute = if expanded.is_absolute() {
+            expanded
+        } else {
+            normalized_workspace.join(expanded)
+        };
+        roots.push(normalize_absolute_path(&absolute));
+    }
+    Ok(roots)
 }
 
 fn expand_env_vars(input: &str) -> String {
@@ -257,8 +312,8 @@ mod tests {
         let workspace = unique_test_dir("workspace_relative");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let resolved =
-            resolve_path_for_read("docs/file.txt", &workspace, true).expect("path should resolve");
+        let resolved = resolve_path_for_read("docs/file.txt", &workspace, true, &[])
+            .expect("path should resolve");
         assert_eq!(resolved, workspace.join("docs/file.txt"));
 
         let _ = fs::remove_dir_all(&workspace);
@@ -270,7 +325,7 @@ mod tests {
         fs::create_dir_all(&workspace).expect("should create workspace");
         let outside = unique_test_dir("outside_absolute").join("secrets.txt");
 
-        let err = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, true)
+        let err = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, true, &[])
             .expect_err("outside path should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
 
@@ -282,11 +337,32 @@ mod tests {
         let workspace = unique_test_dir("workspace_traversal");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let err = resolve_path_for_read("../outside.txt", &workspace, true)
+        let err = resolve_path_for_read("../outside.txt", &workspace, true, &[])
             .expect_err("parent traversal should be denied");
         assert!(err.to_string().contains("read path denied by sandbox"));
 
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn resolve_path_in_wasm_sandbox_allows_extra_readable_path() {
+        let workspace = unique_test_dir("workspace_extra_read");
+        let outside = unique_test_dir("outside_extra_read");
+        fs::create_dir_all(&workspace).expect("should create workspace");
+        fs::create_dir_all(&outside).expect("should create outside");
+        let target = outside.join("notes.txt");
+
+        let resolved = resolve_path_for_read(
+            target.to_string_lossy().as_ref(),
+            &workspace,
+            true,
+            &[outside.to_string_lossy().to_string()],
+        )
+        .expect("extra readable path should be allowed");
+        assert_eq!(resolved, target);
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -295,8 +371,9 @@ mod tests {
         fs::create_dir_all(&workspace).expect("should create workspace");
         let outside = unique_test_dir("outside_off").join("secrets.txt");
 
-        let resolved = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, false)
-            .expect("outside path should resolve with sandbox off");
+        let resolved =
+            resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, false, &[])
+                .expect("outside path should resolve with sandbox off");
         assert_eq!(resolved, outside);
 
         let _ = fs::remove_dir_all(&workspace);
@@ -312,7 +389,7 @@ mod tests {
             std::env::set_var("HOME", &fake_home);
         }
 
-        let resolved = resolve_path_for_read("~/keys.txt", &workspace, false)
+        let resolved = resolve_path_for_read("~/keys.txt", &workspace, false, &[])
             .expect("home path should resolve");
         assert_eq!(resolved, fake_home.join("keys.txt"));
 
@@ -330,9 +407,13 @@ mod tests {
             std::env::set_var("SIMPLECLAW_READ_TEST_DIR", &env_root);
         }
 
-        let resolved =
-            resolve_path_for_read("$SIMPLECLAW_READ_TEST_DIR/token.txt", &workspace, false)
-                .expect("env path should resolve");
+        let resolved = resolve_path_for_read(
+            "$SIMPLECLAW_READ_TEST_DIR/token.txt",
+            &workspace,
+            false,
+            &[],
+        )
+        .expect("env path should resolve");
         assert_eq!(resolved, env_root.join("token.txt"));
 
         let _ = fs::remove_dir_all(&workspace);

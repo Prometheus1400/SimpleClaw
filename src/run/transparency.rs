@@ -92,11 +92,7 @@ fn append_flattened<'a>(
     }
 }
 
-fn append_concise_tree(
-    call: &ToolExecutionResult,
-    depth: usize,
-    out: &mut Vec<String>,
-) {
+fn append_concise_tree(call: &ToolExecutionResult, depth: usize, out: &mut Vec<String>) {
     let status = if call.success { "ok" } else { "error" };
     if depth == 0 {
         out.push(format!("({status}|{})", call.name));

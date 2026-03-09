@@ -1,0 +1,127 @@
+execution:
+  summon_mode: synchronous
+  owner_ids: ["123456789"]
+  # defaults means it is overridable per agent
+  defaults:
+    max_steps: 8
+    history_messages: 10
+    tool_call_transparency: concise
+    memory_preinject:
+      enabled: true
+      top_k: 3
+      min_score: 0.72
+      long_term_weight: 0.65
+      max_chars: 1200
+
+gateway:
+  channels:
+    discord:
+      enabled: true
+      token: ${secret:DISCORD_TOKEN}
+  routing:
+    defaults:
+      agent: planner
+      require_mentions: false
+      allow_from: null
+    channels:
+      discord:
+        defaults:
+          agent: planner
+          require_mentions: true
+          allow_from: null
+        workspaces:
+          "111111111111111111":
+            defaults:
+              agent: reviewer
+              require_mentions: false
+              allow_from: ["123456789", "987654321"]
+            channels:
+              "222222222222222222":
+                agent: researcher
+                require_mentions: false
+                allow_from: null
+              "333333333333333333":
+                agent: planner
+                require_mentions: true
+                allow_from: ["123456789"]
+        dm:
+          agent: planner
+          require_mentions: false
+          allow_from: null
+
+agents:
+  default: planner
+  list:
+    - id: planner
+      name: Planner
+      workspace: ./agents/planner
+      config:
+        provider: default
+        model: gemini-2.0-flash
+        execution:
+          max_steps: 10
+          history_messages: 12
+          tool_call_transparency: concise
+          memory_preinject:
+            top_k: 5
+          safe_error_reply: "Planner hit an internal error."
+
+        tools:
+          read:
+            enabled: true
+            owner_restricted: false
+            timeout_seconds: 10
+            sandbox:
+              enabled: true
+              extra_readable_paths: ["/tmp"]
+          edit:
+            enabled: true
+            owner_restricted: true
+            timeout_seconds: 15
+            sandbox:
+              enabled: true
+              extra_writable_paths: ["/tmp"]
+          exec:
+            enabled: true
+            owner_restricted: true
+            timeout_seconds: 120
+            allow_background: true
+            sandbox:
+              enabled: true
+              network_enabled: false
+              extra_writable_paths: ["/tmp"]
+          process:
+            enabled: true
+            owner_restricted: true
+          web_search:
+            enabled: false
+            owner_restricted: false
+            timeout_seconds: 20
+          web_fetch:
+            enabled: false
+            owner_restricted: false
+            timeout_seconds: 20
+            max_chars: 8000
+          memory:
+            enabled: true
+            owner_restricted: false
+            default_top_k: 5
+            max_top_k: 20
+          memorize:
+            enabled: true
+            owner_restricted: true
+          forget:
+            enabled: false
+            owner_restricted: true
+          summon:
+            enabled: true
+            owner_restricted: true
+            allowed:
+              - researcher
+          task:
+            enabled: true
+            owner_restricted: false
+            worker_max_steps: 4
+          skills:
+            enabled: true
+            ids: [code_review, release_checklist]
