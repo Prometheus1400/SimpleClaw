@@ -30,6 +30,7 @@ pub struct RunParams<'a> {
     pub agent_id: &'a str,
     pub session_id: &'a str,
     pub max_steps: u32,
+    pub history_messages: usize,
     pub memory: DynMemory,
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,
@@ -91,6 +92,7 @@ impl ReactLoop {
         let tool_env = ToolExecEnv {
             agent_id: params.agent_id.to_owned(),
             memory: params.memory.clone(),
+            history_messages: params.history_messages,
             workspace_root: params.workspace_root.clone(),
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),

@@ -71,6 +71,14 @@ pub struct LongTermForgetResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryHitStore {
     LongTerm,
+    ShortTerm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryStoreScope {
+    Combined,
+    LongTerm,
+    ShortTerm,
 }
 
 #[derive(Debug, Clone)]
