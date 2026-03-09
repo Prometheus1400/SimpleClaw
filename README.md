@@ -245,6 +245,21 @@ Build WASM guests for sandboxed `read`/`edit`:
 cargo build --package read_tool --package edit_tool --target wasm32-wasip1 --release
 ```
 
+## Linux Integration Tests (Podman)
+
+Run Linux-only sandbox integration tests from macOS using Podman:
+
+```bash
+./scripts/linux_integration_podman.sh
+```
+
+To test against a local checkout of `sandbox-runtime-rs`:
+
+```bash
+SANDBOX_RUNTIME_PATH=/absolute/path/to/sandbox-runtime-rs \
+  ./scripts/linux_integration_podman.sh
+```
+
 Install/uninstall helpers:
 
 ```bash
