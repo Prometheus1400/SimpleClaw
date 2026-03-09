@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
@@ -40,6 +42,23 @@ pub struct TestHarnessConfig {
     pub username: String,
     /// Max steps used for runtime creation.
     pub max_steps: u32,
+    /// Optional scripted tool call emitted on the first provider turn.
+    pub scripted_tool_call: Option<ScriptedToolCall>,
+    /// Optional final reply emitted after scripted tool call completion.
+    pub scripted_final_reply: Option<String>,
+    /// Optional override for tools.exec.timeout_seconds.
+    pub exec_timeout_seconds: Option<u64>,
+}
+
+/// Tool call emitted by the scripted test provider on its first turn.
+#[derive(Debug, Clone)]
+pub struct ScriptedToolCall {
+    /// Optional provider tool-call identifier.
+    pub id: Option<String>,
+    /// Tool name to invoke (for example, `exec`).
+    pub name: String,
+    /// JSON-encoded tool arguments.
+    pub args_json: String,
 }
 
 impl Default for TestHarnessConfig {
@@ -53,6 +72,9 @@ impl Default for TestHarnessConfig {
             user_id: "integration-user".to_owned(),
             username: "integration-user".to_owned(),
             max_steps: 4,
+            scripted_tool_call: None,
+            scripted_final_reply: None,
+            exec_timeout_seconds: None,
         }
     }
 }
@@ -100,6 +122,10 @@ pub struct TestTurnResult {
     pub memory_session_id: String,
     /// Ephemeral paths that remain valid until this result is dropped.
     pub ephemeral_paths: EphemeralPaths,
+    /// Whether provider observed at least one tool result in history.
+    pub observed_tool_result: bool,
+    /// Last tool result payload observed by the provider, if any.
+    pub observed_tool_response: Option<Value>,
 }
 
 /// Run one end-to-end gateway turn using a mock provider and ephemeral sqlite files.
@@ -108,7 +134,11 @@ pub async fn run_single_gateway_roundtrip(
 ) -> color_eyre::Result<TestTurnResult> {
     let ephemeral_paths = create_ephemeral_paths().wrap_err("failed to create ephemeral paths")?;
 
-    let provider = Arc::new(StaticMockProvider::new(config.mock_reply.clone()));
+    let provider = Arc::new(StaticMockProvider::new(
+        config.mock_reply.clone(),
+        config.scripted_tool_call.clone(),
+        config.scripted_final_reply.clone(),
+    ));
     let channel = Arc::new(CaptureChannel::new());
     let deps = RuntimeDependencies {
         provider_factory_builder: Arc::new(StaticProviderFactory {
@@ -130,12 +160,20 @@ pub async fn run_single_gateway_roundtrip(
     let mut global = GlobalConfig::default();
     global.execution.defaults.memory_recall.enabled = false;
     global.execution.defaults.max_steps = config.max_steps;
+    global.execution.owner_ids = vec![config.user_id.clone()];
     global.agents.default = config.agent_id.clone();
+    let mut agent_inner = crate::config::AgentInnerConfig::default();
+    if let Some(timeout_seconds) = config.exec_timeout_seconds {
+        agent_inner.tools.exec = Some(crate::config::ExecToolConfig {
+            timeout_seconds: Some(timeout_seconds),
+            ..Default::default()
+        });
+    }
     global.agents.list = vec![AgentEntryConfig {
         id: config.agent_id.clone(),
         name: config.agent_name.clone(),
         workspace: workspace_dir.clone(),
-        config: crate::config::AgentInnerConfig::default(),
+        config: agent_inner,
     }];
     global.gateway.channels = HashMap::from([(
         GatewayChannelKind::Discord,
@@ -188,24 +226,49 @@ pub async fn run_single_gateway_roundtrip(
         typing_events: channel.typing_events(),
         memory_session_id,
         ephemeral_paths,
+        observed_tool_result: provider.saw_tool_result(),
+        observed_tool_response: provider.observed_tool_response(),
     })
 }
 
 struct StaticMockProvider {
     reply: String,
+    scripted_tool_call: Option<ScriptedToolCall>,
+    scripted_final_reply: Option<String>,
     call_count: AtomicUsize,
+    saw_tool_result: AtomicBool,
+    observed_tool_response: StdMutex<Option<Value>>,
 }
 
 impl StaticMockProvider {
-    fn new(reply: String) -> Self {
+    fn new(
+        reply: String,
+        scripted_tool_call: Option<ScriptedToolCall>,
+        scripted_final_reply: Option<String>,
+    ) -> Self {
         Self {
             reply,
+            scripted_tool_call,
+            scripted_final_reply,
             call_count: AtomicUsize::new(0),
+            saw_tool_result: AtomicBool::new(false),
+            observed_tool_response: StdMutex::new(None),
         }
     }
 
     fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
+    }
+
+    fn saw_tool_result(&self) -> bool {
+        self.saw_tool_result.load(Ordering::SeqCst)
+    }
+
+    fn observed_tool_response(&self) -> Option<Value> {
+        self.observed_tool_response
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 }
 
@@ -214,10 +277,39 @@ impl Provider for StaticMockProvider {
     async fn generate(
         &self,
         _system_prompt: &str,
-        _history: &[Message],
+        history: &[Message],
         _tools: &[ToolDefinition],
     ) -> Result<ProviderResponse, FrameworkError> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
+        let call_number = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(message) = history.iter().rev().find(|m| !m.tool_results.is_empty()) {
+            self.saw_tool_result.store(true, Ordering::SeqCst);
+            if let Some(result) = message.tool_results.first()
+                && let Ok(mut slot) = self.observed_tool_response.lock()
+            {
+                *slot = Some(result.response.clone());
+            }
+        }
+
+        if let Some(tool_call) = &self.scripted_tool_call {
+            if call_number == 1 {
+                return Ok(ProviderResponse {
+                    output_text: None,
+                    tool_calls: vec![crate::providers::ToolCall {
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        args_json: tool_call.args_json.clone(),
+                    }],
+                });
+            }
+            let reply = self
+                .scripted_final_reply
+                .clone()
+                .unwrap_or_else(|| self.reply.clone());
+            return Ok(ProviderResponse {
+                output_text: Some(reply),
+                tool_calls: Vec::new(),
+            });
+        }
         Ok(ProviderResponse {
             output_text: Some(self.reply.clone()),
             tool_calls: Vec::new(),
