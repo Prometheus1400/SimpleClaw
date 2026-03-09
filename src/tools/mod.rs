@@ -876,6 +876,10 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
+            cron: Some(crate::config::CronToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
             react: Some(crate::config::ReactToolConfig {
                 enabled: false,
                 ..Default::default()

@@ -17,6 +17,7 @@ use crate::paths::AppPaths;
 use crate::reply_policy::is_no_reply;
 
 pub(crate) mod composition;
+mod cron_scheduler;
 mod daemon;
 mod logging;
 mod session;
@@ -183,6 +184,11 @@ pub async fn run_service() -> color_eyre::Result<()> {
     let deps = RuntimeDependencies::default();
     let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps).await?;
     let state = Arc::new(state);
+    let _cron_handle = cron_scheduler::spawn(
+        Arc::clone(&state.context.cron_store),
+        state.context.completion_tx.clone(),
+        10,
+    );
     let coordinator =
         SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
     let handler: SessionHandler<InboundMessage> = {

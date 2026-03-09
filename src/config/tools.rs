@@ -9,6 +9,14 @@ fn default_owner_restricted() -> bool {
     true
 }
 
+fn default_cron_max_jobs_per_agent() -> Option<u32> {
+    Some(50)
+}
+
+fn default_cron_guard_timeout_seconds() -> Option<u64> {
+    Some(10)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
@@ -24,6 +32,7 @@ pub struct ToolsConfig {
     pub summon: Option<SummonToolConfig>,
     pub task: Option<TaskToolConfig>,
     pub clock: Option<ClockToolConfig>,
+    pub cron: Option<CronToolConfig>,
     pub react: Option<ReactToolConfig>,
     pub skills: Option<SkillsToolConfig>,
 }
@@ -61,6 +70,9 @@ impl ToolsConfig {
         }
         if self.clock.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("clock".to_owned());
+        }
+        if self.cron.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("cron".to_owned());
         }
         if self.react.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("react".to_owned());
@@ -104,6 +116,7 @@ impl ToolsConfig {
             "summon" => serde_json::to_value(self.summon.clone().unwrap_or_default()).ok()?,
             "task" => serde_json::to_value(self.task.clone().unwrap_or_default()).ok()?,
             "clock" => serde_json::to_value(self.clock.clone().unwrap_or_default()).ok()?,
+            "cron" => serde_json::to_value(self.cron.clone().unwrap_or_default()).ok()?,
             "react" => serde_json::to_value(self.react.clone().unwrap_or_default()).ok()?,
             "skills" => serde_json::to_value(self.skills.clone().unwrap_or_default()).ok()?,
             _ => return None,
@@ -125,6 +138,7 @@ impl ToolsConfig {
             "summon" => self.summon.clone().unwrap_or_default().owner_restricted,
             "task" => self.task.clone().unwrap_or_default().owner_restricted,
             "clock" => self.clock.clone().unwrap_or_default().owner_restricted,
+            "cron" => self.cron.clone().unwrap_or_default().owner_restricted,
             "react" => self.react.clone().unwrap_or_default().owner_restricted,
             _ => return None,
         };
@@ -149,6 +163,7 @@ impl ToolsConfig {
                 "summon" => next.summon.get_or_insert_with(Default::default).enabled = false,
                 "task" => next.task.get_or_insert_with(Default::default).enabled = false,
                 "clock" => next.clock.get_or_insert_with(Default::default).enabled = false,
+                "cron" => next.cron.get_or_insert_with(Default::default).enabled = false,
                 "react" => next.react.get_or_insert_with(Default::default).enabled = false,
                 "skills" => next.skills.get_or_insert_with(Default::default).enabled = false,
                 _ => {}
@@ -437,6 +452,30 @@ impl Default for ClockToolConfig {
         Self {
             enabled: default_enabled(),
             owner_restricted: default_owner_restricted(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CronToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
+    #[serde(default = "default_cron_max_jobs_per_agent")]
+    pub max_jobs_per_agent: Option<u32>,
+    #[serde(default = "default_cron_guard_timeout_seconds")]
+    pub guard_timeout_seconds: Option<u64>,
+}
+
+impl Default for CronToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
+            max_jobs_per_agent: default_cron_max_jobs_per_agent(),
+            guard_timeout_seconds: default_cron_guard_timeout_seconds(),
         }
     }
 }

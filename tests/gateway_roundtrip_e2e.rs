@@ -1,9 +1,9 @@
 use rusqlite::Connection;
 #[cfg(target_os = "linux")]
 use serde_json::Value;
-use simpleclaw::testing::{TestHarnessConfig, run_single_gateway_roundtrip};
 #[cfg(target_os = "linux")]
 use simpleclaw::testing::ScriptedToolCall;
+use simpleclaw::testing::{TestHarnessConfig, run_single_gateway_roundtrip};
 
 #[tokio::test]
 async fn gateway_roundtrip_uses_mock_provider_and_persists_ephemeral_sqlite() {

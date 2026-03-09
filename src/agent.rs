@@ -67,6 +67,7 @@ pub struct RuntimeContext {
     pub gateway: Arc<crate::gateway::Gateway>,
     pub agents: Arc<AgentDirectory>,
     pub process_manager: Arc<ProcessManager>,
+    pub cron_store: Arc<std::sync::Mutex<crate::tools::builtin::cron::CronStore>>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
     pub safe_error_reply: String,
 }
