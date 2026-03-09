@@ -78,6 +78,7 @@ pub struct MemoryPreinjectHit {
     pub store: MemoryHitStore,
     pub content: String,
     pub kind: Option<String>,
+    #[allow(dead_code)]
     pub importance: Option<i64>,
     pub raw_similarity: f32,
     pub final_score: f32,

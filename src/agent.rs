@@ -8,11 +8,13 @@ use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
 use crate::config::{AgentConfig, RuntimeConfig, ToolCallTransparency};
+use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunOutcome, RunParams};
+use crate::telemetry::sanitize_preview;
 use crate::tools::{CompletionRoute, ProcessManager};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
@@ -112,13 +114,12 @@ impl AgentRuntime {
                 ))
             })?;
 
-        let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);
         memory
             .append_message(
                 memory_session_id,
                 StoredRole::User,
                 &inbound.content,
-                Some(&display_identity),
+                Some(&inbound.username),
             )
             .await?;
 
@@ -126,8 +127,7 @@ impl AgentRuntime {
         let system_prompt = self
             .build_turn_system_prompt(&memory, memory_session_id, &inbound.content)
             .await;
-        let system_prompt =
-            inject_caller_context(&system_prompt, &inbound.user_id, &inbound.username);
+        let system_prompt = inject_caller_context(&system_prompt, inbound);
         debug!(status = "history_loaded", "agent context");
 
         let effective_max_steps = self
@@ -174,11 +174,17 @@ impl AgentRuntime {
             }
         };
 
+        let tool_suffix = format_tool_history_suffix(&outcome.tool_calls);
+        let stored_reply = if tool_suffix.is_empty() {
+            outcome.reply.clone()
+        } else {
+            format!("{}{tool_suffix}", outcome.reply)
+        };
         memory
             .append_message(
                 memory_session_id,
                 StoredRole::Assistant,
-                &outcome.reply,
+                &stored_reply,
                 None,
             )
             .await?;
@@ -202,13 +208,12 @@ impl AgentRuntime {
                 self.config.agent_id
             ))
         })?;
-        let display_identity = format!("{} (id:{})", inbound.username, inbound.user_id);
         memory
             .append_message(
                 memory_session_id,
                 StoredRole::User,
                 &inbound.content,
-                Some(&display_identity),
+                Some(&inbound.username),
             )
             .await
     }
@@ -299,18 +304,10 @@ fn format_preinjected_memory(hits: &[MemoryPreinjectHit], max_chars: usize) -> S
     let base = "# POTENTIALLY RELEVANT LONG-TERM MEMORY\nUse this as optional background context. It may be stale or incomplete; prioritize the current user message and conversation.";
     let mut section = base.to_owned();
     for (index, hit) in hits.iter().enumerate() {
-        let score_details = match hit.importance {
-            Some(importance) => format!(
-                "score={:.2} raw={:.2} imp={importance}",
-                hit.final_score, hit.raw_similarity
-            ),
-            None => format!("score={:.2} raw={:.2}", hit.final_score, hit.raw_similarity),
-        };
         let line = format!(
-            "\n{}. [{} {}] {}",
+            "\n{}. [{}] {}",
             index + 1,
             memory_hit_label(hit),
-            score_details,
             hit.content.trim()
         );
         if section.len() + line.len() > max_chars {
@@ -334,10 +331,34 @@ fn memory_hit_label(hit: &MemoryPreinjectHit) -> String {
     }
 }
 
-fn inject_caller_context(base: &str, user_id: &str, username: &str) -> String {
+fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
+    let environment = if inbound.is_dm {
+        "Direct message".to_owned()
+    } else {
+        match &inbound.guild_id {
+            Some(gid) => format!("Guild channel (guild: {}, channel: {})", gid, inbound.channel_id),
+            None => format!("Group channel (channel: {})", inbound.channel_id),
+        }
+    };
     format!(
-        "{base}\n\n# CURRENT SPEAKER\nThe person speaking to you right now is **{username}** (id: {user_id}). Follow instructions from the current speaker for this turn."
+        "{base}\n\n# CURRENT CONTEXT\nEnvironment: {environment}\nSpeaker: **{}** (id: {})",
+        inbound.username, inbound.user_id
     )
+}
+
+fn format_tool_history_suffix(tool_calls: &[ToolExecutionResult]) -> String {
+    if tool_calls.is_empty() {
+        return String::new();
+    }
+    let entries: Vec<String> = tool_calls
+        .iter()
+        .map(|call| {
+            let args = sanitize_preview(&call.args_json, 40);
+            let output = sanitize_preview(&call.output, 60);
+            format!("{}({}) -> \"{}\"", call.name, args, output)
+        })
+        .collect();
+    format!("\n\n---\n[Tools used: {}]", entries.join(", "))
 }
 
 pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<String, FrameworkError> {
@@ -346,9 +367,29 @@ pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
+    use crate::channels::InboundMessage;
+    use crate::config::GatewayChannelKind;
+    use crate::dispatch::ToolExecutionResult;
     use crate::memory::{MemoryHitStore, MemoryPreinjectHit};
 
-    use super::{format_preinjected_memory, inject_caller_context};
+    use super::{format_preinjected_memory, format_tool_history_suffix, inject_caller_context};
+
+    fn test_inbound(is_dm: bool, guild_id: Option<&str>) -> InboundMessage {
+        InboundMessage {
+            trace_id: "test-trace".to_owned(),
+            source_channel: GatewayChannelKind::Discord,
+            target_agent_id: "agent-1".to_owned(),
+            session_key: "sess-1".to_owned(),
+            channel_id: "chan-456".to_owned(),
+            guild_id: guild_id.map(|s| s.to_owned()),
+            is_dm,
+            user_id: "user-123".to_owned(),
+            username: "kaleb".to_owned(),
+            mentioned_bot: false,
+            invoke: false,
+            content: "hello".to_owned(),
+        }
+    }
 
     #[test]
     fn format_preinjected_memory_caps_output_by_char_limit() {
@@ -371,18 +412,46 @@ mod tests {
             },
         ];
 
-        let section = format_preinjected_memory(&hits, 260);
+        let section = format_preinjected_memory(&hits, 280);
         assert!(section.starts_with("# POTENTIALLY RELEVANT LONG-TERM MEMORY"));
         assert!(section.contains("optional background context"));
-        assert!(section.contains("1. [long-term/prefs score=0.88 raw=0.91 imp=5]"));
-        assert!(!section.contains("2."));
+        assert!(section.contains("1. [long-term/prefs]"));
+        assert!(!section.contains("score="));
+        assert!(section.contains("2."), "both items should fit without score metadata");
     }
 
     #[test]
-    fn inject_caller_context_adds_speaker_identity() {
-        let output = inject_caller_context("base prompt", "user-123", "kaleb");
-        assert!(output.contains("# CURRENT SPEAKER"));
-        assert!(output.contains("id: user-123"));
-        assert!(output.contains("Follow instructions from the current speaker"));
+    fn inject_caller_context_adds_environment_and_speaker() {
+        let dm = test_inbound(true, None);
+        let output = inject_caller_context("base prompt", &dm);
+        assert!(output.contains("# CURRENT CONTEXT"));
+        assert!(output.contains("Environment: Direct message"));
+        assert!(output.contains("Speaker: **kaleb** (id: user-123)"));
+
+        let guild = test_inbound(false, Some("guild-789"));
+        let output = inject_caller_context("base prompt", &guild);
+        assert!(output.contains("Environment: Guild channel (guild: guild-789, channel: chan-456)"));
+    }
+
+    #[test]
+    fn format_tool_history_suffix_empty_when_no_calls() {
+        assert!(format_tool_history_suffix(&[]).is_empty());
+    }
+
+    #[test]
+    fn format_tool_history_suffix_includes_tool_summary() {
+        let calls = vec![ToolExecutionResult {
+            name: "clock".to_owned(),
+            args_json: "{}".to_owned(),
+            output: "2026-03-08T12:00Z".to_owned(),
+            success: true,
+            elapsed_ms: 10,
+            tool_call_id: None,
+            nested_tool_calls: vec![],
+        }];
+        let suffix = format_tool_history_suffix(&calls);
+        assert!(suffix.contains("[Tools used:"));
+        assert!(suffix.contains("clock("));
+        assert!(suffix.contains("2026-03-08T12:00Z"));
     }
 }

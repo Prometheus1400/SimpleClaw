@@ -6,7 +6,9 @@ use crate::agent::AgentDirectory;
 use crate::error::FrameworkError;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunParams};
-use crate::tools::{AgentInvokeRequest, AgentInvoker, ProcessManager, WorkerInvokeRequest};
+use crate::tools::{
+    AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, WorkerInvokeRequest,
+};
 
 /// Implements agent-to-agent invocation by looking up configs in the
 /// [`AgentDirectory`] and recursing through the [`ReactLoop`].
@@ -35,7 +37,10 @@ impl DirectAgentInvoker {
 
 #[async_trait]
 impl AgentInvoker for DirectAgentInvoker {
-    async fn invoke_agent(&self, request: AgentInvokeRequest) -> Result<String, FrameworkError> {
+    async fn invoke_agent(
+        &self,
+        request: AgentInvokeRequest,
+    ) -> Result<InvokeOutcome, FrameworkError> {
         let target_config = self
             .agents
             .config(&request.target_agent_id)
@@ -71,10 +76,16 @@ impl AgentInvoker for DirectAgentInvoker {
         self.react_loop
             .run(params, vec![Message::text(Role::User, request.prompt)])
             .await
-            .map(|outcome| outcome.reply)
+            .map(|outcome| InvokeOutcome {
+                reply: outcome.reply,
+                tool_calls: outcome.tool_calls,
+            })
     }
 
-    async fn invoke_worker(&self, request: WorkerInvokeRequest) -> Result<String, FrameworkError> {
+    async fn invoke_worker(
+        &self,
+        request: WorkerInvokeRequest,
+    ) -> Result<InvokeOutcome, FrameworkError> {
         let current_config = self
             .agents
             .config(&request.current_agent_id)
@@ -113,6 +124,9 @@ impl AgentInvoker for DirectAgentInvoker {
         self.react_loop
             .run(params, vec![Message::text(Role::User, request.prompt)])
             .await
-            .map(|outcome| outcome.reply)
+            .map(|outcome| InvokeOutcome {
+                reply: outcome.reply,
+                tool_calls: outcome.tool_calls,
+            })
     }
 }

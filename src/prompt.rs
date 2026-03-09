@@ -82,7 +82,7 @@ fn prompt_layers() -> [(&'static str, &'static str); 5] {
 fn append_layer(
     sections: &mut Vec<String>,
     path: &Path,
-    title: &str,
+    _title: &str,
     exists: bool,
     bytes: u64,
 ) -> Result<(), FrameworkError> {
@@ -94,7 +94,7 @@ fn append_layer(
         return Ok(());
     }
 
-    sections.push(format!("# {title}\n{}", content.trim_end()));
+    sections.push(content.trim_end().to_owned());
     Ok(())
 }
 
@@ -107,12 +107,23 @@ mod tests {
     fn skips_missing_prompt_layers() {
         let workspace = unique_temp_workspace("prompt_missing_layers");
         fs::create_dir_all(&workspace).expect("temp workspace");
-        fs::write(workspace.join("AGENT.md"), "agent content\n").expect("write AGENT");
-        fs::write(workspace.join("SOUL.md"), "soul content\n").expect("write SOUL");
+        fs::write(
+            workspace.join("AGENT.md"),
+            "# Agent Instructions\nagent content\n",
+        )
+        .expect("write AGENT");
+        fs::write(workspace.join("SOUL.md"), "# Soul\nsoul content\n").expect("write SOUL");
 
         let prompt = PromptAssembler::from_workspace(&workspace).expect("assemble prompt");
 
-        assert_eq!(prompt, "# AGENT\nagent content\n\n# SOUL\nsoul content");
+        assert_eq!(
+            prompt,
+            "# Agent Instructions\nagent content\n\n# Soul\nsoul content"
+        );
+        assert!(
+            !prompt.contains("# AGENT\n# Agent"),
+            "must not produce double headers"
+        );
         assert!(!prompt.contains("# IDENTITY"));
         assert!(!prompt.contains("# USER"));
         assert!(!prompt.contains("# MEMORY"));

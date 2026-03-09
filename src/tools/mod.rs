@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::channels::InboundMessage;
 use crate::config::{AgentSandboxConfig, GatewayChannelKind};
+use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
 use crate::memory::DynMemory;
 use crate::providers::ToolDefinition;
@@ -42,8 +43,35 @@ pub struct WorkerInvokeRequest {
 
 #[async_trait]
 pub trait AgentInvoker: Send + Sync {
-    async fn invoke_agent(&self, request: AgentInvokeRequest) -> Result<String, FrameworkError>;
-    async fn invoke_worker(&self, request: WorkerInvokeRequest) -> Result<String, FrameworkError>;
+    async fn invoke_agent(
+        &self,
+        request: AgentInvokeRequest,
+    ) -> Result<InvokeOutcome, FrameworkError>;
+    async fn invoke_worker(
+        &self,
+        request: WorkerInvokeRequest,
+    ) -> Result<InvokeOutcome, FrameworkError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct InvokeOutcome {
+    pub reply: String,
+    pub tool_calls: Vec<ToolExecutionResult>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolRunOutput {
+    pub output: String,
+    pub nested_tool_calls: Vec<ToolExecutionResult>,
+}
+
+impl ToolRunOutput {
+    pub(crate) fn plain(output: String) -> Self {
+        Self {
+            output,
+            nested_tool_calls: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +124,17 @@ pub(crate) trait Tool: Send + Sync {
         args_json: &str,
         session_id: &str,
     ) -> Result<String, FrameworkError>;
+
+    async fn execute_with_trace(
+        &self,
+        ctx: &ToolExecEnv,
+        args_json: &str,
+        session_id: &str,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        self.execute(ctx, args_json, session_id)
+            .await
+            .map(ToolRunOutput::plain)
+    }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {

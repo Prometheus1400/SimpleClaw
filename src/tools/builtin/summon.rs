@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::FrameworkError;
-use crate::tools::{AgentInvokeRequest, Tool, ToolExecEnv};
+use crate::tools::{AgentInvokeRequest, Tool, ToolExecEnv, ToolRunOutput};
 
 use super::common::parse_summon_args;
 
@@ -30,6 +30,17 @@ impl Tool for SummonTool {
         args_json: &str,
         session_id: &str,
     ) -> Result<String, FrameworkError> {
+        self.execute_with_trace(ctx, args_json, session_id)
+            .await
+            .map(|result| result.output)
+    }
+
+    async fn execute_with_trace(
+        &self,
+        ctx: &ToolExecEnv,
+        args_json: &str,
+        session_id: &str,
+    ) -> Result<ToolRunOutput, FrameworkError> {
         let (target, summary) = parse_summon_args(args_json);
         let handoff = if summary.trim().is_empty() {
             format!(
@@ -38,13 +49,18 @@ impl Tool for SummonTool {
         } else {
             format!("You were summoned as agent `{target}` with handoff summary:\n{summary}")
         };
-        ctx.invoker
+        let outcome = ctx
+            .invoker
             .invoke_agent(AgentInvokeRequest {
                 target_agent_id: target,
                 session_id: session_id.to_owned(),
                 user_id: ctx.user_id.clone(),
                 prompt: handoff,
             })
-            .await
+            .await?;
+        Ok(ToolRunOutput {
+            output: outcome.reply,
+            nested_tool_calls: outcome.tool_calls,
+        })
     }
 }
