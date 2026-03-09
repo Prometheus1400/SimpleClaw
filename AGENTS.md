@@ -9,6 +9,10 @@
 - Do not add migrations or backward-compatibility handling by default.
 - Implement the current schema/behavior directly unless the user explicitly asks for migration/back-compat support.
 
+## Planning Expectations
+- When presenting a plan, include the reasoning behind the approach.
+- Plans must also include a preview of the proposed code changes so the intended edits are clear before implementation.
+
 ## Code Spiritual Guidelines
 1. Clean code with strong single-responsibility boundaries.
 2. Make invalid states irrepresentable.
