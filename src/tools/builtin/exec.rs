@@ -3,6 +3,7 @@ use serde_json::json;
 use std::path::Path;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+use tracing::debug;
 
 use crate::config::{ExecToolConfig, ToolSandboxConfig};
 use crate::error::FrameworkError;
@@ -69,16 +70,12 @@ impl Tool for ExecTool {
                     .spawn(args.command.trim(), Some(&ctx.workspace_root))
                     .await?
             };
-            if let (Some(tx), Some(route)) =
-                (ctx.completion_tx.as_ref(), ctx.completion_route.as_ref())
-            {
-                ctx.process_manager.spawn_completion_watcher(
-                    session_id.clone(),
-                    handle,
-                    tx.clone(),
-                    route.clone(),
-                );
-            }
+            ctx.process_manager.spawn_completion_watcher(
+                session_id.clone(),
+                handle,
+                ctx.completion_tx.clone(),
+                ctx.completion_route.clone(),
+            );
             return Ok(json!({"status":"backgrounded","sessionId": session_id}).to_string());
         }
 
@@ -105,21 +102,38 @@ async fn exec_with_sandbox_runtime(
     sandbox: &ToolSandboxConfig,
     timeout_seconds: u64,
 ) -> Result<serde_json::Value, FrameworkError> {
-    let wrapped = sandbox_runtime::wrap_command_for_exec(command, workspace_root, sandbox).await?;
+    debug!(
+        status = "started",
+        tool = "exec",
+        phase = "sandbox_exec",
+        "sandbox.exec"
+    );
+    let prepared =
+        sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
     let mut runner = Command::new("bash");
-    runner.arg("-lc").arg(wrapped);
+    runner.arg("-lc").arg(prepared.wrapped_command());
     runner.current_dir(crate::tools::sandbox::normalize_workspace_root(
         workspace_root,
     )?);
 
-    let output = timeout(Duration::from_secs(timeout_seconds), runner.output())
+    let output_result = timeout(Duration::from_secs(timeout_seconds), runner.output())
         .await
         .map_err(|_| {
             FrameworkError::Tool(format!(
                 "exec timed out after {timeout_seconds}s in sandbox runtime"
             ))
         })?
-        .map_err(|e| FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}")))?;
+        .map_err(|e| FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}")));
+
+    prepared.cleanup().await;
+    debug!(
+        status = "completed",
+        tool = "exec",
+        phase = "sandbox_exec",
+        "sandbox.exec"
+    );
+
+    let output = output_result?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
