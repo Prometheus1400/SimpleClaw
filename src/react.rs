@@ -5,7 +5,7 @@ use crate::providers::{Message, Provider, Role};
 use crate::tools::skill::SkillFactory;
 use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
 use crate::{channels::InboundMessage, memory::DynMemory};
-use crate::{config::AgentSandboxConfig, tools::ProcessManager};
+use crate::tools::ProcessManager;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -23,13 +23,12 @@ pub struct ReactLoop {
 
 pub struct RunParams<'a> {
     pub provider_key: &'a str,
-    pub agent_config: &'a crate::config::AgentConfig,
+    pub agent_config: &'a crate::config::AgentInnerConfig,
     pub system_prompt: &'a str,
     pub agent_id: &'a str,
     pub session_id: &'a str,
     pub max_steps: u32,
     pub memory: DynMemory,
-    pub sandbox: AgentSandboxConfig,
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
@@ -86,7 +85,6 @@ impl ReactLoop {
         let tool_env = ToolExecEnv {
             agent_id: params.agent_id.to_owned(),
             memory: params.memory.clone(),
-            sandbox: params.sandbox.clone(),
             workspace_root: params.workspace_root.clone(),
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),
@@ -97,7 +95,7 @@ impl ReactLoop {
         };
         let active_tools = self
             .tool_factory
-            .resolve_active(&params.agent_config.tools.enabled_tools, skills)?;
+            .resolve_active(&params.agent_config.tools, skills)?;
         run_loop(
             provider,
             dispatcher,
@@ -141,7 +139,7 @@ async fn run_loop(
         let turn_span = info_span!("provider.turn");
         debug!(parent: &turn_span, status = "started", "provider turn");
         let response = match provider
-            .generate(&effective_system_prompt, &history, &tool_specs)
+            .generate(&effective_system_prompt, history, &tool_specs)
             .instrument(turn_span.clone())
             .await
         {
@@ -219,23 +217,43 @@ pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use crate::config::ToolsConfig;
     use crate::tools::default_factory;
 
     use super::*;
+
+    fn tools_enabled(allowed: &[&str]) -> ToolsConfig {
+        const ALL: &[&str] = &[
+            "memory",
+            "memorize",
+            "forget",
+            "summon",
+            "task",
+            "web_search",
+            "clock",
+            "web_fetch",
+            "read",
+            "edit",
+            "exec",
+            "process",
+            "skills",
+        ];
+        let allowed: HashSet<&str> = allowed.iter().copied().collect();
+        let disable: Vec<&str> = ALL
+            .iter()
+            .copied()
+            .filter(|name| !allowed.contains(name))
+            .collect();
+        ToolsConfig::default().with_disabled(&disable)
+    }
 
     #[test]
     fn tool_definitions_only_include_enabled_tools() {
         let factory = default_factory();
         let active_tools = factory
-            .resolve_active(
-                &[
-                    "memory".to_owned(),
-                    "summon".to_owned(),
-                    "clock".to_owned(),
-                    "read".to_owned(),
-                ],
-                &[],
-            )
+            .resolve_active(&tools_enabled(&["memory", "summon", "clock", "read"]), &[])
             .expect("enabled tools should resolve");
 
         let names: Vec<String> = active_tools
@@ -259,7 +277,7 @@ mod tests {
     fn tool_status_reports_unknown_tool_name() {
         let factory = default_factory();
         let active_tools = factory
-            .resolve_active(&["memory".to_owned()], &[])
+            .resolve_active(&tools_enabled(&["memory"]), &[])
             .expect("enabled tools should resolve");
 
         assert!(active_tools.get("memory").is_some());

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::config::AgentConfig;
-use crate::config::SkillsConfig;
+use crate::config::AgentInnerConfig;
+use crate::config::SkillsToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::{Tool, ToolExecEnv};
 
@@ -41,10 +41,15 @@ impl SkillFactory {
     pub(crate) fn load_for_agent(
         &self,
         agent_id: &str,
-        config: &AgentConfig,
+        config: &AgentInnerConfig,
         workspace: &Path,
     ) -> Result<Vec<Arc<dyn Tool>>, FrameworkError> {
-        let loaded = load_skill_tools(agent_id, &config.skills, workspace, &self.app_base_dir)?;
+        let loaded = load_skill_tools(
+            agent_id,
+            &config.tools.skills_config(),
+            workspace,
+            &self.app_base_dir,
+        )?;
         Ok(loaded
             .tools
             .into_iter()
@@ -120,7 +125,7 @@ impl Tool for DynamicSkillTool {
 
 pub fn load_skill_tools(
     agent_id: &str,
-    skills: &SkillsConfig,
+    skills: &SkillsToolConfig,
     agent_workspace: &Path,
     app_base_dir: &Path,
 ) -> Result<LoadedSkillTools, FrameworkError> {
@@ -210,14 +215,17 @@ fn resolve_skill_path(
     None
 }
 
-fn normalized_skill_ids(skills: &SkillsConfig) -> Result<Vec<String>, FrameworkError> {
+fn normalized_skill_ids(skills: &SkillsToolConfig) -> Result<Vec<String>, FrameworkError> {
+    if !skills.enabled {
+        return Ok(Vec::new());
+    }
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    for raw_id in &skills.enabled_skills {
+    for raw_id in &skills.ids {
         let skill_id = raw_id.trim();
         if skill_id.is_empty() {
             return Err(FrameworkError::Config(
-                "skills.enabled_skills entries must be non-empty".to_owned(),
+                "tools.skills.ids entries must be non-empty".to_owned(),
             ));
         }
         if !is_valid_skill_id(skill_id) {
@@ -254,8 +262,9 @@ mod tests {
         fs::write(&global_path, "GLOBAL\n").expect("write global skill");
         fs::write(&agent_path, "AGENT\n").expect("write agent skill");
 
-        let skills = SkillsConfig {
-            enabled_skills: vec!["research".to_owned()],
+        let skills = SkillsToolConfig {
+            enabled: true,
+            ids: vec!["research".to_owned()],
         };
         let loaded =
             load_skill_tools("planner", &skills, &workspace, &base_dir).expect("load skills");
@@ -291,8 +300,9 @@ mod tests {
         fs::write(&ok_path, "ok markdown\n").expect("write ok skill");
         fs::write(&empty_path, "   \n").expect("write empty skill");
 
-        let skills = SkillsConfig {
-            enabled_skills: vec![
+        let skills = SkillsToolConfig {
+            enabled: true,
+            ids: vec![
                 "missing".to_owned(),
                 "empty".to_owned(),
                 "ok".to_owned(),
@@ -324,8 +334,9 @@ mod tests {
     #[test]
     fn rejects_invalid_skill_id() {
         let base_dir = unique_temp_dir("skill_tool_invalid");
-        let skills = SkillsConfig {
-            enabled_skills: vec!["bad/skill".to_owned()],
+        let skills = SkillsToolConfig {
+            enabled: true,
+            ids: vec!["bad/skill".to_owned()],
         };
         let err =
             load_skill_tools("planner", &skills, &base_dir, &base_dir).expect_err("invalid id");

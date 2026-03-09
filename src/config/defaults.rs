@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use crate::paths::AppPaths;
 
-use super::agents::AgentEntryConfig;
-use super::execution::AgentConfig;
-use super::gateway::GatewayChannelKind;
+use super::agents::{AgentEntryConfig, AgentInnerConfig};
 
 pub(super) fn default_db_path() -> PathBuf {
     AppPaths::resolve()
@@ -70,10 +68,6 @@ pub(super) fn default_safe_error_reply() -> String {
     "I hit an internal error while processing that request.".to_owned()
 }
 
-pub(super) fn default_sandbox_enabled() -> bool {
-    true
-}
-
 pub(super) fn default_agent_id() -> String {
     "default".to_owned()
 }
@@ -83,32 +77,8 @@ pub(super) fn default_agents_list() -> Vec<AgentEntryConfig> {
         id: default_agent_id(),
         name: "Default".to_owned(),
         workspace: PathBuf::from("./workspace"),
-        runtime: AgentConfig::default(),
+        config: AgentInnerConfig::default(),
     }]
-}
-
-pub(super) fn default_gateway_channels() -> Vec<GatewayChannelKind> {
-    vec![GatewayChannelKind::Discord]
-}
-
-pub(super) fn default_enabled_tools() -> Vec<String> {
-    [
-        "memory",
-        "memorize",
-        "forget",
-        "summon",
-        "task",
-        "web_search",
-        "clock",
-        "web_fetch",
-        "read",
-        "edit",
-        "exec",
-        "process",
-    ]
-    .iter()
-    .map(|name| (*name).to_owned())
-    .collect()
 }
 
 pub(super) fn default_embedding_model() -> String {

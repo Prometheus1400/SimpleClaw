@@ -20,25 +20,31 @@ use crate::secrets::SecretResolver;
 
 // ── Re-exports (preserves all consumer imports) ─────────────────────────────
 
-pub use agents::{AgentEntryConfig, AgentsConfig};
+pub use agents::{AgentEntryConfig, AgentInnerConfig, AgentsConfig};
 pub use database::{DatabaseConfig, EmbeddingConfig};
-pub use execution::{
-    AgentConfig, ExecutionConfig, LogLevel, MemoryPreinjectConfig, ToolCallTransparency,
-};
 #[allow(unused_imports)]
 pub use execution::ExecutionDefaultsConfig;
-pub use gateway::{DiscordConfig, GatewayChannelKind, GatewayConfig};
+#[allow(unused_imports)]
+pub use execution::{AgentExecutionOverrides, MemoryPreinjectOverrides};
+pub use execution::{ExecutionConfig, LogLevel, MemoryPreinjectConfig, ToolCallTransparency};
+pub use gateway::{ChannelConfig, GatewayChannelKind, GatewayConfig};
 pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, ProvidersConfig};
-pub use routing::InboundConfig;
-pub use tools::{AgentSandboxConfig, SandboxNetworkMode, SkillsConfig};
+#[allow(unused_imports)]
+pub use routing::RoutingConfig;
+#[allow(unused_imports)]
+pub use tools::{
+    ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemoryToolConfig,
+    MemorizeToolConfig, ProcessToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
+    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchToolConfig,
+};
 
 // Re-exports used only by test code in other modules.
 #[allow(unused_imports)]
 pub use execution::SummonMode;
 #[allow(unused_imports)]
-pub use routing::{ChannelInboundConfig, InboundPolicy, InboundPolicyConfig, WorkspaceInboundConfig};
-#[allow(unused_imports)]
-pub use tools::{AgentSandboxFilesystemConfig, AgentSandboxNetworkConfig, ToolConfig};
+pub use routing::{
+    ChannelRoutingConfig, InboundPolicy, InboundPolicyConfig, WorkspaceRoutingConfig,
+};
 
 // ── Root config types ───────────────────────────────────────────────────────
 
@@ -53,11 +59,7 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
-    pub inbound: InboundConfig,
-    #[serde(default)]
     pub agents: AgentsConfig,
-    #[serde(default)]
-    pub discord: DiscordConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 }
@@ -100,9 +102,9 @@ impl LoadedConfig {
         }
         validate::validate_providers_config(&global.providers)?;
         validate::validate_agents_config(&global.agents)?;
-        validate::reconcile_inbound_default_agent(&mut global.inbound, &global.agents);
+        validate::reconcile_routing_default_agent(&mut global.gateway.routing, &global.agents);
         validate::validate_gateway_config(&global.gateway)?;
-        validate::validate_inbound_config(&global.inbound)?;
+        validate::validate_routing_config(&global.gateway.routing)?;
 
         Ok(Self { global })
     }
@@ -112,24 +114,29 @@ impl GlobalConfig {
     fn resolve_secrets(&mut self, paths: &AppPaths) -> Result<(), FrameworkError> {
         let resolver = SecretResolver::new(paths)?;
         self.providers.resolve_secrets(&resolver)?;
-        self.discord.resolve_secrets(&resolver)?;
+        for (kind, channel) in &mut self.gateway.channels {
+            resolve_channel_secrets(kind, channel, &resolver)?;
+        }
         Ok(())
     }
 }
 
-impl DiscordConfig {
-    fn resolve_secrets(&mut self, resolver: &SecretResolver) -> Result<(), FrameworkError> {
-        use crate::secrets::parse_secret_reference;
-        let Some(raw) = self.token.as_deref() else {
-            return Ok(());
-        };
-        let secret_name = parse_secret_reference("discord.token", raw)?;
-        let value = resolver.resolve(&secret_name).map_err(|err| {
-            FrameworkError::Config(format!("discord.token failed to resolve: {err}"))
-        })?;
-        self.token = Some(value);
-        Ok(())
-    }
+fn resolve_channel_secrets(
+    kind: &GatewayChannelKind,
+    channel: &mut gateway::ChannelConfig,
+    resolver: &SecretResolver,
+) -> Result<(), FrameworkError> {
+    use crate::secrets::parse_secret_reference;
+    let Some(raw) = channel.token.as_deref() else {
+        return Ok(());
+    };
+    let field_path = format!("gateway.channels.{}.token", kind.as_str());
+    let secret_name = parse_secret_reference(&field_path, raw)?;
+    let value = resolver
+        .resolve(&secret_name)
+        .map_err(|err| FrameworkError::Config(format!("{field_path} failed to resolve: {err}")))?;
+    channel.token = Some(value);
+    Ok(())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -145,7 +152,7 @@ mod tests {
     use crate::paths::AppPaths;
 
     use normalize::{home_dir, normalize_workspace_path};
-    use validate::{reconcile_inbound_default_agent, validate_agents_config};
+    use validate::{reconcile_routing_default_agent, validate_agents_config};
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -175,19 +182,19 @@ mod tests {
 
     #[test]
     fn channel_policy_overrides_server_and_global() {
-        let mut inbound = InboundConfig {
+        let mut inbound = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: Some(vec!["1".to_owned()]),
                 require_mentions: Some(true),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
 
         inbound.channels.insert(
             GatewayChannelKind::Discord,
-            ChannelInboundConfig {
-                policy: InboundPolicyConfig {
+            ChannelRoutingConfig {
+                defaults: InboundPolicyConfig {
                     agent: Some("channel-kind".to_owned()),
                     allow_from: None,
                     require_mentions: None,
@@ -195,8 +202,8 @@ mod tests {
                 dm: InboundPolicyConfig::default(),
                 workspaces: HashMap::from([(
                     "100".to_owned(),
-                    WorkspaceInboundConfig {
-                        policy: InboundPolicyConfig {
+                    WorkspaceRoutingConfig {
+                        defaults: InboundPolicyConfig {
                             agent: Some("workspace".to_owned()),
                             allow_from: Some(vec!["2".to_owned()]),
                             require_mentions: None,
@@ -222,12 +229,12 @@ mod tests {
 
     #[test]
     fn workspace_policy_applies_when_channel_missing() {
-        let mut inbound = InboundConfig::default();
+        let mut inbound = RoutingConfig::default();
         inbound.defaults.agent = Some("default".to_owned());
         inbound.channels.insert(
             GatewayChannelKind::Discord,
-            ChannelInboundConfig {
-                policy: InboundPolicyConfig {
+            ChannelRoutingConfig {
+                defaults: InboundPolicyConfig {
                     agent: Some("channel-kind".to_owned()),
                     allow_from: None,
                     require_mentions: None,
@@ -235,8 +242,8 @@ mod tests {
                 dm: InboundPolicyConfig::default(),
                 workspaces: HashMap::from([(
                     "100".to_owned(),
-                    WorkspaceInboundConfig {
-                        policy: InboundPolicyConfig {
+                    WorkspaceRoutingConfig {
+                        defaults: InboundPolicyConfig {
                             agent: Some("workspace".to_owned()),
                             allow_from: Some(vec!["42".to_owned()]),
                             require_mentions: Some(true),
@@ -255,13 +262,13 @@ mod tests {
 
     #[test]
     fn global_defaults_apply_when_no_workspace_or_channel_match() {
-        let inbound = InboundConfig {
+        let inbound = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: Some(vec!["9".to_owned()]),
                 require_mentions: Some(true),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
 
         let policy = inbound.resolve(GatewayChannelKind::Discord, Some("999"), "888", false);
@@ -271,18 +278,18 @@ mod tests {
 
     #[test]
     fn dm_scope_overrides_defaults_and_forces_mentions_off() {
-        let mut inbound = InboundConfig {
+        let mut inbound = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
         inbound.channels.insert(
             GatewayChannelKind::Discord,
-            ChannelInboundConfig {
-                policy: InboundPolicyConfig::default(),
+            ChannelRoutingConfig {
+                defaults: InboundPolicyConfig::default(),
                 dm: InboundPolicyConfig {
                     agent: Some("dm".to_owned()),
                     allow_from: Some(vec!["11".to_owned()]),
@@ -300,26 +307,26 @@ mod tests {
 
     #[test]
     fn no_allow_from_defaults_to_allow_all() {
-        let inbound = InboundConfig::default();
+        let inbound = RoutingConfig::default();
         let policy = inbound.resolve(GatewayChannelKind::Discord, Some("100"), "200", false);
         assert!(policy.allows_user("123456789"));
     }
 
     #[test]
     fn dm_override_applies_after_channel_defaults() {
-        let mut inbound = InboundConfig {
+        let mut inbound = RoutingConfig {
             defaults: InboundPolicyConfig {
                 agent: Some("default".to_owned()),
                 allow_from: None,
                 require_mentions: Some(true),
             },
-            ..InboundConfig::default()
+            ..RoutingConfig::default()
         };
 
         inbound.channels.insert(
             GatewayChannelKind::Discord,
-            ChannelInboundConfig {
-                policy: InboundPolicyConfig {
+            ChannelRoutingConfig {
+                defaults: InboundPolicyConfig {
                     agent: Some("server".to_owned()),
                     allow_from: Some(vec!["2".to_owned()]),
                     require_mentions: None,
@@ -482,7 +489,7 @@ api_key_env: GEMINI_API_KEY
 token: "${secret:discord_token}"
 token_env: DISCORD_TOKEN
 "#;
-        let parsed = serde_yaml::from_str::<DiscordConfig>(yaml);
+        let parsed = serde_yaml::from_str::<ChannelConfig>(yaml);
         assert!(parsed.is_err());
     }
 
@@ -490,17 +497,18 @@ token_env: DISCORD_TOKEN
     fn rejects_unknown_gateway_channel_kind() {
         let yaml = r#"
 channels:
-  - not_a_channel
+  not_a_channel:
+    enabled: true
 "#;
         let parsed = serde_yaml::from_str::<GatewayConfig>(yaml);
         assert!(parsed.is_err());
     }
 
     #[test]
-    fn tool_config_defaults_to_all_builtin_tools() {
-        let parsed: ToolConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
+    fn tools_config_defaults_enable_all_builtin_tools() {
+        let parsed: ToolsConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
         assert_eq!(
-            parsed.enabled_tools,
+            parsed.enabled_tool_names(),
             vec![
                 "memory".to_owned(),
                 "memorize".to_owned(),
@@ -513,73 +521,66 @@ channels:
                 "read".to_owned(),
                 "edit".to_owned(),
                 "exec".to_owned(),
-                "process".to_owned()
+                "process".to_owned(),
             ]
         );
     }
 
     #[test]
-    fn tool_config_rejects_legacy_boolean_fields() {
-        let parsed = serde_yaml::from_str::<ToolConfig>("memory: false\n");
+    fn tools_config_rejects_legacy_enabled_tools_allowlist() {
+        let parsed = serde_yaml::from_str::<ToolsConfig>("enabled_tools:\n  - memory\n");
         assert!(parsed.is_err());
     }
 
     #[test]
-    fn agent_config_supports_enabled_tools_allowlist() {
-        let parsed: AgentConfig = serde_yaml::from_str(
+    fn agent_config_supports_typed_tool_map() {
+        let parsed: AgentInnerConfig = serde_yaml::from_str(
             r#"
 tools:
-  enabled_tools:
-    - memory
-    - summon
+  read:
+    enabled: false
+  exec:
+    enabled: true
+    allow_background: false
+    sandbox:
+      enabled: true
+      network_enabled: true
+  skills:
+    enabled: true
+    ids:
+      - code_review
+      - release_checklist
 "#,
         )
         .expect("valid yaml");
+        assert!(!parsed.tools.read.expect("read config").enabled);
+        let exec = parsed.tools.exec.expect("exec config");
+        assert!(exec.enabled);
+        assert!(!exec.allow_background);
+        assert_eq!(exec.sandbox.network_enabled, Some(true));
         assert_eq!(
-            parsed.tools.enabled_tools,
-            vec!["memory".to_owned(), "summon".to_owned()]
-        );
-    }
-
-    #[test]
-    fn agent_config_supports_enabled_skills_allowlist() {
-        let parsed: AgentConfig = serde_yaml::from_str(
-            r#"
-skills:
-  enabled_skills:
-    - code_review
-    - release_checklist
-"#,
-        )
-        .expect("valid yaml");
-        assert_eq!(
-            parsed.skills.enabled_skills,
+            parsed.tools.skills.expect("skills config").ids,
             vec!["code_review".to_owned(), "release_checklist".to_owned()]
         );
     }
 
     #[test]
-    fn agent_config_defaults_sandbox_policy() {
-        let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
-        assert!(parsed.sandbox.enabled);
-        assert!(parsed.sandbox.filesystem.extra_writable_paths.is_empty());
-        assert_eq!(parsed.sandbox.network.mode, SandboxNetworkMode::Disabled);
+    fn agent_config_defaults_tools_skills_config() {
+        let parsed: AgentInnerConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
+        assert_eq!(parsed.tools.skills_config().ids, Vec::<String>::new());
     }
 
     #[test]
-    fn agent_config_defaults_skills_config() {
-        let parsed: AgentConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
-        assert!(parsed.skills.enabled_skills.is_empty());
-    }
-
-    #[test]
-    fn agent_config_skills_rejects_directory_field() {
-        let parsed = serde_yaml::from_str::<AgentConfig>(
+    fn agent_config_rejects_legacy_skills_field() {
+        let parsed = serde_yaml::from_str::<AgentInnerConfig>(
             r#"
+tools:
+  skills:
+    ids:
+      - code_review
 skills:
   enabled_skills:
     - code_review
-  directory: skills
 "#,
         );
         assert!(parsed.is_err());
@@ -587,61 +588,20 @@ skills:
 
     #[test]
     fn agent_config_rejects_legacy_network_allow_all_field() {
-        let parsed = serde_yaml::from_str::<AgentConfig>("network_allow_all: false\n");
+        let parsed = serde_yaml::from_str::<AgentInnerConfig>("network_allow_all: false\n");
         assert!(parsed.is_err());
     }
 
     #[test]
     fn agent_config_rejects_legacy_read_allow_all_field() {
-        let parsed = serde_yaml::from_str::<AgentConfig>("read_allow_all: false\n");
+        let parsed = serde_yaml::from_str::<AgentInnerConfig>("read_allow_all: false\n");
         assert!(parsed.is_err());
     }
 
     #[test]
-    fn agent_config_sandbox_accepts_enabled_false() {
-        let parsed: AgentConfig = serde_yaml::from_str(
-            r#"
-sandbox:
-  enabled: false
-"#,
-        )
-        .expect("valid yaml");
-        assert!(!parsed.sandbox.enabled);
-    }
-
-    #[test]
-    fn agent_config_sandbox_accepts_enabled_true() {
-        let parsed: AgentConfig = serde_yaml::from_str(
-            r#"
-sandbox:
-  enabled: true
-"#,
-        )
-        .expect("valid yaml");
-        assert!(parsed.sandbox.enabled);
-    }
-
-    #[test]
-    fn agent_config_sandbox_rejects_legacy_scalar_field() {
-        let parsed = serde_yaml::from_str::<AgentConfig>(
-            r#"
-sandbox: off
-"#,
-        );
+    fn agent_config_rejects_legacy_sandbox_field() {
+        let parsed = serde_yaml::from_str::<AgentInnerConfig>("sandbox:\n  enabled: false\n");
         assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn agent_config_sandbox_supports_network_mode() {
-        let parsed: AgentConfig = serde_yaml::from_str(
-            r#"
-sandbox:
-  network:
-    mode: enabled
-"#,
-        )
-        .expect("valid yaml");
-        assert_eq!(parsed.sandbox.network.mode, SandboxNetworkMode::Enabled);
     }
 
     #[test]
@@ -649,7 +609,7 @@ sandbox:
         let yaml = r#"
 name: legacy
 "#;
-        let parsed = serde_yaml::from_str::<AgentConfig>(yaml);
+        let parsed = serde_yaml::from_str::<AgentInnerConfig>(yaml);
         assert!(parsed.is_err());
     }
 
@@ -659,7 +619,7 @@ name: legacy
 routing:
   channel: discord
 "#;
-        let parsed = serde_yaml::from_str::<AgentConfig>(yaml);
+        let parsed = serde_yaml::from_str::<AgentInnerConfig>(yaml);
         assert!(parsed.is_err());
     }
 
@@ -676,13 +636,14 @@ routing:
         fs::create_dir_all(&dir).expect("should create test dir");
         let paths = test_paths(dir.clone());
 
-        let mut global = GlobalConfig {
-            discord: DiscordConfig {
+        let mut global = GlobalConfig::default();
+        global.gateway.channels.insert(
+            GatewayChannelKind::Discord,
+            ChannelConfig {
                 token: Some(format!("${{secret:{discord_env}}}")),
-                ..DiscordConfig::default()
+                ..ChannelConfig::default()
             },
-            ..GlobalConfig::default()
-        };
+        );
         if let Some(ProviderEntryConfig::Gemini(provider)) =
             global.providers.entries.get_mut(&global.providers.default)
         {
@@ -697,7 +658,12 @@ routing:
             None => None,
         };
         assert_eq!(api_key, Some("provider-secret"));
-        assert_eq!(global.discord.token.as_deref(), Some("discord-secret"));
+        let channel = global
+            .gateway
+            .channels
+            .get(&GatewayChannelKind::Discord)
+            .expect("discord channel config should exist");
+        assert_eq!(channel.token.as_deref(), Some("discord-secret"));
 
         unsafe {
             std::env::remove_var(provider_env);
@@ -712,13 +678,14 @@ routing:
         fs::create_dir_all(&dir).expect("should create test dir");
         let paths = test_paths(dir.clone());
 
-        let mut global = GlobalConfig {
-            discord: DiscordConfig {
+        let mut global = GlobalConfig::default();
+        global.gateway.channels.insert(
+            GatewayChannelKind::Discord,
+            ChannelConfig {
                 token: Some("${secret:discord_token}".to_owned()),
-                ..DiscordConfig::default()
+                ..ChannelConfig::default()
             },
-            ..GlobalConfig::default()
-        };
+        );
         if let Some(ProviderEntryConfig::Gemini(provider)) =
             global.providers.entries.get_mut(&global.providers.default)
         {
@@ -763,8 +730,7 @@ routing:
         unsafe {
             std::env::set_var(key, "/tmp/simpleclaw-workspace-root");
         }
-        let normalized =
-            normalize_workspace_path(Path::new("${SIMPLECLAW_TEST_WORKSPACE_ROOT}/a"));
+        let normalized = normalize_workspace_path(Path::new("${SIMPLECLAW_TEST_WORKSPACE_ROOT}/a"));
         assert_eq!(
             normalized,
             PathBuf::from("/tmp/simpleclaw-workspace-root/a")
@@ -789,13 +755,13 @@ routing:
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
                     workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/default"),
-                    runtime: AgentConfig::default(),
+                    config: AgentInnerConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "researcher".to_owned(),
                     name: "Researcher".to_owned(),
                     workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/research"),
-                    runtime: AgentConfig::default(),
+                    config: AgentInnerConfig::default(),
                 },
             ],
         };
@@ -821,7 +787,7 @@ routing:
                 id: "researcher".to_owned(),
                 name: "Researcher".to_owned(),
                 workspace: PathBuf::from("/tmp/simpleclaw-summon-root/research"),
-                runtime: AgentConfig::default()
+                config: AgentInnerConfig::default()
             }
         );
 
@@ -839,13 +805,13 @@ routing:
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
                     workspace: PathBuf::from("./workspace"),
-                    runtime: AgentConfig::default(),
+                    config: AgentInnerConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "default".to_owned(),
                     name: "Duplicate".to_owned(),
                     workspace: PathBuf::from("./other"),
-                    runtime: AgentConfig::default(),
+                    config: AgentInnerConfig::default(),
                 },
             ],
         };
@@ -860,32 +826,32 @@ routing:
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
                 workspace: PathBuf::from("./workspace"),
-                runtime: AgentConfig::default(),
+                config: AgentInnerConfig::default(),
             }],
         };
         assert!(validate_agents_config(&agents).is_err());
     }
 
     #[test]
-    fn reconcile_inbound_default_agent_uses_agents_default_when_legacy_default_missing() {
-        let mut inbound = InboundConfig::default();
+    fn reconcile_routing_default_agent_uses_agents_default_when_legacy_default_missing() {
+        let mut inbound = RoutingConfig::default();
         let agents = AgentsConfig {
             default: "researcher".to_owned(),
             list: vec![AgentEntryConfig {
                 id: "researcher".to_owned(),
                 name: "Researcher".to_owned(),
                 workspace: PathBuf::from("./workspace"),
-                runtime: AgentConfig::default(),
+                config: AgentInnerConfig::default(),
             }],
         };
 
-        reconcile_inbound_default_agent(&mut inbound, &agents);
+        reconcile_routing_default_agent(&mut inbound, &agents);
         assert_eq!(inbound.defaults.agent, Some("researcher".to_owned()));
     }
 
     #[test]
-    fn reconcile_inbound_default_agent_does_not_override_when_legacy_default_exists() {
-        let mut inbound = InboundConfig::default();
+    fn reconcile_routing_default_agent_does_not_override_when_legacy_default_exists() {
+        let mut inbound = RoutingConfig::default();
         let agents = AgentsConfig {
             default: "researcher".to_owned(),
             list: vec![
@@ -893,18 +859,18 @@ routing:
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
                     workspace: PathBuf::from("./workspace"),
-                    runtime: AgentConfig::default(),
+                    config: AgentInnerConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "researcher".to_owned(),
                     name: "Researcher".to_owned(),
                     workspace: PathBuf::from("./workspace-researcher"),
-                    runtime: AgentConfig::default(),
+                    config: AgentInnerConfig::default(),
                 },
             ],
         };
 
-        reconcile_inbound_default_agent(&mut inbound, &agents);
+        reconcile_routing_default_agent(&mut inbound, &agents);
         assert_eq!(inbound.defaults.agent, Some("default".to_owned()));
     }
 

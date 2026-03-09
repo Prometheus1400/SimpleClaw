@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentConfig, ExecutionConfig, ToolCallTransparency};
+use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, ToolCallTransparency};
 use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
@@ -22,8 +22,9 @@ use crate::tools::{CompletionRoute, ProcessManager};
 pub struct AgentRuntimeConfig {
     pub agent_id: String,
     pub provider_key: String,
-    pub execution_config: ExecutionConfig,
-    pub agent_config: AgentConfig,
+    pub effective_execution: ExecutionDefaultsConfig,
+    pub owner_ids: Vec<String>,
+    pub agent_config: AgentInnerConfig,
     pub workspace_root: PathBuf,
     #[allow(dead_code)]
     pub app_base_dir: PathBuf,
@@ -129,7 +130,7 @@ impl AgentRuntime {
         let system_prompt = inject_caller_context(&system_prompt, inbound);
         debug!(status = "history_loaded", "agent context");
 
-        let effective_max_steps = self.config.execution_config.defaults.max_steps;
+        let effective_max_steps = self.config.effective_execution.max_steps;
 
         let params = RunParams {
             provider_key: &self.config.provider_key,
@@ -139,10 +140,9 @@ impl AgentRuntime {
             session_id: memory_session_id,
             max_steps: effective_max_steps,
             memory: memory.clone(),
-            sandbox: self.config.agent_config.sandbox.clone(),
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
-            owner_ids: self.config.execution_config.owner_ids.clone(),
+            owner_ids: self.config.owner_ids.clone(),
             process_manager: Arc::clone(&context.process_manager),
             completion_tx: Some(context.completion_tx.clone()),
             completion_route: Some(CompletionRoute {
@@ -219,7 +219,7 @@ impl AgentRuntime {
         memory: &DynMemory,
         session_id: &str,
     ) -> Result<Vec<Message>, FrameworkError> {
-        let history_limit = self.config.execution_config.defaults.history_messages as usize;
+        let history_limit = self.config.effective_execution.history_messages as usize;
         let stored = memory.recent_messages(session_id, history_limit).await?;
         let mut history = Vec::with_capacity(stored.len());
         for item in stored {
@@ -250,7 +250,11 @@ impl AgentRuntime {
         session_id: &str,
         query: &str,
     ) -> String {
-        let config = self.config.execution_config.defaults.memory_preinject.normalized();
+        let config = self
+            .config
+            .effective_execution
+            .memory_preinject
+            .normalized();
         if !config.enabled {
             return self.config.system_prompt.clone();
         }
@@ -332,7 +336,10 @@ fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
         "Direct message".to_owned()
     } else {
         match &inbound.guild_id {
-            Some(gid) => format!("Guild channel (guild: {}, channel: {})", gid, inbound.channel_id),
+            Some(gid) => format!(
+                "Guild channel (guild: {}, channel: {})",
+                gid, inbound.channel_id
+            ),
             None => format!("Group channel (channel: {})", inbound.channel_id),
         }
     };
@@ -413,7 +420,10 @@ mod tests {
         assert!(section.contains("optional background context"));
         assert!(section.contains("1. [long-term/prefs]"));
         assert!(!section.contains("score="));
-        assert!(section.contains("2."), "both items should fit without score metadata");
+        assert!(
+            section.contains("2."),
+            "both items should fit without score metadata"
+        );
     }
 
     #[test]
@@ -426,7 +436,9 @@ mod tests {
 
         let guild = test_inbound(false, Some("guild-789"));
         let output = inject_caller_context("base prompt", &guild);
-        assert!(output.contains("Environment: Guild channel (guild: guild-789, channel: chan-456)"));
+        assert!(
+            output.contains("Environment: Guild channel (guild: guild-789, channel: chan-456)")
+        );
     }
 
     #[test]

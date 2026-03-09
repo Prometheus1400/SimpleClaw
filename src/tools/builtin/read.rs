@@ -4,15 +4,16 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::config::ReadToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::{normalize_workspace_root, run_wasm_guest, workspace_guest_mount_path};
 use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_simple_text_arg;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadTool {
-    LocalFile,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadTool {
+    config: ReadToolConfig,
 }
 
 #[async_trait]
@@ -29,8 +30,10 @@ impl Tool for ReadTool {
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
     }
 
-    fn sandbox_aware(&self) -> bool {
-        true
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config)
+            .map_err(|e| FrameworkError::Config(format!("tools.read config is invalid: {e}")))?;
+        Ok(())
     }
 
     async fn execute(
@@ -40,15 +43,16 @@ impl Tool for ReadTool {
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
         let raw_path = parse_simple_text_arg(args_json);
-        let path = resolve_path_for_read(&raw_path, &ctx.workspace_root, ctx.sandbox.enabled)?;
-        if ctx.sandbox.enabled {
+        let sandbox_enabled = self.config.sandbox.enabled;
+        let path = resolve_path_for_read(&raw_path, &ctx.workspace_root, sandbox_enabled)?;
+        if sandbox_enabled {
             let guest_path = host_path_to_workspace_guest_path(&path, &ctx.workspace_root)?;
             let output = run_wasm_guest(
                 &ctx.workspace_root,
                 "read_tool.wasm",
                 &[guest_path],
                 &[],
-                Duration::from_secs(10),
+                Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
             )
             .await?;
             if output.exit_code != 0 {

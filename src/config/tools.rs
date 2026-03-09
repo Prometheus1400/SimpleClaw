@@ -1,77 +1,364 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::defaults::{default_enabled_tools, default_sandbox_enabled};
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    pub read: Option<ReadToolConfig>,
+    pub edit: Option<EditToolConfig>,
+    pub exec: Option<ExecToolConfig>,
+    pub process: Option<ProcessToolConfig>,
+    pub web_search: Option<WebSearchToolConfig>,
+    pub web_fetch: Option<WebFetchToolConfig>,
+    pub memory: Option<MemoryToolConfig>,
+    pub memorize: Option<MemorizeToolConfig>,
+    pub forget: Option<ForgetToolConfig>,
+    pub summon: Option<SummonToolConfig>,
+    pub task: Option<TaskToolConfig>,
+    pub clock: Option<ClockToolConfig>,
+    pub skills: Option<SkillsToolConfig>,
+}
+
+impl ToolsConfig {
+    pub fn enabled_tool_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if self.memory.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("memory".to_owned());
+        }
+        if self.memorize.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("memorize".to_owned());
+        }
+        if self.forget.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("forget".to_owned());
+        }
+        if self.summon.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("summon".to_owned());
+        }
+        if self.task.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("task".to_owned());
+        }
+        if self.web_search.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("web_search".to_owned());
+        }
+        if self.clock.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("clock".to_owned());
+        }
+        if self.web_fetch.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("web_fetch".to_owned());
+        }
+        if self.read.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("read".to_owned());
+        }
+        if self.edit.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("edit".to_owned());
+        }
+        if self.exec.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("exec".to_owned());
+        }
+        if self.process.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("process".to_owned());
+        }
+        names
+    }
+
+    pub fn config_for_tool(&self, name: &str) -> Option<Value> {
+        let value = match name {
+            "read" => serde_json::to_value(self.read.clone().unwrap_or_default()).ok()?,
+            "edit" => serde_json::to_value(self.edit.clone().unwrap_or_default()).ok()?,
+            "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok()?,
+            "process" => serde_json::to_value(self.process.clone().unwrap_or_default()).ok()?,
+            "web_search" => {
+                serde_json::to_value(self.web_search.clone().unwrap_or_default()).ok()?
+            }
+            "web_fetch" => serde_json::to_value(self.web_fetch.clone().unwrap_or_default()).ok()?,
+            "memory" => serde_json::to_value(self.memory.clone().unwrap_or_default()).ok()?,
+            "memorize" => serde_json::to_value(self.memorize.clone().unwrap_or_default()).ok()?,
+            "forget" => serde_json::to_value(self.forget.clone().unwrap_or_default()).ok()?,
+            "summon" => serde_json::to_value(self.summon.clone().unwrap_or_default()).ok()?,
+            "task" => serde_json::to_value(self.task.clone().unwrap_or_default()).ok()?,
+            "clock" => serde_json::to_value(self.clock.clone().unwrap_or_default()).ok()?,
+            "skills" => serde_json::to_value(self.skills.clone().unwrap_or_default()).ok()?,
+            _ => return None,
+        };
+        Some(value)
+    }
+
+    pub fn with_disabled(&self, names: &[&str]) -> Self {
+        let mut next = self.clone();
+        for name in names {
+            match *name {
+                "read" => next.read.get_or_insert_with(Default::default).enabled = false,
+                "edit" => next.edit.get_or_insert_with(Default::default).enabled = false,
+                "exec" => next.exec.get_or_insert_with(Default::default).enabled = false,
+                "process" => next.process.get_or_insert_with(Default::default).enabled = false,
+                "web_search" => {
+                    next.web_search.get_or_insert_with(Default::default).enabled = false
+                }
+                "web_fetch" => next.web_fetch.get_or_insert_with(Default::default).enabled = false,
+                "memory" => next.memory.get_or_insert_with(Default::default).enabled = false,
+                "memorize" => next.memorize.get_or_insert_with(Default::default).enabled = false,
+                "forget" => next.forget.get_or_insert_with(Default::default).enabled = false,
+                "summon" => next.summon.get_or_insert_with(Default::default).enabled = false,
+                "task" => next.task.get_or_insert_with(Default::default).enabled = false,
+                "clock" => next.clock.get_or_insert_with(Default::default).enabled = false,
+                "skills" => next.skills.get_or_insert_with(Default::default).enabled = false,
+                _ => {}
+            }
+        }
+        next
+    }
+
+    pub fn skills_config(&self) -> SkillsToolConfig {
+        self.skills.clone().unwrap_or_default()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub struct AgentSandboxConfig {
+pub struct ToolSandboxConfig {
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
-    pub filesystem: AgentSandboxFilesystemConfig,
-    pub network: AgentSandboxNetworkConfig,
-}
-
-impl Default for AgentSandboxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_sandbox_enabled(),
-            filesystem: AgentSandboxFilesystemConfig::default(),
-            network: AgentSandboxNetworkConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentSandboxFilesystemConfig {
+    pub extra_readable_paths: Vec<String>,
     pub extra_writable_paths: Vec<String>,
+    pub network_enabled: Option<bool>,
 }
 
-impl Default for AgentSandboxFilesystemConfig {
+impl Default for ToolSandboxConfig {
     fn default() -> Self {
         Self {
+            enabled: default_enabled(),
+            extra_readable_paths: Vec::new(),
             extra_writable_paths: Vec::new(),
+            network_enabled: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub struct AgentSandboxNetworkConfig {
-    pub mode: SandboxNetworkMode,
+pub struct ReadToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
 }
 
-impl Default for AgentSandboxNetworkConfig {
+impl Default for ReadToolConfig {
     fn default() -> Self {
         Self {
-            mode: SandboxNetworkMode::default(),
+            enabled: default_enabled(),
+            timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxNetworkMode {
-    Enabled,
-    #[default]
-    Disabled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub struct ToolConfig {
-    pub enabled_tools: Vec<String>,
+pub struct EditToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
 }
 
-impl Default for ToolConfig {
+impl Default for EditToolConfig {
     fn default() -> Self {
         Self {
-            enabled_tools: default_enabled_tools(),
+            enabled: default_enabled(),
+            timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub struct SkillsConfig {
-    pub enabled_skills: Vec<String>,
+pub struct ExecToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub timeout_seconds: Option<u64>,
+    pub allow_background: bool,
+    pub sandbox: ToolSandboxConfig,
+}
+
+impl Default for ExecToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            timeout_seconds: None,
+            allow_background: true,
+            sandbox: ToolSandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProcessToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for ProcessToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSearchToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub timeout_seconds: Option<u64>,
+}
+
+impl Default for WebSearchToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            timeout_seconds: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebFetchToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub timeout_seconds: Option<u64>,
+    pub max_chars: Option<u32>,
+}
+
+impl Default for WebFetchToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            timeout_seconds: None,
+            max_chars: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub default_top_k: Option<u32>,
+    pub max_top_k: Option<u32>,
+}
+
+impl Default for MemoryToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            default_top_k: None,
+            max_top_k: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemorizeToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for MemorizeToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ForgetToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for ForgetToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SummonToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub allowed: Vec<String>,
+}
+
+impl Default for SummonToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            allowed: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TaskToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub worker_max_steps: Option<u32>,
+}
+
+impl Default for TaskToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            worker_max_steps: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClockToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for ClockToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub ids: Vec<String>,
+}
+
+impl Default for SkillsToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            ids: Vec::new(),
+        }
+    }
 }

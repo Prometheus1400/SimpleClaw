@@ -5,6 +5,7 @@ pub mod skill;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -19,7 +20,7 @@ use tracing::{Instrument, debug, info_span};
 use tokio::sync::mpsc;
 
 use crate::channels::InboundMessage;
-use crate::config::{AgentSandboxConfig, GatewayChannelKind};
+use crate::config::{GatewayChannelKind, ToolSandboxConfig, ToolsConfig};
 use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
 use crate::memory::DynMemory;
@@ -89,7 +90,6 @@ pub struct CompletionRoute {
 pub(crate) struct ToolExecEnv {
     pub agent_id: String,
     pub memory: DynMemory,
-    pub sandbox: AgentSandboxConfig,
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
@@ -110,12 +110,12 @@ impl ToolExecEnv {
 }
 
 #[async_trait]
-pub(crate) trait Tool: Send + Sync {
+pub(crate) trait Tool: Send + Sync + ToolClone {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema_json(&self) -> &str;
-    fn sandbox_aware(&self) -> bool {
-        false
+    fn configure(&mut self, _config: Value) -> Result<(), FrameworkError> {
+        Ok(())
     }
 
     async fn execute(
@@ -145,10 +145,23 @@ pub(crate) trait Tool: Send + Sync {
     }
 }
 
+pub(crate) trait ToolClone {
+    fn box_clone(&self) -> Box<dyn Tool>;
+}
+
+impl<T> ToolClone for T
+where
+    T: Tool + Clone + 'static,
+{
+    fn box_clone(&self) -> Box<dyn Tool> {
+        Box::new(self.clone())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ToolFactory {
-    builtins: Vec<Arc<dyn Tool>>,
-    by_name: HashMap<String, Arc<dyn Tool>>,
+    builtins: Vec<Box<dyn Tool>>,
+    by_name: HashMap<String, Box<dyn Tool>>,
 }
 
 impl ToolFactory {
@@ -156,40 +169,45 @@ impl ToolFactory {
         Self::default()
     }
 
-    pub(crate) fn register_builtin(&mut self, tool: Arc<dyn Tool>) {
+    pub(crate) fn register_builtin(&mut self, tool: Box<dyn Tool>) {
         let name = tool.name().to_owned();
         if let Some(existing_idx) = self
             .builtins
             .iter()
             .position(|candidate| candidate.name() == name)
         {
-            self.builtins[existing_idx] = Arc::clone(&tool);
+            self.builtins[existing_idx] = tool.box_clone();
         } else {
-            self.builtins.push(Arc::clone(&tool));
+            self.builtins.push(tool.box_clone());
         }
         self.by_name.insert(name, tool);
     }
 
     pub(crate) fn resolve_active(
         &self,
-        enabled_builtin: &[String],
+        tools_config: &ToolsConfig,
         skill_tools: &[Arc<dyn Tool>],
     ) -> Result<ActiveTools, FrameworkError> {
         let mut ordered = Vec::new();
         let mut by_name = HashMap::new();
         let mut seen = HashSet::new();
 
-        for name in enabled_builtin {
+        for name in tools_config.enabled_tool_names() {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            let Some(tool) = self.by_name.get(name) else {
+            let Some(tool_template) = self.by_name.get(&name) else {
                 return Err(FrameworkError::Config(format!(
-                    "unknown tool in tools.enabled_tools: {name}"
+                    "unknown tool in tools map: {name}"
                 )));
             };
-            ordered.push(Arc::clone(tool));
-            by_name.insert(name.clone(), Arc::clone(tool));
+            let mut tool = tool_template.box_clone();
+            if let Some(config) = tools_config.config_for_tool(&name) {
+                tool.configure(config)?;
+            }
+            let tool: Arc<dyn Tool> = Arc::from(tool);
+            ordered.push(Arc::clone(&tool));
+            by_name.insert(name, tool);
         }
 
         for tool in skill_tools {
@@ -349,7 +367,7 @@ impl ProcessManager {
         &self,
         command: &str,
         workspace_root: &std::path::Path,
-        sandbox: &AgentSandboxConfig,
+        sandbox: &ToolSandboxConfig,
     ) -> Result<(String, CompletionHandle), FrameworkError> {
         let wrapped =
             sandbox_runtime::wrap_command_for_exec(command, workspace_root, sandbox).await?;
@@ -521,12 +539,12 @@ impl ProcessManager {
 
     async fn mark_completed(&self, session_id: &str, exit_code: Option<i32>) {
         let mut sessions = self.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(session_id) {
-            if entry.status == ProcessStatus::Running {
-                entry.status = ProcessStatus::Completed;
-                entry.exit_code = exit_code;
-                entry.finished_at = Some(Utc::now());
-            }
+        if let Some(entry) = sessions.get_mut(session_id)
+            && entry.status == ProcessStatus::Running
+        {
+            entry.status = ProcessStatus::Completed;
+            entry.exit_code = exit_code;
+            entry.finished_at = Some(Utc::now());
         }
     }
 
@@ -584,10 +602,6 @@ struct ProcessEntryMeta {
 
 impl ProcessEntry {
     fn poll_completion(&mut self) {
-        // Status is updated by the completion watcher via ProcessManager::mark_completed.
-        if self.status != ProcessStatus::Running {
-            return;
-        }
         // Host processes are tracked by the completion watcher which owns the Child.
         // No on-demand poll is possible here.
     }
@@ -675,19 +689,19 @@ fn read_process_output_tail(path: &std::path::Path, max_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-
-    struct FakeToolA;
-    struct FakeToolB;
+    #[derive(Clone)]
+    struct FakeTool {
+        desc: &'static str,
+    }
 
     #[async_trait]
-    impl Tool for FakeToolA {
+    impl Tool for FakeTool {
         fn name(&self) -> &'static str {
-            "fake"
+            "process"
         }
 
         fn description(&self) -> &'static str {
-            "fake-a"
+            self.desc
         }
 
         fn input_schema_json(&self) -> &'static str {
@@ -700,49 +714,63 @@ mod tests {
             _args_json: &str,
             _session_id: &str,
         ) -> Result<String, FrameworkError> {
-            Ok("a".to_owned())
+            Ok("ok".to_owned())
         }
     }
 
-    #[async_trait]
-    impl Tool for FakeToolB {
-        fn name(&self) -> &'static str {
-            "fake"
+    fn only_process_enabled() -> ToolsConfig {
+        ToolsConfig {
+            read: Some(crate::config::ReadToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            edit: Some(crate::config::EditToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            exec: Some(crate::config::ExecToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            process: Some(crate::config::ProcessToolConfig { enabled: true }),
+            web_search: Some(crate::config::WebSearchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_fetch: Some(crate::config::WebFetchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memory: Some(crate::config::MemoryToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memorize: Some(crate::config::MemorizeToolConfig { enabled: false }),
+            forget: Some(crate::config::ForgetToolConfig { enabled: false }),
+            summon: Some(crate::config::SummonToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            task: Some(crate::config::TaskToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            clock: Some(crate::config::ClockToolConfig { enabled: false }),
+            skills: Some(crate::config::SkillsToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
         }
-
-        fn description(&self) -> &'static str {
-            "fake-b"
-        }
-
-        fn input_schema_json(&self) -> &'static str {
-            "{\"type\":\"null\"}"
-        }
-
-        async fn execute(
-            &self,
-            _ctx: &ToolExecEnv,
-            _args_json: &str,
-            _session_id: &str,
-        ) -> Result<String, FrameworkError> {
-            Ok("b".to_owned())
-        }
-    }
-
-    #[test]
-    fn resolve_active_rejects_unknown_tool_names() {
-        let factory = default_factory();
-        let result = factory.resolve_active(&["not_real".to_owned()], &[]);
-        assert!(result.is_err());
     }
 
     #[test]
     fn register_overwrites_existing_tool_by_name() {
         let mut factory = ToolFactory::new();
-        factory.register_builtin(Arc::new(FakeToolA));
-        factory.register_builtin(Arc::new(FakeToolB));
+        factory.register_builtin(Box::new(FakeTool { desc: "fake-a" }));
+        factory.register_builtin(Box::new(FakeTool { desc: "fake-b" }));
 
         let active = factory
-            .resolve_active(&["fake".to_owned()], &[])
+            .resolve_active(&only_process_enabled(), &[])
             .expect("fake tool should resolve");
         let definitions = active.definitions();
         assert_eq!(definitions.len(), 1);
