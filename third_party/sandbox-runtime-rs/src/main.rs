@@ -116,8 +116,17 @@ async fn main() -> ExitCode {
         None
     };
 
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("Failed to resolve current directory: {}", e);
+            manager.reset().await;
+            return ExitCode::from(1);
+        }
+    };
+
     // Wrap and execute the command
-    let wrapped_command = match manager.wrap_with_sandbox(&command, None, None).await {
+    let wrapped_command = match manager.wrap_with_sandbox(&command, None, None, &cwd).await {
         Ok(cmd) => cmd,
         Err(e) => {
             eprintln!("Failed to wrap command: {}", e);

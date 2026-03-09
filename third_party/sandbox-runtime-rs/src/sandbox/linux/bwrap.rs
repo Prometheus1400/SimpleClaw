@@ -245,6 +245,30 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_bwrap_command_uses_provided_cwd_for_chdir() {
+        let mut config = SandboxRuntimeConfig::default();
+        config.network.allow_all_unix_sockets = Some(true);
+        let cwd = Path::new("/tmp/simpleclaw-workspace");
+
+        let (wrapped, _warnings) = generate_bwrap_command(
+            "pwd",
+            &config,
+            cwd,
+            None,
+            None,
+            3128,
+            1080,
+            Some("/bin/bash"),
+        )
+        .expect("generate_bwrap_command should succeed");
+
+        assert!(
+            wrapped.contains("--chdir /tmp/simpleclaw-workspace"),
+            "wrapped command should use provided cwd: {wrapped}"
+        );
+    }
+
+    #[test]
     fn test_check_bwrap() {
         // This test will pass/fail based on system configuration
         let available = check_bwrap();

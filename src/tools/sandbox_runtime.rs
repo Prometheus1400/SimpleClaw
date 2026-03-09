@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -56,6 +57,7 @@ pub async fn prepare_command_for_exec(
     let wrapped = run_manager_wrap_with_timeout(
         Arc::clone(&manager),
         user_command.to_owned(),
+        workspace.clone(),
         SANDBOX_WRAP_TIMEOUT_SECS,
     )
     .await?;
@@ -97,6 +99,7 @@ async fn run_manager_init_with_timeout(
 async fn run_manager_wrap_with_timeout(
     manager: Arc<SandboxManager>,
     command: String,
+    cwd: PathBuf,
     timeout_secs: u64,
 ) -> Result<String, FrameworkError> {
     let join = tokio::task::spawn_blocking(move || {
@@ -106,7 +109,7 @@ async fn run_manager_wrap_with_timeout(
             .map_err(|e| FrameworkError::Tool(format!("failed to create sandbox runtime: {e}")))?;
         rt.block_on(async {
             manager
-                .wrap_with_sandbox(&command, Some("/bin/bash"), None)
+                .wrap_with_sandbox(&command, Some("/bin/bash"), None, &cwd)
                 .await
                 .map_err(|e| {
                     FrameworkError::Tool(format!("failed to wrap command in sandbox runtime: {e}"))
