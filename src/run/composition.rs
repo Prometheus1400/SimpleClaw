@@ -8,7 +8,7 @@ use color_eyre::eyre::WrapErr;
 use tracing::info;
 
 use crate::agent::{
-    AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext,
+    AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
     load_system_prompt_for_workspace,
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
@@ -184,10 +184,13 @@ pub(crate) struct RuntimeState {
     pub gateway: Arc<Gateway>,
     pub runtimes: HashMap<String, AgentRuntime>,
     pub context: Arc<RuntimeContext>,
+    pub cron_store: Arc<std::sync::Mutex<CronStore>>,
+    pub safe_error_reply: String,
 }
 
 pub(crate) struct RuntimeServices {
     _gateway_listeners: crate::gateway::GatewayListeners,
+    _cron_scheduler: tokio::task::JoinHandle<()>,
 }
 
 pub(crate) async fn assemble_runtime_state(
@@ -296,10 +299,10 @@ pub(crate) async fn assemble_runtime_state(
         react_loop,
         gateway: Arc::clone(&gateway),
         agents: directory,
-        process_manager,
-        cron_store,
-        completion_tx: gateway_tx,
-        safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
+        tool_runtime: Arc::new(ToolRuntime {
+            process_manager,
+            completion_tx: gateway_tx.clone(),
+        }),
     });
 
     Ok((
@@ -307,6 +310,8 @@ pub(crate) async fn assemble_runtime_state(
             gateway,
             runtimes,
             context,
+            cron_store,
+            safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
         },
         gateway_rx,
     ))
@@ -314,7 +319,14 @@ pub(crate) async fn assemble_runtime_state(
 
 pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
     RuntimeServices {
-        _gateway_listeners: state.gateway.start(state.context.completion_tx.clone()),
+        _gateway_listeners: state
+            .gateway
+            .start(state.context.tool_runtime.completion_tx.clone()),
+        _cron_scheduler: super::cron_scheduler::spawn(
+            Arc::clone(&state.cron_store),
+            state.context.tool_runtime.completion_tx.clone(),
+            10,
+        ),
     }
 }
 
@@ -563,7 +575,7 @@ mod tests {
 
         assert_eq!(state.runtimes.len(), 1);
         assert!(state.runtimes.contains_key("default"));
-        assert_eq!(state.context.safe_error_reply, loaded.global.execution.defaults.safe_error_reply);
+        assert_eq!(state.safe_error_reply, loaded.global.execution.defaults.safe_error_reply);
         assert!(state.context.agents.config("default").is_some());
         assert!(state.context.agents.memory("default").is_some());
     }

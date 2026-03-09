@@ -14,7 +14,8 @@ use tokio::time::{Duration, timeout};
 
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
 use crate::config::{
-    AgentEntryConfig, GatewayChannelKind, GlobalConfig, InboundPolicyConfig, LoadedConfig,
+    AgentEntryConfig, AgentInnerConfig, GatewayChannelKind, GlobalConfig, InboundPolicyConfig,
+    LoadedConfig,
 };
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryStore};
@@ -59,6 +60,99 @@ pub struct TestHarnessConfig {
     pub mentioned_bot: bool,
     /// Whether routing should require a mention before invoking.
     pub require_mentions: bool,
+    /// Optional allowlist used by gateway routing.
+    pub allow_from: Option<Vec<String>>,
+    /// Whether a listener-path test expects the inbound to be dropped before routing.
+    pub expect_listener_drop: bool,
+    /// Additional inbound messages to process after the initial turn.
+    pub additional_inbounds_to_process: usize,
+    /// Timeout used when waiting for additional inbound messages.
+    pub additional_inbound_timeout_ms: u64,
+    /// Optional explicit agent list for multi-agent scenarios.
+    pub agents: Vec<TestAgentConfig>,
+}
+
+/// Agent/runtime configuration used by multi-agent integration tests.
+#[derive(Debug, Clone)]
+pub struct TestAgentConfig {
+    /// Agent id used in routing and directory lookup.
+    pub id: String,
+    /// User-visible name stored in generated config.
+    pub name: String,
+    /// Provider key registered in the mock provider factory.
+    pub provider_key: String,
+    /// Concrete agent config used for runtime assembly.
+    pub agent_config: AgentInnerConfig,
+    /// Scripted provider steps returned for this agent.
+    pub script: Vec<ProviderScriptStep>,
+}
+
+/// Script step returned by a mocked provider during integration tests.
+#[derive(Debug, Clone)]
+pub enum ProviderScriptStep {
+    /// Emit a final assistant reply.
+    Reply(String),
+    /// Emit one tool call for the current provider turn.
+    ToolCall(ScriptedToolCall),
+    /// Return a provider error for the current turn.
+    Error(String),
+}
+
+impl TestAgentConfig {
+    /// Build a test agent with default runtime configuration and a scripted provider.
+    pub fn new(id: &str, name: &str, provider_key: &str, script: Vec<ProviderScriptStep>) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            provider_key: provider_key.to_owned(),
+            agent_config: AgentInnerConfig::default(),
+            script,
+        }
+    }
+
+    /// Override the agent's exec tool settings.
+    pub fn with_exec_tool(
+        mut self,
+        timeout_seconds: Option<u64>,
+        allow_background: bool,
+        sandbox_enabled: bool,
+    ) -> Self {
+        self.agent_config.tools.exec = Some(crate::config::ExecToolConfig {
+            timeout_seconds,
+            allow_background,
+            sandbox: crate::config::ToolSandboxConfig {
+                enabled: sandbox_enabled,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Restrict summon targets for this test agent.
+    pub fn with_summon_allowed(mut self, allowed: Vec<String>) -> Self {
+        self.agent_config.tools.summon = Some(crate::config::SummonToolConfig {
+            allowed,
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Set the task worker max-steps override for this test agent.
+    pub fn with_task_worker_max_steps(mut self, worker_max_steps: Option<u32>) -> Self {
+        self.agent_config.tools.task = Some(crate::config::TaskToolConfig {
+            worker_max_steps,
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Override the provider key used for this agent.
+    pub fn with_provider_key(mut self, provider_key: &str) -> Self {
+        self.provider_key = provider_key.to_owned();
+        self.agent_config.provider = Some(provider_key.to_owned());
+        self
+    }
 }
 
 /// Tool call emitted by the scripted test provider on its first turn.
@@ -90,6 +184,11 @@ impl Default for TestHarnessConfig {
             is_dm: false,
             mentioned_bot: false,
             require_mentions: false,
+            allow_from: None,
+            expect_listener_drop: false,
+            additional_inbounds_to_process: 0,
+            additional_inbound_timeout_ms: 2_000,
+            agents: Vec::new(),
         }
     }
 }
@@ -114,6 +213,8 @@ pub struct EphemeralPaths {
     pub short_term_db_path: PathBuf,
     /// Long-term SQLite database path.
     pub long_term_db_path: PathBuf,
+    /// Directory containing all sqlite artifacts for the harness run.
+    pub db_dir: PathBuf,
     /// Fastembed cache directory used for memory initialization.
     pub fastembed_cache_dir: PathBuf,
 }
@@ -131,10 +232,14 @@ pub struct TestTurnResult {
     pub outbound_messages: Vec<TestOutboundMessage>,
     /// Number of mock provider generate calls.
     pub provider_call_count: usize,
+    /// Per-provider generate call counts.
+    pub provider_call_counts: HashMap<String, usize>,
     /// Number of typing notifications emitted by the gateway.
     pub typing_events: usize,
     /// Memory session id used for message persistence.
     pub memory_session_id: String,
+    /// Whether the listener path routed an inbound into runtime execution.
+    pub listener_routed: bool,
     /// Ephemeral paths that remain valid until this result is dropped.
     pub ephemeral_paths: EphemeralPaths,
     /// Whether provider observed at least one tool result in history.
@@ -149,19 +254,23 @@ pub async fn run_single_gateway_roundtrip(
 ) -> color_eyre::Result<TestTurnResult> {
     let ephemeral_paths = create_ephemeral_paths().wrap_err("failed to create ephemeral paths")?;
 
-    let provider = Arc::new(StaticMockProvider::new(
-        config.mock_reply.clone(),
-        config.scripted_tool_call.clone(),
-        config.scripted_final_reply.clone(),
-    ));
+    let agent_specs = effective_agents(&config);
+    let primary_provider_key = agent_specs
+        .iter()
+        .find(|agent| agent.id == config.agent_id)
+        .map(|agent| agent.provider_key.clone())
+        .unwrap_or_else(|| "default".to_owned());
+    let providers = build_scripted_providers(&agent_specs);
     let channel = Arc::new(CaptureChannel::new());
     let deps = RuntimeDependencies {
         provider_factory_builder: Arc::new(StaticProviderFactory {
-            provider: provider.clone(),
+            providers: providers.clone(),
         }),
         memory_factory: Arc::new(EphemeralMemoryFactory {
-            short_term_path: ephemeral_paths.short_term_db_path.clone(),
-            long_term_path: ephemeral_paths.long_term_db_path.clone(),
+            db_dir: ephemeral_paths.db_dir.clone(),
+            primary_agent_id: config.agent_id.clone(),
+            primary_short_term_path: ephemeral_paths.short_term_db_path.clone(),
+            primary_long_term_path: ephemeral_paths.long_term_db_path.clone(),
         }),
         channel_factory: Arc::new(StaticChannelFactory {
             channel: channel.clone(),
@@ -179,22 +288,22 @@ pub async fn run_single_gateway_roundtrip(
     global.agents.default = config.agent_id.clone();
     global.gateway.routing.defaults = InboundPolicyConfig {
         agent: Some(config.agent_id.clone()),
-        allow_from: None,
+        allow_from: config.allow_from.clone(),
         require_mentions: Some(config.require_mentions),
     };
-    let mut agent_inner = crate::config::AgentInnerConfig::default();
-    if let Some(timeout_seconds) = config.exec_timeout_seconds {
-        agent_inner.tools.exec = Some(crate::config::ExecToolConfig {
-            timeout_seconds: Some(timeout_seconds),
-            ..Default::default()
-        });
+    for agent in &agent_specs {
+        fs::create_dir_all(workspace_dir.join(&agent.id))
+            .wrap_err("failed to create test agent workspace")?;
     }
-    global.agents.list = vec![AgentEntryConfig {
-        id: config.agent_id.clone(),
-        name: config.agent_name.clone(),
-        workspace: workspace_dir.clone(),
-        config: agent_inner,
-    }];
+    global.agents.list = agent_specs
+        .iter()
+        .map(|agent| AgentEntryConfig {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            workspace: workspace_dir.join(&agent.id),
+            config: agent.agent_config.clone(),
+        })
+        .collect();
     global.gateway.channels = HashMap::from([(
         GatewayChannelKind::Discord,
         crate::config::ChannelConfig::default(),
@@ -224,7 +333,7 @@ pub async fn run_single_gateway_roundtrip(
         .route_via_gateway_listener
         .then(|| start_runtime_services(&state));
 
-    let memory_session_id = if config.route_via_gateway_listener {
+    let (memory_session_id, listener_routed) = if config.route_via_gateway_listener {
         run_via_gateway_listener(&state, &mut inbound_rx, &channel, &config).await?
     } else {
         let inbound = InboundMessage {
@@ -246,17 +355,40 @@ pub async fn run_single_gateway_roundtrip(
         handle_inbound_once(&state, inbound)
             .await
             .wrap_err("failed to process one inbound message")?;
-        memory_session_id
+        (memory_session_id, true)
     };
+
+    for _ in 0..config.additional_inbounds_to_process {
+        let inbound = timeout(
+            Duration::from_millis(config.additional_inbound_timeout_ms),
+            inbound_rx.recv(),
+        )
+        .await
+        .wrap_err("timed out waiting for follow-up inbound")?
+        .ok_or_else(|| color_eyre::eyre::eyre!("gateway inbound queue closed unexpectedly"))?;
+        handle_inbound_once(&state, inbound)
+            .await
+            .wrap_err("failed to process follow-up inbound message")?;
+    }
+
+    let provider_call_counts = providers
+        .iter()
+        .map(|(key, provider)| (key.clone(), provider.call_count()))
+        .collect::<HashMap<_, _>>();
+    let primary_provider = providers
+        .get(&primary_provider_key)
+        .expect("primary provider should exist");
 
     Ok(TestTurnResult {
         outbound_messages: channel.outbound_messages().await,
-        provider_call_count: provider.call_count(),
+        provider_call_count: provider_call_counts.values().copied().sum(),
+        provider_call_counts,
         typing_events: channel.typing_events(),
         memory_session_id,
+        listener_routed,
         ephemeral_paths,
-        observed_tool_result: provider.saw_tool_result(),
-        observed_tool_response: provider.observed_tool_response(),
+        observed_tool_result: primary_provider.saw_tool_result(),
+        observed_tool_response: primary_provider.observed_tool_response(),
     })
 }
 
@@ -265,7 +397,7 @@ async fn run_via_gateway_listener(
     inbound_rx: &mut tokio::sync::mpsc::Receiver<InboundMessage>,
     channel: &Arc<CaptureChannel>,
     config: &TestHarnessConfig,
-) -> color_eyre::Result<String> {
+) -> color_eyre::Result<(String, bool)> {
     channel
         .push_inbound(ChannelInbound {
             message_id: "test-message-1".to_owned(),
@@ -280,36 +412,38 @@ async fn run_via_gateway_listener(
         .await
         .wrap_err("failed to enqueue test inbound for gateway listener")?;
 
-    let inbound = timeout(Duration::from_secs(1), inbound_rx.recv())
-        .await
-        .wrap_err("timed out waiting for gateway listener to emit inbound")?
-        .ok_or_else(|| color_eyre::eyre::eyre!("gateway inbound queue closed unexpectedly"))?;
+    let inbound = match timeout(Duration::from_secs(1), inbound_rx.recv()).await {
+        Ok(Some(inbound)) => inbound,
+        Ok(None) => {
+            return Err(color_eyre::eyre::eyre!(
+                "gateway inbound queue closed unexpectedly"
+            ));
+        }
+        Err(_) if config.expect_listener_drop => return Ok((String::new(), false)),
+        Err(_) => {
+            return Err(color_eyre::eyre::eyre!(
+                "timed out waiting for gateway listener to emit inbound"
+            ));
+        }
+    };
     let memory_session_id = inbound.session_key.clone();
     handle_inbound_once(state, inbound)
         .await
         .wrap_err("failed to process routed inbound message")?;
-    Ok(memory_session_id)
+    Ok((memory_session_id, true))
 }
 
 struct StaticMockProvider {
-    reply: String,
-    scripted_tool_call: Option<ScriptedToolCall>,
-    scripted_final_reply: Option<String>,
+    script: Vec<ProviderScriptStep>,
     call_count: AtomicUsize,
     saw_tool_result: AtomicBool,
     observed_tool_response: StdMutex<Option<Value>>,
 }
 
 impl StaticMockProvider {
-    fn new(
-        reply: String,
-        scripted_tool_call: Option<ScriptedToolCall>,
-        scripted_final_reply: Option<String>,
-    ) -> Self {
+    fn new(script: Vec<ProviderScriptStep>) -> Self {
         Self {
-            reply,
-            scripted_tool_call,
-            scripted_final_reply,
+            script,
             call_count: AtomicUsize::new(0),
             saw_tool_result: AtomicBool::new(false),
             observed_tool_response: StdMutex::new(None),
@@ -340,7 +474,7 @@ impl Provider for StaticMockProvider {
         history: &[Message],
         _tools: &[ToolDefinition],
     ) -> Result<ProviderResponse, FrameworkError> {
-        let call_number = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        let call_index = self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Some(message) = history.iter().rev().find(|m| !m.tool_results.is_empty()) {
             self.saw_tool_result.store(true, Ordering::SeqCst);
             if let Some(result) = message.tool_results.first()
@@ -350,30 +484,27 @@ impl Provider for StaticMockProvider {
             }
         }
 
-        if let Some(tool_call) = &self.scripted_tool_call {
-            if call_number == 1 {
-                return Ok(ProviderResponse {
-                    output_text: None,
-                    tool_calls: vec![crate::providers::ToolCall {
-                        id: tool_call.id.clone(),
-                        name: tool_call.name.clone(),
-                        args_json: tool_call.args_json.clone(),
-                    }],
-                });
-            }
-            let reply = self
-                .scripted_final_reply
-                .clone()
-                .unwrap_or_else(|| self.reply.clone());
-            return Ok(ProviderResponse {
+        let step = self.script.get(call_index).cloned().unwrap_or_else(|| {
+            self.script
+                .last()
+                .cloned()
+                .unwrap_or_else(|| ProviderScriptStep::Reply(String::new()))
+        });
+        match step {
+            ProviderScriptStep::Reply(reply) => Ok(ProviderResponse {
                 output_text: Some(reply),
                 tool_calls: Vec::new(),
-            });
+            }),
+            ProviderScriptStep::ToolCall(tool_call) => Ok(ProviderResponse {
+                output_text: None,
+                tool_calls: vec![crate::providers::ToolCall {
+                    id: tool_call.id,
+                    name: tool_call.name,
+                    args_json: tool_call.args_json,
+                }],
+            }),
+            ProviderScriptStep::Error(message) => Err(FrameworkError::Tool(message)),
         }
-        Ok(ProviderResponse {
-            output_text: Some(self.reply.clone()),
-            tool_calls: Vec::new(),
-        })
     }
 }
 
@@ -446,7 +577,7 @@ impl Channel for CaptureChannel {
 }
 
 struct StaticProviderFactory {
-    provider: Arc<dyn Provider>,
+    providers: HashMap<String, Arc<StaticMockProvider>>,
 }
 
 #[async_trait]
@@ -455,15 +586,22 @@ impl ProviderFactoryBuilder for StaticProviderFactory {
         &self,
         _loaded: &LoadedConfig,
     ) -> color_eyre::Result<ProviderFactory> {
-        Ok(ProviderFactory::from_parts(HashMap::from([(
-            "default".to_owned(),
-            (
-                Box::new(ForwardProvider {
-                    inner: Arc::clone(&self.provider),
-                }) as Box<dyn Provider>,
-                true,
-            ),
-        )])))
+        let parts = self
+            .providers
+            .iter()
+            .map(|(key, provider)| {
+                (
+                    key.clone(),
+                    (
+                        Box::new(ForwardProvider {
+                            inner: provider.clone() as Arc<dyn Provider>,
+                        }) as Box<dyn Provider>,
+                        true,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(ProviderFactory::from_parts(parts))
     }
 }
 
@@ -484,27 +622,40 @@ impl Provider for ForwardProvider {
 }
 
 struct EphemeralMemoryFactory {
-    short_term_path: PathBuf,
-    long_term_path: PathBuf,
+    db_dir: PathBuf,
+    primary_agent_id: String,
+    primary_short_term_path: PathBuf,
+    primary_long_term_path: PathBuf,
 }
 
 #[async_trait]
 impl MemoryFactory for EphemeralMemoryFactory {
     async fn create_memory(
         &self,
-        _agent: &AgentEntryConfig,
+        agent: &AgentEntryConfig,
         loaded: &LoadedConfig,
     ) -> color_eyre::Result<DynMemory> {
-        if let Some(parent) = self.short_term_path.parent() {
+        let (short_term_path, long_term_path) = if agent.id == self.primary_agent_id {
+            (
+                self.primary_short_term_path.clone(),
+                self.primary_long_term_path.clone(),
+            )
+        } else {
+            (
+                self.db_dir.join(format!("{}_short.db", agent.id)),
+                self.db_dir.join(format!("{}_long.db", agent.id)),
+            )
+        };
+        if let Some(parent) = short_term_path.parent() {
             fs::create_dir_all(parent).wrap_err("failed to create short-term db directory")?;
         }
-        if let Some(parent) = self.long_term_path.parent() {
+        if let Some(parent) = long_term_path.parent() {
             fs::create_dir_all(parent).wrap_err("failed to create long-term db directory")?;
         }
         let _ = &loaded.global.embedding;
         MemoryStore::new_without_embedder(
-            &self.short_term_path,
-            &self.long_term_path,
+            &short_term_path,
+            &long_term_path,
             &loaded.global.database,
         )
         .await
@@ -552,6 +703,57 @@ fn create_ephemeral_paths() -> color_eyre::Result<EphemeralPaths> {
         workspace_dir,
         short_term_db_path,
         long_term_db_path,
+        db_dir,
         fastembed_cache_dir,
     })
+}
+
+fn effective_agents(config: &TestHarnessConfig) -> Vec<TestAgentConfig> {
+    if !config.agents.is_empty() {
+        return config.agents.clone();
+    }
+
+    let mut agent_config = AgentInnerConfig::default();
+    if let Some(timeout_seconds) = config.exec_timeout_seconds {
+        agent_config.tools.exec = Some(crate::config::ExecToolConfig {
+            timeout_seconds: Some(timeout_seconds),
+            ..Default::default()
+        });
+    }
+
+    let script = if let Some(tool_call) = config.scripted_tool_call.clone() {
+        vec![
+            ProviderScriptStep::ToolCall(tool_call),
+            ProviderScriptStep::Reply(
+                config
+                    .scripted_final_reply
+                    .clone()
+                    .unwrap_or_else(|| config.mock_reply.clone()),
+            ),
+        ]
+    } else {
+        vec![ProviderScriptStep::Reply(config.mock_reply.clone())]
+    };
+
+    vec![TestAgentConfig {
+        id: config.agent_id.clone(),
+        name: config.agent_name.clone(),
+        provider_key: "default".to_owned(),
+        agent_config,
+        script,
+    }]
+}
+
+fn build_scripted_providers(
+    agents: &[TestAgentConfig],
+) -> HashMap<String, Arc<StaticMockProvider>> {
+    agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.provider_key.clone(),
+                Arc::new(StaticMockProvider::new(agent.script.clone())),
+            )
+        })
+        .collect()
 }

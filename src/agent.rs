@@ -66,10 +66,13 @@ pub struct RuntimeContext {
     pub react_loop: Arc<ReactLoop>,
     pub gateway: Arc<crate::gateway::Gateway>,
     pub agents: Arc<AgentDirectory>,
+    pub tool_runtime: Arc<ToolRuntime>,
+}
+
+#[derive(Clone)]
+pub struct ToolRuntime {
     pub process_manager: Arc<ProcessManager>,
-    pub cron_store: Arc<std::sync::Mutex<crate::tools::builtin::cron::CronStore>>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
-    pub safe_error_reply: String,
 }
 
 pub struct AgentRuntime {
@@ -149,9 +152,9 @@ impl AgentRuntime {
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.owner_ids.clone(),
-            process_manager: Arc::clone(&context.process_manager),
+            process_manager: Arc::clone(&context.tool_runtime.process_manager),
             gateway: Some(Arc::clone(&context.gateway)),
-            completion_tx: Some(context.completion_tx.clone()),
+            completion_tx: Some(context.tool_runtime.completion_tx.clone()),
             completion_route: Some(CompletionRoute {
                 trace_id: inbound.trace_id.clone(),
                 source_channel: inbound.source_channel,
@@ -403,7 +406,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
     use tokio::sync::{Mutex, mpsc};
@@ -426,8 +428,8 @@ mod tests {
     use crate::tools::{AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory};
 
     use super::{
-        AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, format_recalled_memory,
-        inject_caller_context,
+        AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
+        format_recalled_memory, inject_caller_context,
     };
 
     #[derive(Default)]
@@ -717,22 +719,14 @@ mod tests {
         ));
         let gateway = test_gateway();
         let (completion_tx, _completion_rx) = mpsc::channel(4);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic enough for tests")
-            .as_nanos();
-        let cron_path = std::env::temp_dir().join(format!("simpleclaw_agent_cron_{nanos}.db"));
         RuntimeContext {
             react_loop,
             gateway,
             agents: directory,
-            process_manager: Arc::new(ProcessManager::new()),
-            cron_store: Arc::new(std::sync::Mutex::new(
-                crate::tools::builtin::cron::CronStore::open(&cron_path)
-                    .expect("cron store should open"),
-            )),
-            completion_tx,
-            safe_error_reply: "safe reply".to_owned(),
+            tool_runtime: Arc::new(ToolRuntime {
+                process_manager: Arc::new(ProcessManager::new()),
+                completion_tx,
+            }),
         }
     }
 
