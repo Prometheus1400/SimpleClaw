@@ -10,9 +10,12 @@ use async_trait::async_trait;
 use color_eyre::eyre::WrapErr;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, timeout};
 
 use crate::channels::{Channel, ChannelInbound, InboundMessage};
-use crate::config::{AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig};
+use crate::config::{
+    AgentEntryConfig, GatewayChannelKind, GlobalConfig, InboundPolicyConfig, LoadedConfig,
+};
 use crate::error::FrameworkError;
 use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
@@ -48,6 +51,14 @@ pub struct TestHarnessConfig {
     pub scripted_final_reply: Option<String>,
     /// Optional override for tools.exec.timeout_seconds.
     pub exec_timeout_seconds: Option<u64>,
+    /// Whether to push the inbound event through the real gateway listener/queue path.
+    pub route_via_gateway_listener: bool,
+    /// Whether the source inbound should be treated as a DM.
+    pub is_dm: bool,
+    /// Whether the source inbound mentions the bot.
+    pub mentioned_bot: bool,
+    /// Whether routing should require a mention before invoking.
+    pub require_mentions: bool,
 }
 
 /// Tool call emitted by the scripted test provider on its first turn.
@@ -75,6 +86,10 @@ impl Default for TestHarnessConfig {
             scripted_tool_call: None,
             scripted_final_reply: None,
             exec_timeout_seconds: None,
+            route_via_gateway_listener: false,
+            is_dm: false,
+            mentioned_bot: false,
+            require_mentions: false,
         }
     }
 }
@@ -162,6 +177,11 @@ pub async fn run_single_gateway_roundtrip(
     global.execution.defaults.max_steps = config.max_steps;
     global.execution.owner_ids = vec![config.user_id.clone()];
     global.agents.default = config.agent_id.clone();
+    global.gateway.routing.defaults = InboundPolicyConfig {
+        agent: Some(config.agent_id.clone()),
+        allow_from: None,
+        require_mentions: Some(config.require_mentions),
+    };
     let mut agent_inner = crate::config::AgentInnerConfig::default();
     if let Some(timeout_seconds) = config.exec_timeout_seconds {
         agent_inner.tools.exec = Some(crate::config::ExecToolConfig {
@@ -197,29 +217,34 @@ pub async fn run_single_gateway_roundtrip(
         pid_path: app_base_dir.join("run/service.pid"),
     };
 
-    let (state, _inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
+    let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
         .await
         .wrap_err("failed to assemble runtime state for integration harness")?;
 
-    let inbound = InboundMessage {
-        trace_id: crate::telemetry::next_trace_id(),
-        source_channel: GatewayChannelKind::Discord,
-        target_agent_id: config.agent_id.clone(),
-        session_key: format!("agent:{}:discord:{}", config.agent_id, config.channel_id),
-        source_message_id: Some("test-message-1".to_owned()),
-        channel_id: config.channel_id.clone(),
-        guild_id: None,
-        is_dm: false,
-        user_id: config.user_id.clone(),
-        username: config.username.clone(),
-        mentioned_bot: false,
-        invoke: true,
-        content: config.inbound_content.clone(),
+    let memory_session_id = if config.route_via_gateway_listener {
+        run_via_gateway_listener(&state, &mut inbound_rx, &channel, &config).await?
+    } else {
+        let inbound = InboundMessage {
+            trace_id: crate::telemetry::next_trace_id(),
+            source_channel: GatewayChannelKind::Discord,
+            target_agent_id: config.agent_id.clone(),
+            session_key: format!("agent:{}:discord:{}", config.agent_id, config.channel_id),
+            source_message_id: Some("test-message-1".to_owned()),
+            channel_id: config.channel_id.clone(),
+            guild_id: None,
+            is_dm: config.is_dm,
+            user_id: config.user_id.clone(),
+            username: config.username.clone(),
+            mentioned_bot: config.mentioned_bot,
+            invoke: true,
+            content: config.inbound_content.clone(),
+        };
+        let memory_session_id = inbound.session_key.clone();
+        handle_inbound_once(&state, inbound)
+            .await
+            .wrap_err("failed to process one inbound message")?;
+        memory_session_id
     };
-    let memory_session_id = inbound.session_key.clone();
-    handle_inbound_once(&state, inbound)
-        .await
-        .wrap_err("failed to process one inbound message")?;
 
     Ok(TestTurnResult {
         outbound_messages: channel.outbound_messages().await,
@@ -230,6 +255,37 @@ pub async fn run_single_gateway_roundtrip(
         observed_tool_result: provider.saw_tool_result(),
         observed_tool_response: provider.observed_tool_response(),
     })
+}
+
+async fn run_via_gateway_listener(
+    state: &crate::run::composition::RuntimeState,
+    inbound_rx: &mut tokio::sync::mpsc::Receiver<InboundMessage>,
+    channel: &Arc<CaptureChannel>,
+    config: &TestHarnessConfig,
+) -> color_eyre::Result<String> {
+    channel
+        .push_inbound(ChannelInbound {
+            message_id: "test-message-1".to_owned(),
+            channel_id: config.channel_id.clone(),
+            guild_id: None,
+            is_dm: config.is_dm,
+            user_id: config.user_id.clone(),
+            username: config.username.clone(),
+            mentioned_bot: config.mentioned_bot,
+            content: config.inbound_content.clone(),
+        })
+        .await
+        .wrap_err("failed to enqueue test inbound for gateway listener")?;
+
+    let inbound = timeout(Duration::from_secs(1), inbound_rx.recv())
+        .await
+        .wrap_err("timed out waiting for gateway listener to emit inbound")?
+        .ok_or_else(|| color_eyre::eyre::eyre!("gateway inbound queue closed unexpectedly"))?;
+    let memory_session_id = inbound.session_key.clone();
+    handle_inbound_once(state, inbound)
+        .await
+        .wrap_err("failed to process routed inbound message")?;
+    Ok(memory_session_id)
 }
 
 struct StaticMockProvider {
@@ -342,6 +398,13 @@ impl CaptureChannel {
 
     fn typing_events(&self) -> usize {
         self.typing_events.load(Ordering::SeqCst)
+    }
+
+    async fn push_inbound(&self, inbound: ChannelInbound) -> Result<(), FrameworkError> {
+        self.listen_tx
+            .send(inbound)
+            .await
+            .map_err(|err| FrameworkError::Config(format!("test inbound enqueue failed: {err}")))
     }
 }
 

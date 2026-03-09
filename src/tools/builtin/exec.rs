@@ -163,3 +163,152 @@ async fn exec_with_sandbox_runtime(
         stderr.trim(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    use super::ExecTool;
+    use crate::config::DatabaseConfig;
+    use crate::error::FrameworkError;
+    use crate::memory::MemoryStore;
+    use crate::tools::{
+        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, Tool, ToolExecEnv,
+        WorkerInvokeRequest,
+    };
+
+    struct NoopInvoker;
+
+    #[async_trait]
+    impl AgentInvoker for NoopInvoker {
+        async fn invoke_agent(
+            &self,
+            _request: AgentInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Ok(InvokeOutcome {
+                reply: String::new(),
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn invoke_worker(
+            &self,
+            _request: WorkerInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Ok(InvokeOutcome {
+                reply: String::new(),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    async fn test_ctx() -> ToolExecEnv {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("simpleclaw_exec_test_{nanos}"));
+        std::fs::create_dir_all(&root).expect("temp exec test dir should be created");
+        let short = root.join("short.db");
+        let long = root.join("long.db");
+        let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
+            .await
+            .expect("memory should initialize");
+        ToolExecEnv {
+            agent_id: "test-agent".to_owned(),
+            memory: Arc::new(memory),
+            history_messages: 10,
+            workspace_root: PathBuf::from(&root),
+            user_id: "user-1".to_owned(),
+            owner_ids: vec!["user-1".to_owned()],
+            process_manager: Arc::new(ProcessManager::new()),
+            invoker: Arc::new(NoopInvoker),
+            gateway: None,
+            completion_tx: None,
+            completion_route: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_empty_command() {
+        let tool = ExecTool::default();
+        let ctx = test_ctx().await;
+
+        let err = tool
+            .execute(&ctx, r#"{"command":"   "}"#, "sess-1")
+            .await
+            .err()
+            .expect("empty command should fail");
+
+        assert!(err.to_string().contains("exec requires a non-empty command"));
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_background_when_disabled() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({
+            "allow_background": false,
+            "sandbox": { "enabled": false }
+        }))
+            .expect("config should apply");
+        let ctx = test_ctx().await;
+
+        let err = tool
+            .execute(&ctx, "{\"command\":\"sleep 1\",\"background\":true}", "sess-1")
+            .await
+            .err()
+            .expect("background execution should fail");
+
+        assert!(err
+            .to_string()
+            .contains("exec background mode is disabled by tools.exec.allow_background"));
+    }
+
+    #[tokio::test]
+    async fn exec_runs_foreground_command_without_sandbox() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({ "sandbox": { "enabled": false } }))
+            .expect("config should apply");
+        let ctx = test_ctx().await;
+
+        let output = tool
+            .execute(&ctx, r#"{"command":"printf hello"}"#, "sess-1")
+            .await
+            .expect("foreground exec should succeed");
+        let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
+
+        assert_eq!(parsed["status"], "completed");
+        assert_eq!(parsed["exitCode"], 0);
+        assert_eq!(parsed["stdout"], "hello");
+        assert_eq!(parsed["stderr"], "");
+    }
+
+    #[tokio::test]
+    async fn exec_backgrounds_process_when_enabled() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({
+            "allow_background": true,
+            "sandbox": { "enabled": false }
+        }))
+        .expect("config should apply");
+        let ctx = test_ctx().await;
+
+        let output = tool
+            .execute(&ctx, r#"{"command":"sleep 0.1","background":true}"#, "sess-1")
+            .await
+            .expect("background exec should succeed");
+        let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
+
+        assert_eq!(parsed["status"], "backgrounded");
+        let session_id = parsed["sessionId"]
+            .as_str()
+            .expect("backgrounded response should include session id");
+        let sessions = ctx.process_manager.list().await;
+        assert!(sessions.iter().any(|snapshot| snapshot.session_id == session_id));
+    }
+}

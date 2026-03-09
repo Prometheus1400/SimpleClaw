@@ -96,20 +96,28 @@ async fn fetch_url_markdown(
         .map_err(|e| FrameworkError::Tool(format!("fetch request failed: {e}")))?;
 
     let status = response.status();
-    if !status.is_success() {
-        return Err(FrameworkError::Tool(format!(
-            "fetch response error: status={} url={url}",
-            status.as_u16()
-        )));
-    }
-
     let body = timeout(Duration::from_secs(timeout_seconds), response.text())
         .await
         .map_err(|_| FrameworkError::Tool(format!("fetch timed out after {timeout_seconds}s")))?
         .map_err(|e| FrameworkError::Tool(format!("fetch body read failed: {e}")))?;
 
+    render_fetch_response(url, status.as_u16(), &body, max_chars)
+}
+
+fn render_fetch_response(
+    url: &str,
+    status_code: u16,
+    body: &str,
+    max_chars: usize,
+) -> Result<String, FrameworkError> {
+    if !(200..300).contains(&status_code) {
+        return Err(FrameworkError::Tool(format!(
+            "fetch response error: status={status_code} url={url}",
+        )));
+    }
+
     if body.contains("<html") || body.contains("<body") {
-        let doc = Html::parse_document(&body);
+        let doc = Html::parse_document(body);
         let selector = Selector::parse("body")
             .map_err(|e| FrameworkError::Tool(format!("html selector parse failed: {e}")))?;
         let text = doc
@@ -120,9 +128,53 @@ async fn fetch_url_markdown(
             .collect::<Vec<_>>()
             .join(" ");
 
-        let clipped = text.chars().take(max_chars).collect::<String>();
-        return Ok(clipped);
+        return Ok(text.chars().take(max_chars).collect::<String>());
     }
 
     Ok(body.chars().take(max_chars).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fetch_url_markdown, render_fetch_response};
+
+    #[tokio::test]
+    async fn fetch_rejects_empty_url() {
+        let err = fetch_url_markdown("   ", 1, 100)
+            .await
+            .err()
+            .expect("empty url should fail");
+
+        assert!(err.to_string().contains("fetch requires a non-empty url"));
+    }
+
+    #[test]
+    fn fetch_extracts_html_body_text_and_truncates() {
+        let output = render_fetch_response(
+            "http://example.test",
+            200,
+            "<html><body><h1>Hello</h1><p>from web fetch tests</p></body></html>",
+            10,
+        )
+        .expect("html response should render");
+
+        assert_eq!(output, "Hello from");
+    }
+
+    #[test]
+    fn fetch_returns_plain_text_body_when_not_html() {
+        let output = render_fetch_response("http://example.test", 200, "plain body from server", 100)
+            .expect("plain text response should render");
+
+        assert_eq!(output, "plain body from server");
+    }
+
+    #[test]
+    fn fetch_reports_non_success_status() {
+        let err = render_fetch_response("http://example.test", 404, "not found", 100)
+            .err()
+            .expect("404 should fail");
+
+        assert!(err.to_string().contains("fetch response error: status=404"));
+    }
 }
