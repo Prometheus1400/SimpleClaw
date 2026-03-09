@@ -128,7 +128,7 @@ pub async fn run_single_gateway_roundtrip(
     fs::create_dir_all(&workspace_dir).wrap_err("failed to create test workspace")?;
 
     let mut global = GlobalConfig::default();
-    global.execution.defaults.memory_preinject.enabled = false;
+    global.execution.defaults.memory_recall.enabled = false;
     global.execution.defaults.max_steps = config.max_steps;
     global.agents.default = config.agent_id.clone();
     global.agents.list = vec![AgentEntryConfig {

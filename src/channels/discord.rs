@@ -338,8 +338,7 @@ mod tests {
 
     #[test]
     fn parse_reaction_type_custom_emoji_keeps_identity() {
-        let parsed = parse_reaction_type("<:party:123456>")
-            .expect("custom emoji should parse");
+        let parsed = parse_reaction_type("<:party:123456>").expect("custom emoji should parse");
 
         assert_eq!(
             parsed,

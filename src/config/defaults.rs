@@ -44,23 +44,23 @@ pub(super) fn default_history_messages() -> u32 {
     10
 }
 
-pub(super) fn default_memory_preinject_enabled() -> bool {
+pub(super) fn default_memory_recall_enabled() -> bool {
     true
 }
 
-pub(super) fn default_memory_preinject_top_k() -> u32 {
+pub(super) fn default_memory_recall_top_k() -> u32 {
     3
 }
 
-pub(super) fn default_memory_preinject_min_score() -> f32 {
+pub(super) fn default_memory_recall_min_score() -> f32 {
     0.72
 }
 
-pub(super) fn default_memory_preinject_long_term_weight() -> f32 {
+pub(super) fn default_memory_recall_long_term_weight() -> f32 {
     0.65
 }
 
-pub(super) fn default_memory_preinject_max_chars() -> u32 {
+pub(super) fn default_memory_recall_max_chars() -> u32 {
     1200
 }
 

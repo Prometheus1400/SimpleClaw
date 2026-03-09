@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::channels::InboundMessage;
 use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig};
 use crate::error::FrameworkError;
-use crate::memory::{DynMemory, MemoryHitStore, MemoryPreinjectHit, StoredRole};
+use crate::memory::{DynMemory, MemoryHitStore, MemoryRecallHit, StoredRole};
 use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunOutcome, RunParams};
@@ -252,7 +252,7 @@ impl AgentRuntime {
         let config = self
             .config
             .effective_execution
-            .memory_preinject
+            .memory_recall
             .normalized();
         if !config.enabled {
             return self.config.system_prompt.clone();
@@ -264,29 +264,29 @@ impl AgentRuntime {
         }
 
         let hits = match memory
-            .query_preinject_hits(session_id, trimmed_query, &config)
+            .query_recall_hits(session_id, trimmed_query, &config)
             .await
         {
             Ok(items) => items,
             Err(err) => {
                 warn!(
                     status = "failed",
-                    error_kind = "memory_preinject_query",
+                    error_kind = "memory_recall_query",
                     error = %err,
-                    "memory preinject query"
+                    "memory recall query"
                 );
                 return self.config.system_prompt.clone();
             }
         };
 
         if hits.is_empty() {
-            debug!(status = "completed", "memory preinject");
+            debug!(status = "completed", "memory recall");
             return self.config.system_prompt.clone();
         }
 
-        debug!(status = "completed", "memory preinject");
+        debug!(status = "completed", "memory recall");
 
-        let section = format_preinjected_memory(&hits, config.max_chars as usize);
+        let section = format_recalled_memory(&hits, config.max_chars as usize);
         if section.is_empty() {
             return self.config.system_prompt.clone();
         }
@@ -295,7 +295,7 @@ impl AgentRuntime {
     }
 }
 
-fn format_preinjected_memory(hits: &[MemoryPreinjectHit], max_chars: usize) -> String {
+fn format_recalled_memory(hits: &[MemoryRecallHit], max_chars: usize) -> String {
     if hits.is_empty() || max_chars == 0 {
         return String::new();
     }
@@ -322,7 +322,7 @@ fn format_preinjected_memory(hits: &[MemoryPreinjectHit], max_chars: usize) -> S
     }
 }
 
-fn memory_hit_label(hit: &MemoryPreinjectHit) -> String {
+fn memory_hit_label(hit: &MemoryRecallHit) -> String {
     match hit.store {
         MemoryHitStore::LongTerm => {
             format!("long-term/{}", hit.kind.as_deref().unwrap_or("general"))
@@ -357,9 +357,9 @@ pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<Strin
 mod tests {
     use crate::channels::InboundMessage;
     use crate::config::GatewayChannelKind;
-    use crate::memory::{MemoryHitStore, MemoryPreinjectHit};
+    use crate::memory::{MemoryHitStore, MemoryRecallHit};
 
-    use super::{format_preinjected_memory, inject_caller_context};
+    use super::{format_recalled_memory, inject_caller_context};
 
     fn test_inbound(is_dm: bool, guild_id: Option<&str>) -> InboundMessage {
         InboundMessage {
@@ -380,9 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn format_preinjected_memory_caps_output_by_char_limit() {
+    fn format_recalled_memory_caps_output_by_char_limit() {
         let hits = vec![
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Prefers concise responses".to_owned(),
                 kind: Some("prefs".to_owned()),
@@ -390,7 +390,7 @@ mod tests {
                 raw_similarity: 0.91,
                 final_score: 0.88,
             },
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Asked about runtime memory config".to_owned(),
                 kind: Some("context".to_owned()),
@@ -400,7 +400,7 @@ mod tests {
             },
         ];
 
-        let section = format_preinjected_memory(&hits, 280);
+        let section = format_recalled_memory(&hits, 280);
         assert!(section.starts_with("# POTENTIALLY RELEVANT LONG-TERM MEMORY"));
         assert!(section.contains("optional background context"));
         assert!(section.contains("1. [long-term/prefs]"));

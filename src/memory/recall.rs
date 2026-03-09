@@ -2,10 +2,10 @@ use std::cmp::Ordering;
 
 use tracing::{trace, warn};
 
-use crate::config::MemoryPreinjectConfig;
+use crate::config::MemoryRecallConfig;
 use crate::error::FrameworkError;
 
-use super::types::MemoryPreinjectHit;
+use super::types::MemoryRecallHit;
 
 const ALLOWED_MEMORY_KINDS: [&str; 6] = [
     "general",
@@ -16,10 +16,10 @@ const ALLOWED_MEMORY_KINDS: [&str; 6] = [
     "constraint",
 ];
 
-pub(super) fn rank_preinject_hits(
-    mut candidates: Vec<MemoryPreinjectHit>,
-    normalized_config: &MemoryPreinjectConfig,
-) -> Vec<MemoryPreinjectHit> {
+pub(super) fn rank_recall_hits(
+    mut candidates: Vec<MemoryRecallHit>,
+    normalized_config: &MemoryRecallConfig,
+) -> Vec<MemoryRecallHit> {
     candidates.sort_by(|a, b| {
         b.final_score
             .partial_cmp(&a.final_score)
@@ -32,7 +32,7 @@ pub(super) fn rank_preinject_hits(
         if item.raw_similarity < normalized_config.min_score {
             trace!(
                 status = "filtered_by_min_score",
-                "memory preinject candidate"
+                "memory recall candidate"
             );
             continue;
         }
@@ -40,18 +40,18 @@ pub(super) fn rank_preinject_hits(
         if key.is_empty() {
             trace!(
                 status = "filtered_empty_content",
-                "memory preinject candidate"
+                "memory recall candidate"
             );
             continue;
         }
         if !dedupe.insert(key) {
-            trace!(status = "filtered_dedupe", "memory preinject candidate");
+            trace!(status = "filtered_dedupe", "memory recall candidate");
             continue;
         }
-        trace!(status = "selected", "memory preinject candidate");
+        trace!(status = "selected", "memory recall candidate");
         out.push(item);
         if out.len() >= normalized_config.top_k as usize {
-            trace!(status = "top_k_reached", "memory preinject candidate");
+            trace!(status = "top_k_reached", "memory recall candidate");
             break;
         }
     }
@@ -60,7 +60,7 @@ pub(super) fn rank_preinject_hits(
             warn!(
                 weakest_final_score = weakest.final_score,
                 hit_count = out.len(),
-                "memory preinject includes low-confidence hits; consider raising min_score"
+                "memory recall includes low-confidence hits; consider raising min_score"
             );
         }
     }
@@ -102,14 +102,14 @@ pub(super) fn parse_memory_kind(value: &str) -> Result<String, FrameworkError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::MemoryPreinjectConfig;
+    use crate::config::MemoryRecallConfig;
 
-    use super::{normalize_memory_kind, parse_memory_kind, rank_preinject_hits};
-    use crate::memory::{MemoryHitStore, MemoryPreinjectHit};
+    use super::{normalize_memory_kind, parse_memory_kind, rank_recall_hits};
+    use crate::memory::{MemoryHitStore, MemoryRecallHit};
 
     #[test]
-    fn rank_preinject_hits_applies_threshold_dedupe_and_limit() {
-        let config = MemoryPreinjectConfig {
+    fn rank_recall_hits_applies_threshold_dedupe_and_limit() {
+        let config = MemoryRecallConfig {
             enabled: true,
             top_k: 2,
             min_score: 0.75,
@@ -118,7 +118,7 @@ mod tests {
         }
         .normalized();
         let hits = vec![
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Prefers short answers".to_owned(),
                 kind: Some("preferences".to_owned()),
@@ -126,7 +126,7 @@ mod tests {
                 raw_similarity: 0.94,
                 final_score: 0.86,
             },
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Working in Rust project".to_owned(),
                 kind: Some("context".to_owned()),
@@ -134,7 +134,7 @@ mod tests {
                 raw_similarity: 0.89,
                 final_score: 0.81,
             },
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Low confidence".to_owned(),
                 kind: Some("context".to_owned()),
@@ -144,7 +144,7 @@ mod tests {
             },
         ];
 
-        let ranked = rank_preinject_hits(hits, &config);
+        let ranked = rank_recall_hits(hits, &config);
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].content, "Prefers short answers");
         assert_eq!(ranked[1].content, "Working in Rust project");
@@ -152,8 +152,8 @@ mod tests {
     }
 
     #[test]
-    fn rank_preinject_hits_filters_on_raw_similarity_not_final_score() {
-        let config = MemoryPreinjectConfig {
+    fn rank_recall_hits_filters_on_raw_similarity_not_final_score() {
+        let config = MemoryRecallConfig {
             enabled: true,
             top_k: 2,
             min_score: 0.72,
@@ -162,7 +162,7 @@ mod tests {
         }
         .normalized();
         let hits = vec![
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "High weighted, low raw".to_owned(),
                 kind: Some("preferences".to_owned()),
@@ -170,7 +170,7 @@ mod tests {
                 raw_similarity: 0.70,
                 final_score: 0.95,
             },
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Passes raw threshold".to_owned(),
                 kind: Some("context".to_owned()),
@@ -178,7 +178,7 @@ mod tests {
                 raw_similarity: 0.90,
                 final_score: 0.60,
             },
-            MemoryPreinjectHit {
+            MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Also passes raw threshold".to_owned(),
                 kind: Some("context".to_owned()),
@@ -188,7 +188,7 @@ mod tests {
             },
         ];
 
-        let ranked = rank_preinject_hits(hits, &config);
+        let ranked = rank_recall_hits(hits, &config);
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].content, "Passes raw threshold");
         assert_eq!(ranked[1].content, "Also passes raw threshold");
