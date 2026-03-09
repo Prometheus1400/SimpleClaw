@@ -1,13 +1,14 @@
 use async_trait::async_trait;
 
+use crate::config::SummonToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::{AgentInvokeRequest, Tool, ToolExecEnv, ToolRunOutput};
 
 use super::common::parse_summon_args;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SummonTool {
-    Handoff,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SummonTool {
+    config: SummonToolConfig,
 }
 
 #[async_trait]
@@ -22,6 +23,12 @@ impl Tool for SummonTool {
 
     fn input_schema_json(&self) -> &'static str {
         "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}},\"required\":[\"agent\"]}"
+    }
+
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config)
+            .map_err(|e| FrameworkError::Config(format!("tools.summon config is invalid: {e}")))?;
+        Ok(())
     }
 
     async fn execute(
@@ -42,6 +49,11 @@ impl Tool for SummonTool {
         session_id: &str,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let (target, summary) = parse_summon_args(args_json);
+        if !self.target_allowed(&target) {
+            return Err(FrameworkError::Tool(format!(
+                "summon target '{target}' is not allowed by tools.summon.allowed"
+            )));
+        }
         let handoff = if summary.trim().is_empty() {
             format!(
                 "You were summoned as agent `{target}`. Continue from session context and produce a final answer."
@@ -62,5 +74,31 @@ impl Tool for SummonTool {
             output: outcome.reply,
             nested_tool_calls: outcome.tool_calls,
         })
+    }
+}
+
+impl SummonTool {
+    fn target_allowed(&self, target: &str) -> bool {
+        self.config.allowed.is_empty() || self.config.allowed.iter().any(|allowed| allowed == target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SummonTool;
+
+    #[test]
+    fn empty_allowlist_allows_any_target() {
+        let tool = SummonTool::default();
+        assert!(tool.target_allowed("planner"));
+        assert!(tool.target_allowed("reviewer"));
+    }
+
+    #[test]
+    fn non_empty_allowlist_restricts_target() {
+        let mut tool = SummonTool::default();
+        tool.config.allowed = vec!["planner".to_owned(), "researcher".to_owned()];
+        assert!(tool.target_allowed("planner"));
+        assert!(!tool.target_allowed("reviewer"));
     }
 }

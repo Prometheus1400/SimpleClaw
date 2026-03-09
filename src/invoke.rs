@@ -103,7 +103,9 @@ impl AgentInvoker for DirectAgentInvoker {
             system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
             agent_id: "task-worker",
             session_id: &request.session_id,
-            max_steps: current_config.effective_execution.max_steps,
+            max_steps: request
+                .max_steps_override
+                .unwrap_or(current_config.effective_execution.max_steps),
             memory,
             workspace_root: current_config.workspace_root.clone(),
             user_id: request.user_id,

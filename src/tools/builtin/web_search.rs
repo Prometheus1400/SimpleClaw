@@ -1,15 +1,19 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
+use tokio::time::{Duration, timeout};
 
+use crate::config::WebSearchToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_simple_text_arg;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebSearchTool {
-    DuckDuckGo,
+const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS: u64 = 20;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebSearchTool {
+    config: WebSearchToolConfig,
 }
 
 #[async_trait]
@@ -26,6 +30,13 @@ impl Tool for WebSearchTool {
         "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}"
     }
 
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config).map_err(|e| {
+            FrameworkError::Config(format!("tools.web_search config is invalid: {e}"))
+        })?;
+        Ok(())
+    }
+
     async fn execute(
         &self,
         _ctx: &ToolExecEnv,
@@ -33,28 +44,38 @@ impl Tool for WebSearchTool {
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
         let query = parse_simple_text_arg(args_json);
-        search_duckduckgo(&query).await
+        search_duckduckgo(
+            &query,
+            self.config
+                .timeout_seconds
+                .unwrap_or(DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS),
+        )
+        .await
     }
 }
 
-async fn search_duckduckgo(query: &str) -> Result<String, FrameworkError> {
+async fn search_duckduckgo(query: &str, timeout_seconds: u64) -> Result<String, FrameworkError> {
     let client = Client::new();
-    let value = client
-        .get("https://api.duckduckgo.com/")
-        .query(&[
-            ("q", query),
-            ("format", "json"),
-            ("no_redirect", "1"),
-            ("no_html", "1"),
-        ])
-        .send()
-        .await
-        .map_err(|e| FrameworkError::Tool(format!("search request failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| FrameworkError::Tool(format!("search response error: {e}")))?
-        .json::<Value>()
-        .await
-        .map_err(|e| FrameworkError::Tool(format!("search decode failed: {e}")))?;
+    let value = timeout(Duration::from_secs(timeout_seconds), async {
+        client
+            .get("https://api.duckduckgo.com/")
+            .query(&[
+                ("q", query),
+                ("format", "json"),
+                ("no_redirect", "1"),
+                ("no_html", "1"),
+            ])
+            .send()
+            .await
+            .map_err(|e| FrameworkError::Tool(format!("search request failed: {e}")))?
+            .error_for_status()
+            .map_err(|e| FrameworkError::Tool(format!("search response error: {e}")))?
+            .json::<Value>()
+            .await
+            .map_err(|e| FrameworkError::Tool(format!("search decode failed: {e}")))
+    })
+    .await
+    .map_err(|_| FrameworkError::Tool(format!("search timed out after {timeout_seconds}s")))??;
     Ok(summarize_duckduckgo_value(&value))
 }
 

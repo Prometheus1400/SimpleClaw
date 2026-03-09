@@ -16,14 +16,14 @@ use crate::tools::Tool;
 
 pub(crate) fn builtin_tools() -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(memory::MemoryTool::SemanticQuery),
+        Box::new(memory::MemoryTool::default()),
         Box::new(memorize::MemorizeTool::LongTermStore),
         Box::new(forget::ForgetTool::LongTermSemanticPrune),
-        Box::new(summon::SummonTool::Handoff),
-        Box::new(task::TaskTool::Worker),
-        Box::new(web_search::WebSearchTool::DuckDuckGo),
+        Box::new(summon::SummonTool::default()),
+        Box::new(task::TaskTool::default()),
+        Box::new(web_search::WebSearchTool::default()),
         Box::new(clock::ClockTool::UtcNow),
-        Box::new(web_fetch::WebFetchTool::HttpFetch),
+        Box::new(web_fetch::WebFetchTool::default()),
         Box::new(read::ReadTool::default()),
         Box::new(edit::EditTool::default()),
         Box::new(exec::ExecTool::default()),

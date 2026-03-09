@@ -6,7 +6,8 @@ use super::agents::AgentsConfig;
 use super::defaults::default_agent_id;
 use super::gateway::GatewayConfig;
 use super::providers::ProvidersConfig;
-use super::routing::{InboundConfig, InboundPolicyConfig};
+use super::routing::{InboundPolicyConfig, RoutingConfig};
+use super::tools::ToolsConfig;
 
 pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), FrameworkError> {
     if agents.list.is_empty() {
@@ -33,6 +34,7 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
                 agent.id
             )));
         }
+        validate_tools_config(&agent.id, &agent.config.tools)?;
     }
 
     if !ids.contains(&agents.default) {
@@ -45,9 +47,73 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
     Ok(())
 }
 
-pub(super) fn validate_providers_config(
-    providers: &ProvidersConfig,
+fn validate_tools_config(agent_id: &str, tools: &ToolsConfig) -> Result<(), FrameworkError> {
+    if let Some(memory) = &tools.memory {
+        validate_optional_nonzero_u32(
+            agent_id,
+            "tools.memory.default_top_k",
+            memory.default_top_k,
+        )?;
+        validate_optional_nonzero_u32(agent_id, "tools.memory.max_top_k", memory.max_top_k)?;
+    }
+    if let Some(web_search) = &tools.web_search {
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.web_search.timeout_seconds",
+            web_search.timeout_seconds,
+        )?;
+    }
+    if let Some(web_fetch) = &tools.web_fetch {
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.web_fetch.timeout_seconds",
+            web_fetch.timeout_seconds,
+        )?;
+        validate_optional_nonzero_u32(agent_id, "tools.web_fetch.max_chars", web_fetch.max_chars)?;
+    }
+    if let Some(read) = &tools.read {
+        validate_optional_nonzero_u64(agent_id, "tools.read.timeout_seconds", read.timeout_seconds)?;
+    }
+    if let Some(edit) = &tools.edit {
+        validate_optional_nonzero_u64(agent_id, "tools.edit.timeout_seconds", edit.timeout_seconds)?;
+    }
+    if let Some(exec) = &tools.exec {
+        validate_optional_nonzero_u64(agent_id, "tools.exec.timeout_seconds", exec.timeout_seconds)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_nonzero_u32(
+    agent_id: &str,
+    field: &str,
+    value: Option<u32>,
 ) -> Result<(), FrameworkError> {
+    if let Some(value) = value
+        && value == 0
+    {
+        return Err(FrameworkError::Config(format!(
+            "agents.list[{agent_id}].config.{field} must be > 0 when provided"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_nonzero_u64(
+    agent_id: &str,
+    field: &str,
+    value: Option<u64>,
+) -> Result<(), FrameworkError> {
+    if let Some(value) = value
+        && value == 0
+    {
+        return Err(FrameworkError::Config(format!(
+            "agents.list[{agent_id}].config.{field} must be > 0 when provided"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_providers_config(providers: &ProvidersConfig) -> Result<(), FrameworkError> {
     if providers.entries.is_empty() {
         return Err(FrameworkError::Config(
             "providers.entries must include at least one provider".to_owned(),
@@ -62,17 +128,14 @@ pub(super) fn validate_providers_config(
     Ok(())
 }
 
-pub(super) fn reconcile_inbound_default_agent(
-    inbound: &mut InboundConfig,
-    agents: &AgentsConfig,
-) {
-    let Some(current_agent_raw) = inbound.defaults.agent.as_deref() else {
-        inbound.defaults.agent = Some(agents.default.clone());
+pub(super) fn reconcile_routing_default_agent(routing: &mut RoutingConfig, agents: &AgentsConfig) {
+    let Some(current_agent_raw) = routing.defaults.agent.as_deref() else {
+        routing.defaults.agent = Some(agents.default.clone());
         return;
     };
     let current_agent = current_agent_raw.trim();
     if current_agent.is_empty() {
-        inbound.defaults.agent = Some(agents.default.clone());
+        routing.defaults.agent = Some(agents.default.clone());
         return;
     }
 
@@ -85,30 +148,22 @@ pub(super) fn reconcile_inbound_default_agent(
         return;
     }
     if agents.list.iter().any(|agent| agent.id == agents.default) {
-        inbound.defaults.agent = Some(agents.default.clone());
+        routing.defaults.agent = Some(agents.default.clone());
     }
 }
 
 pub(super) fn validate_gateway_config(gateway: &GatewayConfig) -> Result<(), FrameworkError> {
-    if gateway.channels.is_empty() {
+    let has_enabled = gateway.channels.values().any(|ch| ch.enabled);
+    if gateway.channels.is_empty() || !has_enabled {
         return Err(FrameworkError::Config(
-            "gateway.channels must include at least one channel".to_owned(),
+            "gateway.channels must include at least one enabled channel".to_owned(),
         ));
-    }
-    let mut seen = HashSet::new();
-    for channel in &gateway.channels {
-        if !seen.insert(*channel) {
-            return Err(FrameworkError::Config(format!(
-                "gateway.channels contains duplicate entry: {}",
-                channel.as_str()
-            )));
-        }
     }
     Ok(())
 }
 
-pub(super) fn validate_inbound_config(inbound: &InboundConfig) -> Result<(), FrameworkError> {
-    if inbound
+pub(super) fn validate_routing_config(routing: &RoutingConfig) -> Result<(), FrameworkError> {
+    if routing
         .defaults
         .agent
         .as_deref()
@@ -117,31 +172,31 @@ pub(super) fn validate_inbound_config(inbound: &InboundConfig) -> Result<(), Fra
         .unwrap_or(true)
     {
         return Err(FrameworkError::Config(
-            "inbound.defaults.agent is required and must be non-empty".to_owned(),
+            "gateway.routing.defaults.agent is required and must be non-empty".to_owned(),
         ));
     }
-    validate_optional_policy_agent("inbound.defaults", &inbound.defaults)?;
-    for (kind, channel) in &inbound.channels {
+    validate_optional_policy_agent("gateway.routing.defaults", &routing.defaults)?;
+    for (kind, channel) in &routing.channels {
         validate_optional_policy_agent(
-            &format!("inbound.channels.{}", kind.as_str()),
-            &channel.policy,
+            &format!("gateway.routing.channels.{}.defaults", kind.as_str()),
+            &channel.defaults,
         )?;
         validate_optional_policy_agent(
-            &format!("inbound.channels.{}.dm", kind.as_str()),
+            &format!("gateway.routing.channels.{}.dm", kind.as_str()),
             &channel.dm,
         )?;
         for (workspace_id, workspace) in &channel.workspaces {
             validate_optional_policy_agent(
                 &format!(
-                    "inbound.channels.{}.workspaces.{workspace_id}",
+                    "gateway.routing.channels.{}.workspaces.{workspace_id}.defaults",
                     kind.as_str()
                 ),
-                &workspace.policy,
+                &workspace.defaults,
             )?;
             for (channel_id, policy) in &workspace.channels {
                 validate_optional_policy_agent(
                     &format!(
-                        "inbound.channels.{}.workspaces.{workspace_id}.channels.{channel_id}",
+                        "gateway.routing.channels.{}.workspaces.{workspace_id}.channels.{channel_id}",
                         kind.as_str()
                     ),
                     policy,

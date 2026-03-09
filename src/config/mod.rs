@@ -605,6 +605,80 @@ skills:
     }
 
     #[test]
+    fn validate_agents_config_rejects_zero_tool_timeout() {
+        let agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+                config: AgentInnerConfig {
+                    tools: ToolsConfig {
+                        web_search: Some(WebSearchToolConfig {
+                            enabled: true,
+                            timeout_seconds: Some(0),
+                        }),
+                        ..ToolsConfig::default()
+                    },
+                    ..AgentInnerConfig::default()
+                },
+            }],
+        };
+        let result = validate_agents_config(&agents);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_agents_config_rejects_zero_memory_top_k() {
+        let agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+                config: AgentInnerConfig {
+                    tools: ToolsConfig {
+                        memory: Some(MemoryToolConfig {
+                            enabled: true,
+                            default_top_k: Some(0),
+                            max_top_k: None,
+                        }),
+                        ..ToolsConfig::default()
+                    },
+                    ..AgentInnerConfig::default()
+                },
+            }],
+        };
+        let result = validate_agents_config(&agents);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_agents_config_rejects_zero_web_fetch_max_chars() {
+        let agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+                config: AgentInnerConfig {
+                    tools: ToolsConfig {
+                        web_fetch: Some(WebFetchToolConfig {
+                            enabled: true,
+                            timeout_seconds: Some(10),
+                            max_chars: Some(0),
+                        }),
+                        ..ToolsConfig::default()
+                    },
+                    ..AgentInnerConfig::default()
+                },
+            }],
+        };
+        let result = validate_agents_config(&agents);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn agent_config_rejects_legacy_name_field() {
         let yaml = r#"
 name: legacy

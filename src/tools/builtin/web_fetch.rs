@@ -2,15 +2,20 @@ use async_trait::async_trait;
 use reqwest::Client;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
 use scraper::{Html, Selector};
+use tokio::time::{Duration, timeout};
 
+use crate::config::WebFetchToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::{Tool, ToolExecEnv};
 
 use super::common::parse_simple_text_arg;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebFetchTool {
-    HttpFetch,
+const DEFAULT_WEB_FETCH_TIMEOUT_SECONDS: u64 = 20;
+const DEFAULT_WEB_FETCH_MAX_CHARS: usize = 8_000;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebFetchTool {
+    config: WebFetchToolConfig,
 }
 
 #[async_trait]
@@ -27,6 +32,13 @@ impl Tool for WebFetchTool {
         "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}"
     }
 
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config).map_err(|e| {
+            FrameworkError::Config(format!("tools.web_fetch config is invalid: {e}"))
+        })?;
+        Ok(())
+    }
+
     async fn execute(
         &self,
         _ctx: &ToolExecEnv,
@@ -34,11 +46,24 @@ impl Tool for WebFetchTool {
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
         let url = parse_simple_text_arg(args_json);
-        fetch_url_markdown(&url).await
+        let timeout_seconds = self
+            .config
+            .timeout_seconds
+            .unwrap_or(DEFAULT_WEB_FETCH_TIMEOUT_SECONDS);
+        let max_chars = self
+            .config
+            .max_chars
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_WEB_FETCH_MAX_CHARS);
+        fetch_url_markdown(&url, timeout_seconds, max_chars).await
     }
 }
 
-async fn fetch_url_markdown(url: &str) -> Result<String, FrameworkError> {
+async fn fetch_url_markdown(
+    url: &str,
+    timeout_seconds: u64,
+    max_chars: usize,
+) -> Result<String, FrameworkError> {
     let url = url.trim();
     if url.is_empty() {
         return Err(FrameworkError::Tool(
@@ -65,10 +90,9 @@ async fn fetch_url_markdown(url: &str) -> Result<String, FrameworkError> {
         .build()
         .map_err(|e| FrameworkError::Tool(format!("fetch client build failed: {e}")))?;
 
-    let response = client
-        .get(url)
-        .send()
+    let response = timeout(Duration::from_secs(timeout_seconds), client.get(url).send())
         .await
+        .map_err(|_| FrameworkError::Tool(format!("fetch timed out after {timeout_seconds}s")))?
         .map_err(|e| FrameworkError::Tool(format!("fetch request failed: {e}")))?;
 
     let status = response.status();
@@ -79,9 +103,9 @@ async fn fetch_url_markdown(url: &str) -> Result<String, FrameworkError> {
         )));
     }
 
-    let body = response
-        .text()
+    let body = timeout(Duration::from_secs(timeout_seconds), response.text())
         .await
+        .map_err(|_| FrameworkError::Tool(format!("fetch timed out after {timeout_seconds}s")))?
         .map_err(|e| FrameworkError::Tool(format!("fetch body read failed: {e}")))?;
 
     if body.contains("<html") || body.contains("<body") {
@@ -96,9 +120,9 @@ async fn fetch_url_markdown(url: &str) -> Result<String, FrameworkError> {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let clipped = text.chars().take(8_000).collect::<String>();
+        let clipped = text.chars().take(max_chars).collect::<String>();
         return Ok(clipped);
     }
 
-    Ok(body.chars().take(8_000).collect())
+    Ok(body.chars().take(max_chars).collect())
 }

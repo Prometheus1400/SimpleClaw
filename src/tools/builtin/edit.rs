@@ -9,7 +9,7 @@ use crate::error::FrameworkError;
 use crate::tools::sandbox::run_wasm_guest;
 use crate::tools::{Tool, ToolExecEnv};
 
-use super::read::resolve_path_for_read;
+use super::read::{path_within_workspace, resolve_path_for_read};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditTool {
@@ -42,7 +42,17 @@ impl Tool for EditTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
-        if self.config.sandbox.enabled {
+        let args: EditArgs = serde_json::from_str(args_json)
+            .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
+
+        let path = resolve_path_for_read(
+            &args.path,
+            &ctx.workspace_root,
+            self.config.sandbox.enabled,
+            &self.config.sandbox.extra_writable_paths,
+        )?;
+
+        if self.config.sandbox.enabled && path_within_workspace(&path, &ctx.workspace_root)? {
             let output = run_wasm_guest(
                 &ctx.workspace_root,
                 "edit_tool.wasm",
@@ -61,14 +71,6 @@ impl Tool for EditTool {
             return Ok(output.stdout);
         }
 
-        let args: EditArgs = serde_json::from_str(args_json)
-            .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
-
-        let path = resolve_path_for_read(
-            &args.path,
-            &ctx.workspace_root,
-            self.config.sandbox.enabled,
-        )?;
         apply_edit_command_at_path(&args, &path).map_err(|e| FrameworkError::Tool(e.to_string()))
     }
 }
@@ -205,6 +207,7 @@ mod tests {
             outside.join("secrets.txt").to_string_lossy().as_ref(),
             &workspace,
             true,
+            &[],
         )
         .expect_err("outside path should be denied");
         assert!(err.to_string().contains("path denied by sandbox"));

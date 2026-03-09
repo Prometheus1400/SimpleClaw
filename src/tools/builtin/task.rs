@@ -1,13 +1,14 @@
 use async_trait::async_trait;
 
+use crate::config::TaskToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::{Tool, ToolExecEnv, ToolRunOutput, WorkerInvokeRequest};
 
 use super::common::parse_task_args;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskTool {
-    Worker,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskTool {
+    config: TaskToolConfig,
 }
 
 #[async_trait]
@@ -22,6 +23,12 @@ impl Tool for TaskTool {
 
     fn input_schema_json(&self) -> &'static str {
         "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"}},\"required\":[\"prompt\"]}"
+    }
+
+    fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
+        self.config = serde_json::from_value(config)
+            .map_err(|e| FrameworkError::Config(format!("tools.task config is invalid: {e}")))?;
+        Ok(())
     }
 
     async fn execute(
@@ -49,6 +56,7 @@ impl Tool for TaskTool {
                 session_id: session_id.to_owned(),
                 user_id: ctx.user_id.clone(),
                 prompt,
+                max_steps_override: self.config.worker_max_steps,
             })
             .await?;
         Ok(ToolRunOutput {

@@ -40,6 +40,7 @@ pub struct WorkerInvokeRequest {
     pub session_id: String,
     pub user_id: String,
     pub prompt: String,
+    pub max_steps_override: Option<u32>,
 }
 
 #[async_trait]
