@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::FrameworkError;
 use crate::paths::AppPaths;
 use crate::secrets::SecretResolver;
+use crate::secrets::parse_secret_reference;
 
 // ── Re-exports (preserves all consumer imports) ─────────────────────────────
 
@@ -35,7 +36,8 @@ pub use routing::RoutingConfig;
 pub use tools::{
     ClockToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig, MemorizeToolConfig,
     MemoryToolConfig, ProcessToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
-    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchToolConfig,
+    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchProvider,
+    WebSearchToolConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -117,8 +119,31 @@ impl GlobalConfig {
         for (kind, channel) in &mut self.gateway.channels {
             resolve_channel_secrets(kind, channel, &resolver)?;
         }
+        for agent in &mut self.agents.list {
+            resolve_agent_tool_secrets(agent, &resolver)?;
+        }
         Ok(())
     }
+}
+
+fn resolve_agent_tool_secrets(
+    agent: &mut AgentEntryConfig,
+    resolver: &SecretResolver,
+) -> Result<(), FrameworkError> {
+    let Some(web_search) = agent.config.tools.web_search.as_mut() else {
+        return Ok(());
+    };
+    let Some(raw) = web_search.api_key.as_deref() else {
+        return Ok(());
+    };
+
+    let field_path = format!("agents.list[{}].config.tools.web_search.api_key", agent.id);
+    let secret_name = parse_secret_reference(&field_path, raw)?;
+    let value = resolver
+        .resolve(&secret_name)
+        .map_err(|err| FrameworkError::Config(format!("{field_path} failed to resolve: {err}")))?;
+    web_search.api_key = Some(value);
+    Ok(())
 }
 
 fn resolve_channel_secrets(
@@ -126,7 +151,6 @@ fn resolve_channel_secrets(
     channel: &mut gateway::ChannelConfig,
     resolver: &SecretResolver,
 ) -> Result<(), FrameworkError> {
-    use crate::secrets::parse_secret_reference;
     let Some(raw) = channel.token.as_deref() else {
         return Ok(());
     };
@@ -617,7 +641,63 @@ skills:
                         web_search: Some(WebSearchToolConfig {
                             enabled: true,
                             owner_restricted: true,
+                            provider: WebSearchProvider::Duckduckgo,
+                            api_key: None,
                             timeout_seconds: Some(0),
+                        }),
+                        ..ToolsConfig::default()
+                    },
+                    ..AgentInnerConfig::default()
+                },
+            }],
+        };
+        let result = validate_agents_config(&agents);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_agents_config_rejects_brave_without_api_key_when_enabled() {
+        let agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+                config: AgentInnerConfig {
+                    tools: ToolsConfig {
+                        web_search: Some(WebSearchToolConfig {
+                            enabled: true,
+                            owner_restricted: true,
+                            provider: WebSearchProvider::Brave,
+                            api_key: None,
+                            timeout_seconds: Some(10),
+                        }),
+                        ..ToolsConfig::default()
+                    },
+                    ..AgentInnerConfig::default()
+                },
+            }],
+        };
+        let result = validate_agents_config(&agents);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_agents_config_rejects_duckduckgo_with_api_key() {
+        let agents = AgentsConfig {
+            default: "default".to_owned(),
+            list: vec![AgentEntryConfig {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                workspace: PathBuf::from("./workspace"),
+                config: AgentInnerConfig {
+                    tools: ToolsConfig {
+                        web_search: Some(WebSearchToolConfig {
+                            enabled: true,
+                            owner_restricted: true,
+                            provider: WebSearchProvider::Duckduckgo,
+                            api_key: Some("resolved-key".to_owned()),
+                            timeout_seconds: Some(10),
                         }),
                         ..ToolsConfig::default()
                     },
@@ -704,9 +784,11 @@ routing:
     fn global_config_resolves_required_secret_references() {
         let provider_env = "SIMPLECLAW_TEST_PROVIDER_SECRET";
         let discord_env = "SIMPLECLAW_TEST_DISCORD_SECRET";
+        let web_search_env = "SIMPLECLAW_TEST_WEB_SEARCH_SECRET";
         unsafe {
             std::env::set_var(provider_env, "provider-secret");
             std::env::set_var(discord_env, "discord-secret");
+            std::env::set_var(web_search_env, "web-search-secret");
         }
 
         let dir = unique_test_dir("resolve_refs");
@@ -726,6 +808,13 @@ routing:
         {
             provider.api_key = Some(format!("${{secret:{provider_env}}}"));
         }
+        global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
+            enabled: true,
+            owner_restricted: true,
+            provider: WebSearchProvider::Brave,
+            api_key: Some(format!("${{secret:{web_search_env}}}")),
+            timeout_seconds: Some(20),
+        });
 
         global
             .resolve_secrets(&paths)
@@ -741,10 +830,20 @@ routing:
             .get(&GatewayChannelKind::Discord)
             .expect("discord channel config should exist");
         assert_eq!(channel.token.as_deref(), Some("discord-secret"));
+        assert_eq!(
+            global.agents.list[0]
+                .config
+                .tools
+                .web_search
+                .as_ref()
+                .and_then(|cfg| cfg.api_key.as_deref()),
+            Some("web-search-secret")
+        );
 
         unsafe {
             std::env::remove_var(provider_env);
             std::env::remove_var(discord_env);
+            std::env::remove_var(web_search_env);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -768,12 +867,47 @@ routing:
         {
             provider.api_key = Some("plaintext-key".to_owned());
         }
+        global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
+            enabled: true,
+            owner_restricted: true,
+            provider: WebSearchProvider::Brave,
+            api_key: Some("plaintext-key".to_owned()),
+            timeout_seconds: Some(20),
+        });
 
         let err = global.resolve_secrets(&paths).unwrap_err();
         assert!(
             err.to_string()
                 .contains("providers.entries.default.api_key must use secret reference syntax")
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn global_config_rejects_plaintext_web_search_api_key() {
+        let dir = unique_test_dir("reject_plaintext_web_search");
+        fs::create_dir_all(&dir).expect("should create test dir");
+        let paths = test_paths(dir.clone());
+
+        let mut global = GlobalConfig::default();
+        if let Some(ProviderEntryConfig::Gemini(provider)) =
+            global.providers.entries.get_mut(&global.providers.default)
+        {
+            provider.api_key = None;
+        }
+        global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
+            enabled: true,
+            owner_restricted: true,
+            provider: WebSearchProvider::Brave,
+            api_key: Some("plaintext-key".to_owned()),
+            timeout_seconds: Some(20),
+        });
+
+        let err = global.resolve_secrets(&paths).unwrap_err();
+        assert!(err.to_string().contains(
+            "agents.list[default].config.tools.web_search.api_key must use secret reference syntax"
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }

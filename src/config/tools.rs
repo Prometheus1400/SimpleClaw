@@ -269,6 +269,10 @@ pub struct WebSearchToolConfig {
     pub enabled: bool,
     #[serde(default = "default_owner_restricted")]
     pub owner_restricted: bool,
+    #[serde(default)]
+    pub provider: WebSearchProvider,
+    #[serde(default)]
+    pub api_key: Option<String>,
     pub timeout_seconds: Option<u64>,
 }
 
@@ -277,9 +281,19 @@ impl Default for WebSearchToolConfig {
         Self {
             enabled: default_enabled(),
             owner_restricted: default_owner_restricted(),
+            provider: WebSearchProvider::default(),
+            api_key: None,
             timeout_seconds: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchProvider {
+    Brave,
+    #[default]
+    Duckduckgo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

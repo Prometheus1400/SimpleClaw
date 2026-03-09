@@ -8,6 +8,7 @@ use super::gateway::GatewayConfig;
 use super::providers::ProvidersConfig;
 use super::routing::{InboundPolicyConfig, RoutingConfig};
 use super::tools::ToolsConfig;
+use super::tools::WebSearchProvider;
 
 pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), FrameworkError> {
     if agents.list.is_empty() {
@@ -62,6 +63,29 @@ fn validate_tools_config(agent_id: &str, tools: &ToolsConfig) -> Result<(), Fram
             "tools.web_search.timeout_seconds",
             web_search.timeout_seconds,
         )?;
+        match web_search.provider {
+            WebSearchProvider::Brave => {
+                if web_search.enabled
+                    && web_search
+                        .api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .map(str::is_empty)
+                        .unwrap_or(true)
+                {
+                    return Err(FrameworkError::Config(format!(
+                        "agents.list[{agent_id}].config.tools.web_search.api_key is required when tools.web_search.provider=brave and enabled=true"
+                    )));
+                }
+            }
+            WebSearchProvider::Duckduckgo => {
+                if web_search.api_key.is_some() {
+                    return Err(FrameworkError::Config(format!(
+                        "agents.list[{agent_id}].config.tools.web_search.api_key is not allowed when tools.web_search.provider=duckduckgo"
+                    )));
+                }
+            }
+        }
     }
     if let Some(web_fetch) = &tools.web_fetch {
         validate_optional_nonzero_u64(
