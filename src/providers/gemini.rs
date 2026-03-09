@@ -45,6 +45,8 @@ impl GeminiProvider {
     }
 }
 
+const ERROR_BODY_PREVIEW_CHARS: usize = 1_000;
+
 fn build_gemini_contents(history: &[Message]) -> Vec<Value> {
     history
         .iter()
@@ -104,6 +106,41 @@ fn build_gemini_contents(history: &[Message]) -> Vec<Value> {
         .collect()
 }
 
+fn preview_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn summarize_gemini_error_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "empty response body".to_owned();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed)
+        && let Some(error_obj) = value.get("error").and_then(Value::as_object)
+    {
+        let status = error_obj.get("status").and_then(Value::as_str).unwrap_or("");
+        let message = error_obj
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        let mut parts = Vec::new();
+        if !status.is_empty() {
+            parts.push(status.to_owned());
+        }
+        if !message.is_empty() {
+            parts.push(message.to_owned());
+        }
+
+        if !parts.is_empty() {
+            return parts.join(": ");
+        }
+    }
+
+    preview_text(trimmed, ERROR_BODY_PREVIEW_CHARS)
+}
+
 #[async_trait]
 impl Provider for GeminiProvider {
     #[tracing::instrument(name = "provider.generate", skip(self, system_prompt, history, tools))]
@@ -143,7 +180,7 @@ impl Provider for GeminiProvider {
         });
         debug!(status = "started", "provider request");
 
-        let response_value = self
+        let response = self
             .client
             .post(url)
             .query(&[("key", api_key)])
@@ -159,18 +196,30 @@ impl Provider for GeminiProvider {
                     "provider request"
                 );
                 FrameworkError::Provider(format!("gemini request failed: {e}"))
-            })?
-            .error_for_status()
-            .map_err(|e| {
-                error!(
-                    status = "failed",
-                    error_kind = "http_status",
-                    elapsed_ms = request_started.elapsed().as_millis() as u64,
-                    error = %e,
-                    "provider request"
-                );
-                FrameworkError::Provider(format!("gemini returned error: {e}"))
-            })?
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            let error_summary = summarize_gemini_error_body(&error_body);
+            let error_body_preview = preview_text(&error_body, ERROR_BODY_PREVIEW_CHARS);
+
+            error!(
+                status = "failed",
+                error_kind = "http_status",
+                http_status = %status,
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                response_error = %error_summary,
+                response_body = %error_body_preview,
+                "provider request"
+            );
+            return Err(FrameworkError::Provider(format!(
+                "gemini returned {}: {}",
+                status, error_summary
+            )));
+        }
+
+        let response_value = response
             .json::<Value>()
             .await
             .map_err(|e| {
@@ -250,7 +299,7 @@ impl Provider for GeminiProvider {
 mod tests {
     use serde_json::json;
 
-    use super::build_gemini_contents;
+    use super::{build_gemini_contents, preview_text, summarize_gemini_error_body};
     use crate::providers::{Message, Role, ToolCall, ToolResult};
 
     #[test]
@@ -299,5 +348,28 @@ mod tests {
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn summarizes_json_error_body() {
+        let body = r#"{"error":{"code":400,"message":"Request contains an invalid argument.","status":"INVALID_ARGUMENT"}}"#;
+
+        assert_eq!(
+            summarize_gemini_error_body(body),
+            "INVALID_ARGUMENT: Request contains an invalid argument."
+        );
+    }
+
+    #[test]
+    fn summarizes_plain_text_error_body() {
+        assert_eq!(
+            summarize_gemini_error_body("bad request"),
+            "bad request".to_owned()
+        );
+    }
+
+    #[test]
+    fn preview_text_truncates_by_character_count() {
+        assert_eq!(preview_text("abcdef", 4), "abcd");
     }
 }
