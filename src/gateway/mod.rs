@@ -139,6 +139,14 @@ impl Gateway {
         Ok(channel.supports_message_editing())
     }
 
+    pub fn message_char_limit(
+        &self,
+        inbound: &InboundMessage,
+    ) -> Result<Option<usize>, FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        Ok(channel.message_char_limit())
+    }
+
     pub fn output_mode(&self, inbound: &InboundMessage) -> ChannelOutputMode {
         self.output_modes
             .get(&inbound.source_channel)
@@ -257,5 +265,72 @@ mod tests {
         assert_eq!(next.source_channel, GatewayChannelKind::Discord);
         assert_eq!(next.session_key, "agent:default:discord:123");
         assert_eq!(next.source_message_id.as_deref(), Some("321"));
+    }
+
+    #[tokio::test]
+    async fn gateway_exposes_channel_message_limit() {
+        let inbound = ChannelInbound {
+            message_id: "321".to_owned(),
+            channel_id: "123".to_owned(),
+            guild_id: Some("10".to_owned()),
+            is_dm: false,
+            user_id: "7".to_owned(),
+            username: "kaleb".to_owned(),
+            mentioned_bot: false,
+            content: "hello".to_owned(),
+        };
+        struct LimitedChannel;
+
+        #[async_trait]
+        impl Channel for LimitedChannel {
+            fn message_char_limit(&self) -> Option<usize> {
+                Some(2_000)
+            }
+
+            async fn send_message(
+                &self,
+                _channel_id: &str,
+                _content: &str,
+            ) -> Result<(), FrameworkError> {
+                Ok(())
+            }
+
+            async fn add_reaction(
+                &self,
+                _channel_id: &str,
+                _message_id: &str,
+                _emoji: &str,
+            ) -> Result<(), FrameworkError> {
+                Ok(())
+            }
+
+            async fn broadcast_typing(&self, _channel_id: &str) -> Result<(), FrameworkError> {
+                Ok(())
+            }
+
+            async fn listen(&self) -> Result<ChannelInbound, FrameworkError> {
+                pending::<Result<ChannelInbound, FrameworkError>>().await
+            }
+        }
+
+        let mut channels = HashMap::new();
+        channels.insert(
+            GatewayChannelKind::Discord,
+            Arc::new(LimitedChannel) as Arc<dyn Channel>,
+        );
+        let gateway = Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        );
+        let _listeners = gateway.start(mpsc::channel(1).0);
+        let routed = crate::gateway::router::route_inbound(
+            GatewayChannelKind::Discord,
+            inbound,
+            &RoutingConfig::default(),
+        )
+        .expect("inbound should route");
+
+        assert_eq!(gateway.message_char_limit(&routed).unwrap(), Some(2_000));
     }
 }

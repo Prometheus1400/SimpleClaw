@@ -117,6 +117,10 @@ impl Channel for DiscordChannel {
         true
     }
 
+    fn message_char_limit(&self) -> Option<usize> {
+        Some(2_000)
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
         tracing::debug!(status = "sending", "discord send");
