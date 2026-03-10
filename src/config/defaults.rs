@@ -36,6 +36,10 @@ pub(super) fn default_provider_api_base() -> String {
     "https://generativelanguage.googleapis.com/v1beta".to_owned()
 }
 
+pub(super) fn default_openai_codex_model() -> String {
+    "gpt-5.3-codex".to_owned()
+}
+
 pub(super) fn default_oauth_redirect_host() -> String {
     "127.0.0.1".to_owned()
 }

@@ -1,0 +1,66 @@
+providers:
+  default: default
+  entries:
+    default:
+      kind: gemini
+      model: gemini-2.5-flash
+      api_base: https://generativelanguage.googleapis.com/v1beta
+      api_key: "${secret:GEMINI_API_KEY}"  
+
+runtime:
+  owner_ids:
+    - "758379333189894225"
+  log_level: debug
+  max_steps: 8
+  history_messages: 10
+  summon_mode: synchronous
+  safe_error_reply: This Aviar has encountered an error!
+  memory_preinject:
+    enabled: true
+    top_k: 3
+    min_score: 0.45
+    long_term_weight: 0.65
+    max_chars: 1200
+
+agents:
+  default: rokke
+  list:
+    - id: rokke
+      name: Rokke
+      workspace: /Users/RyanWeisman/.simpleclaw/workspaces/rokke
+      model: gemini-2.5-flash
+      sandbox:
+        enabled: true
+        filesystem:
+          extra_writable_paths: []
+        network:
+          mode: enabled
+      tools:
+        enabled_tools: [memory, memorize, summon, web_search, web_fetch, clock, read, exec, process, edit, task]
+      skills:
+        enabled_skills: [test_skill, global_test_skill]
+
+discord:
+  token: "${secret:DISCORD_TOKEN}"
+
+inbound:
+  defaults:
+    require_mentions: true
+    agent: rokke
+  channels:
+    discord:
+      dm:
+        allow_from: "758379333189894225"
+      workspaces:
+        "1474628098191523882":
+          allow_from:
+            - "468849413222039563"
+            - "758379333189894225"
+
+embedding:
+  model: all-MiniLM-L6-v2
+
+database:
+  pool_size: 16
+  busy_timeout_ms: 5000
+

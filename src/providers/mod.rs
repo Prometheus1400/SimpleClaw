@@ -1,5 +1,6 @@
 mod gemini;
 mod moonshot_compatible;
+mod openai_codex;
 mod registry;
 mod types;
 

@@ -31,7 +31,7 @@ pub use execution::{AgentExecutionOverrides, MemoryRecallOverrides};
 pub use execution::{ExecutionConfig, LogLevel, MemoryRecallConfig, TransparencyConfig};
 pub use gateway::{ChannelConfig, ChannelOutputMode, GatewayChannelKind, GatewayConfig};
 pub use providers::{
-    GeminiProviderConfig, MoonshotProviderConfig, OAuthProviderConfig, ProviderAuthMode,
+    GeminiProviderConfig, MoonshotProviderConfig, OpenAiCodexProviderConfig, ProviderAuthMode,
     ProviderEntryConfig, ProviderKind, ProvidersConfig,
 };
 #[allow(unused_imports)]

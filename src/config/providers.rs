@@ -7,8 +7,8 @@ use crate::secrets::{Secret, SecretResolver, parse_secret_reference};
 
 use super::defaults::{
     default_oauth_callback_path, default_oauth_redirect_host, default_oauth_redirect_port,
-    default_oauth_timeout_secs, default_provider_api_base, default_provider_key,
-    default_provider_model,
+    default_oauth_timeout_secs, default_openai_codex_model, default_provider_api_base,
+    default_provider_key, default_provider_model,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +50,8 @@ impl ProvidersConfig {
 pub enum ProviderEntryConfig {
     Gemini(GeminiProviderConfig),
     Moonshot(MoonshotProviderConfig),
+    #[serde(rename = "openai_codex")]
+    OpenAiCodex(OpenAiCodexProviderConfig),
 }
 
 impl ProviderEntryConfig {
@@ -57,6 +59,7 @@ impl ProviderEntryConfig {
         match self {
             Self::Gemini(_) => ProviderKind::Gemini,
             Self::Moonshot(_) => ProviderKind::Moonshot,
+            Self::OpenAiCodex(_) => ProviderKind::OpenAiCodex,
         }
     }
 
@@ -64,6 +67,7 @@ impl ProviderEntryConfig {
         match self {
             Self::Gemini(config) => &config.model,
             Self::Moonshot(config) => &config.model,
+            Self::OpenAiCodex(config) => &config.model,
         }
     }
 
@@ -71,6 +75,7 @@ impl ProviderEntryConfig {
         match self {
             Self::Gemini(config) => config.validate(key),
             Self::Moonshot(config) => config.validate(key),
+            Self::OpenAiCodex(config) => config.validate(key),
         }
     }
 
@@ -82,6 +87,7 @@ impl ProviderEntryConfig {
         match self {
             Self::Gemini(config) => config.resolve_secrets(resolver, key),
             Self::Moonshot(config) => config.resolve_secrets(resolver, key),
+            Self::OpenAiCodex(config) => config.resolve_secrets(resolver, key),
         }
     }
 }
@@ -248,6 +254,41 @@ impl MoonshotProviderConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenAiCodexProviderConfig {
+    #[serde(default = "default_openai_codex_model")]
+    pub model: String,
+}
+
+impl Default for OpenAiCodexProviderConfig {
+    fn default() -> Self {
+        Self {
+            model: default_openai_codex_model(),
+        }
+    }
+}
+
+impl OpenAiCodexProviderConfig {
+    fn validate(&self, key: &str) -> Result<(), FrameworkError> {
+        let prefix = format!("providers.entries.{key}");
+        if self.model.trim().is_empty() {
+            return Err(FrameworkError::Config(format!(
+                "{prefix}.model must be non-empty"
+            )));
+        }
+        Ok(())
+    }
+
+    fn resolve_secrets(
+        &mut self,
+        _resolver: &SecretResolver,
+        _key: &str,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
 fn validate_moonshot_provider(
     mode: ProviderAuthMode,
     model: &str,
@@ -311,6 +352,8 @@ pub enum ProviderKind {
     #[default]
     Gemini,
     Moonshot,
+    #[serde(rename = "openai_codex")]
+    OpenAiCodex,
 }
 
 impl ProviderKind {
@@ -318,6 +361,7 @@ impl ProviderKind {
         match self {
             Self::Gemini => "gemini",
             Self::Moonshot => "moonshot",
+            Self::OpenAiCodex => "openai_codex",
         }
     }
 }

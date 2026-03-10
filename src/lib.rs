@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 
 mod agent;
+mod auth;
 mod channels;
 mod cli;
 mod config;
@@ -30,7 +31,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::{Directive, LevelFilter};
 use tracing_subscriber::prelude::*;
 
-use crate::cli::{AgentAction, Cli, Command, ListAction, SystemAction};
+use crate::cli::{AgentAction, AuthAction, AuthProvider, Cli, Command, ListAction, SystemAction};
 use crate::config::{GlobalConfig, LogLevel};
 use crate::paths::AppPaths;
 use crate::providers::ProviderRegistry;
@@ -65,6 +66,7 @@ pub async fn run() -> color_eyre::Result<()> {
         Some(Command::Models {
             action: ListAction::List,
         }) => list_models(&cli)?,
+        Some(Command::Auth { action }) => run_auth_action(action).await?,
         Some(Command::Agent {
             action:
                 AgentAction::Memory {
@@ -75,6 +77,74 @@ pub async fn run() -> color_eyre::Result<()> {
         }) => run::show_agent_memory(&cli, agent, *memory, *limit).await?,
         None => run::run_service().await?,
     }
+    Ok(())
+}
+
+async fn run_auth_action(action: &AuthAction) -> color_eyre::Result<()> {
+    let service = auth::AuthService::new_default();
+
+    match action {
+        AuthAction::Login { provider, profile } => match provider {
+            AuthProvider::OpenaiCodex => {
+                let profile_name = profile
+                    .as_deref()
+                    .unwrap_or(auth::AuthService::default_profile_name());
+                service.login_openai_codex(profile_name).await?;
+                println!(
+                    "login complete for provider '{}' (profile '{}')",
+                    provider.as_str(),
+                    profile_name
+                );
+            }
+        },
+        AuthAction::Status { provider } => match provider {
+            AuthProvider::OpenaiCodex => {
+                let (active_profile, profiles) = service.status_openai_codex().await?;
+                if profiles.is_empty() {
+                    println!(
+                        "no auth profiles found for provider '{}'",
+                        provider.as_str()
+                    );
+                    return Ok(());
+                }
+                let active = active_profile.as_deref();
+                println!("provider: {}", provider.as_str());
+                for profile in profiles {
+                    let marker = if active == Some(profile.id.as_str()) {
+                        " (active)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "- {}{} | account_id={} | expires_at={}",
+                        profile.profile_name,
+                        marker,
+                        profile.account_id.as_deref().unwrap_or("unknown"),
+                        auth::format_expires_at(profile.token_set.expires_at_unix),
+                    );
+                }
+            }
+        },
+        AuthAction::Logout { provider, profile } => match provider {
+            AuthProvider::OpenaiCodex => {
+                let removed = service.logout_openai_codex(profile.as_deref()).await?;
+                if removed {
+                    let profile_name = profile.as_deref().unwrap_or("(active)");
+                    println!(
+                        "logged out provider '{}' profile {}",
+                        provider.as_str(),
+                        profile_name
+                    );
+                } else {
+                    println!(
+                        "no matching profile found for provider '{}'",
+                        provider.as_str()
+                    );
+                }
+            }
+        },
+    }
+
     Ok(())
 }
 
