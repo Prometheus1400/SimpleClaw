@@ -43,6 +43,7 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 rand = "0.8"
 sha2 = "0.10"
+fs2 = "0.4"
 
 [patch.crates-io]
 sandbox-runtime = { path = "third_party/sandbox-runtime-rs" }

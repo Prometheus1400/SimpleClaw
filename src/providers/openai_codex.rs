@@ -50,12 +50,12 @@ pub struct OpenAiCodexProvider {
 }
 
 impl OpenAiCodexProvider {
-    pub fn from_config(config: OpenAiCodexProviderConfig) -> Self {
-        Self {
+    pub fn from_config(config: OpenAiCodexProviderConfig) -> Result<Self, FrameworkError> {
+        Ok(Self {
             model: config.model,
-            auth: AuthService::new_default(),
+            auth: AuthService::new_default()?,
             client: Client::new(),
-        }
+        })
     }
 }
 
@@ -721,14 +721,25 @@ impl OpenAiCodexProvider {
         let access_token = self
             .auth
             .get_valid_openai_access_token(None)
-            .await?
+            .await
+            .map_err(|err| {
+                FrameworkError::Provider(format!(
+                    "openai_codex auth token lookup failed: {err}"
+                ))
+            })?
             .ok_or_else(|| {
                 FrameworkError::Provider(
                     "OpenAI Codex auth profile not found. Run `simpleclaw auth login --provider openai_codex`."
                         .to_owned(),
                 )
             })?;
-        let profile = self.auth.get_profile(OPENAI_CODEX_PROVIDER, None).await?;
+        let profile = self
+            .auth
+            .get_profile(OPENAI_CODEX_PROVIDER, None)
+            .await
+            .map_err(|err| {
+                FrameworkError::Provider(format!("openai_codex auth profile lookup failed: {err}"))
+            })?;
         let account_id = profile
             .and_then(|loaded| loaded.account_id)
             .or_else(|| extract_account_id_from_jwt(&access_token));

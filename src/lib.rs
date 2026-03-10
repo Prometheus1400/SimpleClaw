@@ -81,7 +81,7 @@ pub async fn run() -> color_eyre::Result<()> {
 }
 
 async fn run_auth_action(action: &AuthAction) -> color_eyre::Result<()> {
-    let service = auth::AuthService::new_default();
+    let service = auth::AuthService::new_default()?;
 
     match action {
         AuthAction::Login { provider, profile } => match provider {
