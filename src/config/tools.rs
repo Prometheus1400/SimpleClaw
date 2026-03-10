@@ -103,7 +103,7 @@ impl ToolsConfig {
     }
 
     pub fn config_for_tool(&self, name: &str) -> Option<Value> {
-        let value = match name {
+        let mut value = match name {
             "read" => serde_json::to_value(self.read.clone().unwrap_or_default()).ok()?,
             "edit" => serde_json::to_value(self.edit.clone().unwrap_or_default()).ok()?,
             "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok()?,
@@ -123,6 +123,16 @@ impl ToolsConfig {
             "skills" => serde_json::to_value(self.skills.clone().unwrap_or_default()).ok()?,
             _ => return None,
         };
+        if name == "web_search"
+            && let Some(api_key) = self
+                .web_search
+                .as_ref()
+                .and_then(|cfg| cfg.api_key.as_ref())
+                .and_then(|secret| secret.exposed())
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("api_key".to_owned(), Value::String(api_key.to_owned()));
+        }
         Some(value)
     }
 

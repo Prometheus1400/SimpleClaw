@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
-use crate::config::{WebSearchProvider, WebSearchToolConfig};
+use crate::config::WebSearchProvider;
 use crate::error::FrameworkError;
 use crate::tools::{Tool, ToolExecEnv};
 
@@ -18,7 +18,17 @@ const DUCKDUCKGO_SEARCH_URL: &str = "https://api.duckduckgo.com/";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebSearchTool {
-    config: WebSearchToolConfig,
+    config: WebSearchRuntimeConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+struct WebSearchRuntimeConfig {
+    enabled: bool,
+    owner_restricted: bool,
+    provider: WebSearchProvider,
+    api_key: Option<String>,
+    timeout_seconds: Option<u64>,
 }
 
 #[async_trait]
@@ -66,8 +76,7 @@ impl Tool for WebSearchTool {
                     .config
                     .api_key
                     .as_ref()
-                    .and_then(|secret| secret.exposed())
-                    .map(str::trim)
+                    .map(|value| value.trim())
                     .filter(|value| !value.is_empty())
                     .ok_or_else(|| {
                         FrameworkError::Tool(
@@ -416,9 +425,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BraveWebResult, WebSearchResult, map_brave_results, map_duckduckgo_results,
+        BraveWebResult, WebSearchResult, WebSearchTool, map_brave_results, map_duckduckgo_results,
         parse_duckduckgo_text, push_result,
     };
+    use crate::tools::Tool;
 
     #[test]
     fn map_duckduckgo_prefers_abstract_text() {
@@ -529,5 +539,17 @@ mod tests {
             },
         );
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn configure_accepts_runtime_api_key_string() {
+        let mut tool = WebSearchTool::default();
+        tool.configure(json!({
+            "provider": "brave",
+            "api_key": "resolved-brave-key"
+        }))
+        .expect("runtime config should deserialize");
+
+        assert_eq!(tool.config.api_key.as_deref(), Some("resolved-brave-key"));
     }
 }
