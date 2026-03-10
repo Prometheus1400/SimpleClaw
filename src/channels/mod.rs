@@ -15,6 +15,10 @@ pub trait Channel: Send + Sync {
         false
     }
 
+    fn message_char_limit(&self) -> Option<usize> {
+        None
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError>;
     async fn send_message_with_id(
         &self,
