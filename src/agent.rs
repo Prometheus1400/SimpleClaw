@@ -189,8 +189,10 @@ impl AgentRuntime {
                 return Err(err);
             }
         };
-        outcome.memory_recall_used = prompt_build.memory_recall_hits > 0;
-        outcome.memory_recall_hits = prompt_build.memory_recall_hits;
+        outcome.memory_recall_used =
+            prompt_build.memory_recall_short_hits + prompt_build.memory_recall_long_hits > 0;
+        outcome.memory_recall_short_hits = prompt_build.memory_recall_short_hits;
+        outcome.memory_recall_long_hits = prompt_build.memory_recall_long_hits;
 
         if !is_no_reply(&outcome.reply) {
             memory
@@ -308,46 +310,44 @@ impl AgentRuntime {
 
         debug!(status = "completed", "memory recall");
 
-        let section = format_recalled_memory(&hits, config.max_chars as usize);
-        if section.is_empty() {
+        let recalled = format_recalled_memory(&hits, config.max_chars as usize);
+        if recalled.section.is_empty() {
             return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
         PromptBuild {
-            system_prompt: format!("{}\n\n{}", self.config.system_prompt, section),
-            memory_recall_hits: count_formatted_recalled_hits(&section),
+            system_prompt: format!("{}\n\n{}", self.config.system_prompt, recalled.section),
+            memory_recall_short_hits: recalled.short_hits,
+            memory_recall_long_hits: recalled.long_hits,
         }
     }
 }
 
 struct PromptBuild {
     system_prompt: String,
-    memory_recall_hits: usize,
+    memory_recall_short_hits: usize,
+    memory_recall_long_hits: usize,
 }
 
 impl PromptBuild {
     fn without_recall(system_prompt: String) -> Self {
         Self {
             system_prompt,
-            memory_recall_hits: 0,
+            memory_recall_short_hits: 0,
+            memory_recall_long_hits: 0,
         }
     }
 }
 
-fn count_formatted_recalled_hits(section: &str) -> usize {
-    section
-        .lines()
-        .filter(|line| line.starts_with(char::is_numeric))
-        .count()
-}
-
-fn format_recalled_memory(hits: &[MemoryRecallHit], max_chars: usize) -> String {
+fn format_recalled_memory(hits: &[MemoryRecallHit], max_chars: usize) -> PromptBuildMemorySection {
     if hits.is_empty() || max_chars == 0 {
-        return String::new();
+        return PromptBuildMemorySection::default();
     }
 
-    let base = "# POTENTIALLY RELEVANT LONG-TERM MEMORY\nUse this as optional background context. It may be stale or incomplete; prioritize the current user message and conversation.";
+    let base = "# POTENTIALLY RELEVANT MEMORY\nUse this as optional background context. It may be stale or incomplete; prioritize the current user message and conversation.";
     let mut section = base.to_owned();
+    let mut short_hits = 0;
+    let mut long_hits = 0;
     for (index, hit) in hits.iter().enumerate() {
         let line = format!(
             "\n{}. [{}] {}",
@@ -359,13 +359,28 @@ fn format_recalled_memory(hits: &[MemoryRecallHit], max_chars: usize) -> String 
             break;
         }
         section.push_str(&line);
+        match hit.store {
+            MemoryHitStore::LongTerm => long_hits += 1,
+            MemoryHitStore::ShortTerm => short_hits += 1,
+        }
     }
 
     if section == base {
-        String::new()
+        PromptBuildMemorySection::default()
     } else {
-        section
+        PromptBuildMemorySection {
+            section,
+            short_hits,
+            long_hits,
+        }
     }
+}
+
+#[derive(Default)]
+struct PromptBuildMemorySection {
+    section: String,
+    short_hits: usize,
+    long_hits: usize,
 }
 
 fn memory_hit_label(hit: &MemoryRecallHit) -> String {
@@ -769,14 +784,16 @@ mod tests {
         ];
 
         let section = format_recalled_memory(&hits, 280);
-        assert!(section.starts_with("# POTENTIALLY RELEVANT LONG-TERM MEMORY"));
-        assert!(section.contains("optional background context"));
-        assert!(section.contains("1. [long-term/prefs]"));
-        assert!(!section.contains("score="));
+        assert!(section.section.starts_with("# POTENTIALLY RELEVANT MEMORY"));
+        assert!(section.section.contains("optional background context"));
+        assert!(section.section.contains("1. [long-term/prefs]"));
+        assert!(!section.section.contains("score="));
         assert!(
-            section.contains("2."),
+            section.section.contains("2."),
             "both items should fit without score metadata"
         );
+        assert_eq!(section.short_hits, 0);
+        assert_eq!(section.long_hits, 2);
     }
 
     #[test]
@@ -890,14 +907,15 @@ mod tests {
 
         assert_eq!(outcome.reply, "NO_REPLY");
         assert!(outcome.memory_recall_used);
-        assert_eq!(outcome.memory_recall_hits, 1);
+        assert_eq!(outcome.memory_recall_short_hits, 0);
+        assert_eq!(outcome.memory_recall_long_hits, 1);
 
         let appended = memory_impl.appended().await;
         assert_eq!(appended.len(), 1);
         assert_eq!(appended[0].1, StoredRole::User);
 
         let prompts = provider_impl.system_prompts().await;
-        assert!(prompts[0].contains("# POTENTIALLY RELEVANT LONG-TERM MEMORY"));
+        assert!(prompts[0].contains("# POTENTIALLY RELEVANT MEMORY"));
         assert!(prompts[0].contains("Prefers short answers"));
     }
 }

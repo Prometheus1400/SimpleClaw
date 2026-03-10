@@ -9,7 +9,8 @@ pub(super) fn render_tool_call_transparency(
     tool_calls_enabled: bool,
     memory_recall_enabled: bool,
     memory_recall_used: bool,
-    memory_recall_hits: usize,
+    memory_recall_short_hits: usize,
+    memory_recall_long_hits: usize,
     channel_kind: GatewayChannelKind,
 ) -> String {
     let summary = transparency_summary(
@@ -17,7 +18,8 @@ pub(super) fn render_tool_call_transparency(
         tool_calls_enabled,
         memory_recall_enabled,
         memory_recall_used,
-        memory_recall_hits,
+        memory_recall_short_hits,
+        memory_recall_long_hits,
     );
     if summary.is_empty() {
         return reply.to_owned();
@@ -42,13 +44,19 @@ fn style_for_channel(kind: GatewayChannelKind) -> Option<TransparencyRenderStyle
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TransparencySummary {
     tool_groups: Vec<ToolSummaryGroup>,
-    memory_hits: Option<usize>,
+    memory_hits: Option<MemoryTransparencySummary>,
 }
 
 impl TransparencySummary {
     fn is_empty(&self) -> bool {
         self.tool_groups.is_empty() && self.memory_hits.is_none()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryTransparencySummary {
+    short_hits: usize,
+    long_hits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,14 +71,18 @@ fn transparency_summary(
     tool_calls_enabled: bool,
     memory_recall_enabled: bool,
     memory_recall_used: bool,
-    memory_recall_hits: usize,
+    memory_recall_short_hits: usize,
+    memory_recall_long_hits: usize,
 ) -> TransparencySummary {
     let mut summary = TransparencySummary::default();
     if tool_calls_enabled && !tool_calls.is_empty() {
         summary.tool_groups = tool_summary_groups(tool_calls);
     }
     if memory_recall_enabled && memory_recall_used {
-        summary.memory_hits = Some(memory_recall_hits);
+        summary.memory_hits = Some(MemoryTransparencySummary {
+            short_hits: memory_recall_short_hits,
+            long_hits: memory_recall_long_hits,
+        });
     }
     summary
 }
@@ -176,7 +188,10 @@ fn render_for_style(
                 parts.push(format_tool_summary_plain(&summary.tool_groups));
             }
             if let Some(hits) = summary.memory_hits {
-                parts.push(format!("memory: hits={hits}"));
+                parts.push(format!(
+                    "recall: short={} long={}",
+                    hits.short_hits, hits.long_hits
+                ));
             }
             format!("{reply}\n---\n{}", parts.join(" | "))
         }
@@ -186,7 +201,10 @@ fn render_for_style(
                 parts.push(format_tool_summary_discord(&summary.tool_groups));
             }
             if let Some(hits) = summary.memory_hits {
-                parts.push(format!("memory `hits={hits}`"));
+                parts.push(format!(
+                    "recall `short={} long={}`",
+                    hits.short_hits, hits.long_hits
+                ));
             }
             let subtext = format!("-# {}", escape_discord_subtext(&parts.join(" • ")));
             format!("{reply}\n{subtext}")
@@ -214,6 +232,7 @@ mod tests {
             tool_calls_enabled,
             false,
             false,
+            0,
             0,
             GatewayChannelKind::Discord,
         )
@@ -391,10 +410,26 @@ mod tests {
             false,
             true,
             true,
+            0,
             2,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# memory `hits=2`"));
+        assert!(rendered.contains("-# recall `short=0 long=2`"));
+    }
+
+    #[test]
+    fn memory_recall_transparency_renders_short_and_long_hits() {
+        let rendered = render_tool_call_transparency(
+            "base reply",
+            &[],
+            false,
+            true,
+            true,
+            1,
+            2,
+            GatewayChannelKind::Discord,
+        );
+        assert!(rendered.contains("-# recall `short=1 long=2`"));
     }
 
     #[test]
@@ -405,6 +440,7 @@ mod tests {
             false,
             true,
             false,
+            0,
             0,
             GatewayChannelKind::Discord,
         );
@@ -429,9 +465,10 @@ mod tests {
             true,
             true,
             1,
+            1,
             GatewayChannelKind::Discord,
         );
-        assert!(rendered.contains("-# tools [clock `ok×1`] • memory `hits=1`"));
+        assert!(rendered.contains("-# tools [clock `ok×1`] • recall `short=1 long=1`"));
         assert!(!rendered.contains("\n-# memory"));
     }
 }

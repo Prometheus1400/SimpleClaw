@@ -51,7 +51,8 @@ pub struct RunOutcome {
     pub reply: String,
     pub tool_calls: Vec<ToolExecutionResult>,
     pub memory_recall_used: bool,
-    pub memory_recall_hits: usize,
+    pub memory_recall_short_hits: usize,
+    pub memory_recall_long_hits: usize,
 }
 
 impl ReactLoop {
@@ -206,7 +207,8 @@ async fn run_loop(
                     reply: text,
                     tool_calls: executed_tool_calls,
                     memory_recall_used: false,
-                    memory_recall_hits: 0,
+                    memory_recall_short_hits: 0,
+                    memory_recall_long_hits: 0,
                 });
             }
             DispatchAction::Empty => {
@@ -225,7 +227,8 @@ async fn run_loop(
         reply: "max_steps reached without final response".to_owned(),
         tool_calls: executed_tool_calls,
         memory_recall_used: false,
-        memory_recall_hits: 0,
+        memory_recall_short_hits: 0,
+        memory_recall_long_hits: 0,
     })
 }
 

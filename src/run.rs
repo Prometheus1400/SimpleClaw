@@ -526,7 +526,8 @@ pub(crate) async fn handle_inbound_once(
                 transparency.tool_calls,
                 transparency.memory_recall,
                 outcome.memory_recall_used,
-                outcome.memory_recall_hits,
+                outcome.memory_recall_short_hits,
+                outcome.memory_recall_long_hits,
                 inbound.source_channel,
             );
             let send_result = if let Some(streaming_display) = streaming_display.as_ref() {

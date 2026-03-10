@@ -23,3 +23,4 @@
 7. Prefer explicit interfaces at module boundaries; hide concrete types behind traits/type aliases where it improves substitution.
 8. Prefer composition over inheritance-style abstractions; keep abstractions shallow and purposeful.
 9. Require observability for important flows: structured logs, clear error context, and stable event names.
+10. Do not normalize code smells with blanket suppressions such as `#[allow(unused)]`, `#[allow(dead_code)]`, or similar exceptions unless they are genuinely necessary and narrowly scoped with a clear reason.
