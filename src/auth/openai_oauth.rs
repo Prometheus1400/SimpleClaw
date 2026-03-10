@@ -1,14 +1,12 @@
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use rand::RngCore;
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use url::form_urlencoded;
+use url::{Url, form_urlencoded};
 
 use crate::error::FrameworkError;
 
@@ -18,7 +16,6 @@ pub(crate) const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const OPENAI_OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 pub(crate) const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub(crate) const OPENAI_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
-const OPENAI_OAUTH_LOOPBACK_BIND: &str = "localhost:1455";
 
 #[derive(Debug, Clone)]
 pub(crate) struct PkceState {
@@ -76,59 +73,6 @@ pub(crate) fn build_authorize_url(pkce: &PkceState) -> String {
     format!("{OPENAI_OAUTH_AUTHORIZE_URL}?{query}")
 }
 
-pub(crate) async fn receive_loopback_code(
-    expected_state: &str,
-    timeout: Duration,
-) -> Result<String, FrameworkError> {
-    let listener = TcpListener::bind(OPENAI_OAUTH_LOOPBACK_BIND)
-        .await
-        .map_err(|err| oauth_error(format!("failed to bind callback listener: {err}")))?;
-
-    let accepted = tokio::time::timeout(timeout, listener.accept())
-        .await
-        .map_err(|_| oauth_error("timed out waiting for browser callback".to_owned()))?
-        .map_err(|err| oauth_error(format!("failed to accept callback connection: {err}")))?;
-
-    let (mut stream, _) = accepted;
-    let mut buffer = vec![0_u8; 8192];
-    let bytes_read = stream
-        .read(&mut buffer)
-        .await
-        .map_err(|err| oauth_error(format!("failed to read callback request: {err}")))?;
-
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-    let first_line = request
-        .lines()
-        .next()
-        .ok_or_else(|| oauth_error("malformed callback request".to_owned()))?;
-    let path = first_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| oauth_error("callback request missing path".to_owned()))?;
-
-    let code_result = parse_code_from_redirect(path, Some(expected_state));
-    let (status_line, body) = if code_result.is_ok() {
-        (
-            "HTTP/1.1 200 OK",
-            "<html><body><h2>SimpleClaw login complete</h2><p>You can close this tab.</p></body></html>",
-        )
-    } else {
-        (
-            "HTTP/1.1 400 Bad Request",
-            "<html><body><h2>SimpleClaw login failed</h2><p>Return to terminal for details.</p></body></html>",
-        )
-    };
-
-    let response = format!(
-        "{status_line}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-
-    code_result
-}
-
 pub(crate) async fn exchange_code_for_tokens(
     client: &Client,
     code: &str,
@@ -170,6 +114,26 @@ pub(crate) async fn refresh_access_token(
         .map_err(|err| oauth_error(format!("failed to refresh token: {err}")))?;
 
     parse_token_response(response).await
+}
+
+pub(crate) fn parse_code_from_callback_url_input(
+    input: &str,
+    expected_state: Option<&str>,
+) -> Result<String, FrameworkError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(oauth_error("missing callback URL".to_owned()));
+    }
+
+    let parsed =
+        Url::parse(trimmed).map_err(|err| oauth_error(format!("invalid callback URL: {err}")))?;
+    let mut redirect = parsed.path().to_owned();
+    if let Some(query) = parsed.query() {
+        redirect.push('?');
+        redirect.push_str(query);
+    }
+
+    parse_code_from_redirect(&redirect, expected_state)
 }
 
 pub(crate) fn parse_code_from_redirect(
@@ -326,6 +290,33 @@ mod tests {
         let err = parse_code_from_redirect("/auth/callback?code=abc123&state=nope", Some("xyz"))
             .expect_err("state mismatch should fail");
         assert!(err.to_string().contains("state mismatch"));
+    }
+
+    #[test]
+    fn parse_callback_url_input_extracts_code() {
+        let code = parse_code_from_callback_url_input(
+            "http://localhost:1455/auth/callback?code=abc123&state=xyz",
+            Some("xyz"),
+        )
+        .expect("code should parse from callback URL");
+        assert_eq!(code, "abc123");
+    }
+
+    #[test]
+    fn parse_callback_url_input_rejects_invalid_url() {
+        let err = parse_code_from_callback_url_input("not-a-url", Some("xyz"))
+            .expect_err("invalid URL should fail");
+        assert!(err.to_string().contains("invalid callback URL"));
+    }
+
+    #[test]
+    fn parse_callback_url_input_rejects_missing_code() {
+        let err = parse_code_from_callback_url_input(
+            "http://localhost:1455/auth/callback?state=xyz",
+            Some("xyz"),
+        )
+        .expect_err("missing code should fail");
+        assert!(err.to_string().contains("missing code"));
     }
 
     #[test]

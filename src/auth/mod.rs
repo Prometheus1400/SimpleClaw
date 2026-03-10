@@ -2,7 +2,7 @@ mod openai_oauth;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -114,8 +114,9 @@ impl AuthService {
         let pkce = openai_oauth::generate_pkce_state();
         let authorize_url = openai_oauth::build_authorize_url(&pkce);
         print_browser_login_instructions(&authorize_url);
+        let callback_url = read_callback_url_from_terminal()?;
         let code =
-            openai_oauth::receive_loopback_code(&pkce.state, Duration::from_secs(180)).await?;
+            openai_oauth::parse_code_from_callback_url_input(&callback_url, Some(&pkce.state))?;
         let token_set = openai_oauth::exchange_code_for_tokens(&self.client, &code, &pkce).await?;
         let account_id = extract_account_id_from_jwt(&token_set.access_token);
         self.store
@@ -205,7 +206,53 @@ fn resolve_auth_store_path_from(
 fn print_browser_login_instructions(authorize_url: &str) {
     println!("Open this URL in your browser to authorize SimpleClaw:");
     println!("{authorize_url}");
-    println!("Waiting for callback on http://127.0.0.1:1455/auth/callback ...");
+    println!("After authorization, copy the full callback URL and paste it below.");
+}
+
+fn read_callback_url_from_terminal() -> Result<String, FrameworkError> {
+    require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    read_callback_url(&mut stdin.lock(), &mut stdout.lock())
+}
+
+fn require_interactive_terminal(
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<(), FrameworkError> {
+    if stdin_is_terminal && stdout_is_terminal {
+        return Ok(());
+    }
+    Err(FrameworkError::Provider(
+        "OpenAI OAuth login requires an interactive terminal to paste the callback URL".to_owned(),
+    ))
+}
+
+fn read_callback_url<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+) -> Result<String, FrameworkError> {
+    write!(output, "Paste callback URL: ").map_err(|err| {
+        FrameworkError::Provider(format!(
+            "OpenAI OAuth failed to write callback prompt: {err}"
+        ))
+    })?;
+    output.flush().map_err(|err| {
+        FrameworkError::Provider(format!(
+            "OpenAI OAuth failed to flush callback prompt: {err}"
+        ))
+    })?;
+
+    let mut callback_url = String::new();
+    input.read_line(&mut callback_url).map_err(|err| {
+        FrameworkError::Provider(format!("OpenAI OAuth failed to read callback URL: {err}"))
+    })?;
+    if callback_url.trim().is_empty() {
+        return Err(FrameworkError::Provider(
+            "OpenAI OAuth callback URL cannot be empty".to_owned(),
+        ));
+    }
+    Ok(callback_url)
 }
 
 fn profile_id(provider: &str, profile_name: &str) -> String {
@@ -679,6 +726,7 @@ pub(crate) fn format_expires_at(expires_at_unix: Option<i64>) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs::OpenOptions;
+    use std::io::Cursor;
 
     use tokio::time::{sleep, timeout};
 
@@ -690,6 +738,34 @@ mod tests {
             .expect("clock should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("simpleclaw_{prefix}_{now}.json"))
+    }
+
+    #[test]
+    fn read_callback_url_reads_single_line() {
+        let mut input = Cursor::new("http://localhost:1455/auth/callback?code=abc&state=xyz\n");
+        let mut output = Vec::new();
+        let callback_url =
+            read_callback_url(&mut input, &mut output).expect("callback URL should be read");
+        assert_eq!(
+            callback_url.trim(),
+            "http://localhost:1455/auth/callback?code=abc&state=xyz"
+        );
+        assert_eq!(String::from_utf8_lossy(&output), "Paste callback URL: ");
+    }
+
+    #[test]
+    fn read_callback_url_rejects_empty_input() {
+        let mut input = Cursor::new("\n");
+        let mut output = Vec::new();
+        let err = read_callback_url(&mut input, &mut output).expect_err("empty input should fail");
+        assert!(err.to_string().contains("callback URL cannot be empty"));
+    }
+
+    #[test]
+    fn require_interactive_terminal_rejects_non_terminal_streams() {
+        let err = require_interactive_terminal(false, true)
+            .expect_err("non-interactive terminal should fail");
+        assert!(err.to_string().contains("requires an interactive terminal"));
     }
 
     #[tokio::test]
