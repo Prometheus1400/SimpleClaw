@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::task::JoinHandle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
 use crate::channels::{Channel, InboundMessage};
-use crate::config::{GatewayChannelKind, RoutingConfig};
+use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
 use crate::error::FrameworkError;
 
 mod policy;
@@ -17,6 +17,7 @@ mod transport;
 
 pub struct Gateway {
     channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
+    output_modes: HashMap<GatewayChannelKind, ChannelOutputMode>,
     inbound_policy: RoutingConfig,
 }
 
@@ -39,9 +40,14 @@ impl Drop for GatewayListeners {
 }
 
 impl Gateway {
-    pub fn new(channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>, inbound_policy: RoutingConfig) -> Self {
+    pub fn new(
+        channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
+        output_modes: HashMap<GatewayChannelKind, ChannelOutputMode>,
+        inbound_policy: RoutingConfig,
+    ) -> Self {
         Self {
             channels,
+            output_modes,
             inbound_policy,
         }
     }
@@ -114,6 +120,44 @@ impl Gateway {
         channel.send_message(&inbound.channel_id, content).await
     }
 
+    pub async fn send_message_with_id(
+        &self,
+        inbound: &InboundMessage,
+        content: &str,
+    ) -> Result<Option<String>, FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel
+            .send_message_with_id(&inbound.channel_id, content)
+            .await
+    }
+
+    pub fn supports_message_editing(
+        &self,
+        inbound: &InboundMessage,
+    ) -> Result<bool, FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        Ok(channel.supports_message_editing())
+    }
+
+    pub fn output_mode(&self, inbound: &InboundMessage) -> ChannelOutputMode {
+        self.output_modes
+            .get(&inbound.source_channel)
+            .copied()
+            .unwrap_or(ChannelOutputMode::Streaming)
+    }
+
+    pub async fn edit_message(
+        &self,
+        inbound: &InboundMessage,
+        message_id: &str,
+        content: &str,
+    ) -> Result<(), FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel
+            .edit_message(&inbound.channel_id, message_id, content)
+            .await
+    }
+
     pub async fn add_reaction(
         &self,
         source_channel: GatewayChannelKind,
@@ -144,7 +188,7 @@ mod tests {
 
     use super::Gateway;
     use crate::channels::{Channel, ChannelInbound};
-    use crate::config::{GatewayChannelKind, RoutingConfig};
+    use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
     use crate::error::FrameworkError;
 
     struct SingleInboundChannel {
@@ -200,7 +244,11 @@ mod tests {
         let mut channels = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
         let (tx, mut rx) = mpsc::channel(1);
-        let gateway = Gateway::new(channels, RoutingConfig::default());
+        let gateway = Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        );
         let _listeners = gateway.start(tx);
         let next = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await

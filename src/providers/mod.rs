@@ -3,4 +3,8 @@ mod registry;
 mod types;
 
 pub use registry::{ProviderFactory, ProviderRegistry};
-pub use types::{Message, Provider, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
+#[allow(unused_imports)]
+pub use types::{
+    Message, Provider, ProviderResponse, ProviderStream, Role, StreamEvent, ToolCall,
+    ToolDefinition, ToolResult, provider_response_to_stream,
+};

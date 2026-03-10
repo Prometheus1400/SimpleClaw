@@ -94,7 +94,8 @@ impl AgentRuntime {
             self,
             inbound,
             memory_session_id,
-            context
+            context,
+            on_text_delta
         ),
         fields(
             trace_id = %inbound.trace_id,
@@ -107,6 +108,7 @@ impl AgentRuntime {
         inbound: &InboundMessage,
         memory_session_id: &str,
         context: &RuntimeContext,
+        on_text_delta: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     ) -> Result<RunOutcome, FrameworkError> {
         let execution_started = Instant::now();
         info!(status = "started", "agent execution");
@@ -166,6 +168,7 @@ impl AgentRuntime {
                 is_dm: inbound.is_dm,
             }),
             source_message_id: inbound.source_message_id.clone(),
+            on_text_delta,
         };
 
         let mut outcome = match context.react_loop.run(params, history).await {
@@ -413,8 +416,8 @@ mod tests {
     use crate::channels::InboundMessage;
     use crate::channels::{Channel, ChannelInbound};
     use crate::config::{
-        AgentInnerConfig, ExecutionDefaultsConfig, GatewayChannelKind, MemoryRecallConfig,
-        RoutingConfig,
+        AgentInnerConfig, ChannelOutputMode, ExecutionDefaultsConfig, GatewayChannelKind,
+        MemoryRecallConfig, RoutingConfig,
     };
     use crate::error::FrameworkError;
     use crate::gateway::Gateway;
@@ -425,7 +428,9 @@ mod tests {
     use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
     use crate::react::ReactLoop;
     use crate::tools::skill::SkillFactory;
-    use crate::tools::{AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory};
+    use crate::tools::{
+        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory,
+    };
 
     use super::{
         AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
@@ -697,14 +702,21 @@ mod tests {
     fn test_gateway() -> Arc<Gateway> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, Arc::new(QuietChannel));
-        Arc::new(Gateway::new(channels, RoutingConfig::default()))
+        Arc::new(Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        ))
     }
 
     fn test_react_loop(provider: Arc<dyn Provider>) -> Arc<ReactLoop> {
         Arc::new(ReactLoop::new(
             ProviderFactory::from_parts(HashMap::from([(
                 "default".to_owned(),
-                (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
+                (
+                    Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>,
+                    true,
+                ),
             )])),
             default_factory(),
             SkillFactory::new(PathBuf::from("/tmp/simpleclaw-skill-test")),
@@ -813,7 +825,12 @@ mod tests {
         let runtime = AgentRuntime::new(test_runtime_config());
 
         let outcome = runtime
-            .run(&test_inbound(false, Some("guild-789")), "sess-1", &context)
+            .run(
+                &test_inbound(false, Some("guild-789")),
+                "sess-1",
+                &context,
+                None,
+            )
             .await
             .expect("runtime should succeed");
 
@@ -862,7 +879,7 @@ mod tests {
         let runtime = AgentRuntime::new(config);
 
         let outcome = runtime
-            .run(&test_inbound(false, None), "sess-2", &context)
+            .run(&test_inbound(false, None), "sess-2", &context, None)
             .await
             .expect("runtime should succeed");
 

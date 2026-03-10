@@ -12,7 +12,7 @@ use crate::agent::{
     load_system_prompt_for_workspace,
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
-use crate::config::{AgentEntryConfig, GatewayChannelKind, LoadedConfig};
+use crate::config::{AgentEntryConfig, ChannelOutputMode, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
 use crate::invoke::DirectAgentInvoker;
 use crate::memory::{DynMemory, MemoryStore};
@@ -293,7 +293,19 @@ pub(crate) async fn assemble_runtime_state(
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
     let channels = deps.channel_factory.create_channels(loaded).await?;
-    let gateway = Arc::new(Gateway::new(channels, loaded.global.gateway.routing.clone()));
+    let output_modes = loaded
+        .global
+        .gateway
+        .channels
+        .iter()
+        .filter(|(_, config)| config.enabled)
+        .map(|(kind, config)| (*kind, config.output))
+        .collect::<HashMap<GatewayChannelKind, ChannelOutputMode>>();
+    let gateway = Arc::new(Gateway::new(
+        channels,
+        output_modes,
+        loaded.global.gateway.routing.clone(),
+    ));
 
     let context = Arc::new(RuntimeContext {
         react_loop,
@@ -353,13 +365,13 @@ mod tests {
     use crate::config::{
         AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig, MemoryRecallConfig,
     };
+    use crate::error::FrameworkError;
     use crate::memory::{
-        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory, MemoryRecallHit,
-        MemoryStoreScope, StoredMessage, StoredRole,
+        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory,
+        MemoryRecallHit, MemoryStoreScope, StoredMessage, StoredRole,
     };
     use crate::paths::AppPaths;
     use crate::providers::{Provider, ProviderFactory, ProviderResponse, ToolDefinition};
-    use crate::error::FrameworkError;
 
     #[derive(Default)]
     struct NoopMemory;
@@ -502,7 +514,8 @@ mod tests {
         async fn create_channels(
             &self,
             _loaded: &LoadedConfig,
-        ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn crate::channels::Channel>>> {
+        ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn crate::channels::Channel>>>
+        {
             Ok(HashMap::new())
         }
     }
@@ -549,7 +562,8 @@ mod tests {
     #[test]
     fn agent_workspace_memory_paths_uses_simpleclaw_memory_layout() {
         let workspace = PathBuf::from("/tmp/workspace");
-        let (memory_dir, short_term_path, long_term_path) = agent_workspace_memory_paths(&workspace);
+        let (memory_dir, short_term_path, long_term_path) =
+            agent_workspace_memory_paths(&workspace);
 
         assert_eq!(memory_dir, workspace.join(".simpleclaw").join("memory"));
         assert_eq!(short_term_path, memory_dir.join("short_term_memory.db"));
@@ -575,7 +589,10 @@ mod tests {
 
         assert_eq!(state.runtimes.len(), 1);
         assert!(state.runtimes.contains_key("default"));
-        assert_eq!(state.safe_error_reply, loaded.global.execution.defaults.safe_error_reply);
+        assert_eq!(
+            state.safe_error_reply,
+            loaded.global.execution.defaults.safe_error_reply
+        );
         assert!(state.context.agents.config("default").is_some());
         assert!(state.context.agents.memory("default").is_some());
     }

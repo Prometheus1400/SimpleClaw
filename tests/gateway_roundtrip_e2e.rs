@@ -4,6 +4,14 @@ use simpleclaw::testing::{
     ProviderScriptStep, ScriptedToolCall, TestAgentConfig, TestHarnessConfig,
     run_single_gateway_roundtrip,
 };
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+fn exec_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn session_rows(db_path: &std::path::Path, session_id: &str) -> Vec<(String, String)> {
     let conn = Connection::open(db_path).expect("short-term sqlite db should be readable");
@@ -198,6 +206,7 @@ async fn gateway_listener_roundtrip_routes_context_only_when_mention_missing() {
 
 #[tokio::test]
 async fn gateway_roundtrip_exec_tool_call_returns_pwd_output() {
+    let _guard = exec_test_guard();
     let config = TestHarnessConfig {
         inbound_content: "run pwd".to_owned(),
         mock_reply: "tool-finished".to_owned(),
@@ -236,6 +245,7 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output() {
 
 #[tokio::test]
 async fn gateway_roundtrip_exec_tool_call_reports_timeout_error() {
+    let _guard = exec_test_guard();
     let config = TestHarnessConfig {
         inbound_content: "run slow command".to_owned(),
         mock_reply: "timeout-finished".to_owned(),
@@ -272,6 +282,7 @@ async fn gateway_roundtrip_exec_tool_call_reports_timeout_error() {
 
 #[tokio::test]
 async fn gateway_roundtrip_exec_tool_call_returns_pwd_output_on_repeated_runs() {
+    let _guard = exec_test_guard();
     for _ in 0..2 {
         let config = TestHarnessConfig {
             inbound_content: "run pwd".to_owned(),
@@ -313,7 +324,9 @@ async fn gateway_listener_roundtrip_sends_safe_error_reply_when_provider_fails()
             "default",
             "Default",
             "default",
-            vec![ProviderScriptStep::Error("mock provider failure".to_owned())],
+            vec![ProviderScriptStep::Error(
+                "mock provider failure".to_owned(),
+            )],
         )],
         ..TestHarnessConfig::default()
     };
@@ -386,24 +399,27 @@ async fn gateway_listener_roundtrip_invokes_dm_without_requiring_mention() {
 
 #[tokio::test]
 async fn gateway_roundtrip_processes_background_completion_followup() {
+    let _guard = exec_test_guard();
     let config = TestHarnessConfig {
         additional_inbounds_to_process: 1,
         additional_inbound_timeout_ms: 4_000,
-        agents: vec![TestAgentConfig::new(
-            "default",
-            "Default",
-            "default",
-            vec![
-                ProviderScriptStep::ToolCall(ScriptedToolCall {
-                    id: Some("call-exec-background".to_owned()),
-                    name: "exec".to_owned(),
-                    args_json: r#"{"command":"sleep 0.2","background":true}"#.to_owned(),
-                }),
-                ProviderScriptStep::Reply("waiting for background".to_owned()),
-                ProviderScriptStep::Reply("background complete".to_owned()),
-            ],
-        )
-        .with_exec_tool(None, true, false)],
+        agents: vec![
+            TestAgentConfig::new(
+                "default",
+                "Default",
+                "default",
+                vec![
+                    ProviderScriptStep::ToolCall(ScriptedToolCall {
+                        id: Some("call-exec-background".to_owned()),
+                        name: "exec".to_owned(),
+                        args_json: r#"{"command":"sleep 0.2","background":true}"#.to_owned(),
+                    }),
+                    ProviderScriptStep::Reply("waiting for background".to_owned()),
+                    ProviderScriptStep::Reply("background complete".to_owned()),
+                ],
+            )
+            .with_exec_tool(None, true, false),
+        ],
         ..TestHarnessConfig::default()
     };
     let result = run_single_gateway_roundtrip(config)
@@ -412,7 +428,10 @@ async fn gateway_roundtrip_processes_background_completion_followup() {
 
     assert_eq!(result.provider_call_count, 3);
     assert_eq!(result.outbound_messages.len(), 2);
-    assert_eq!(result.outbound_messages[0].content, "waiting for background");
+    assert_eq!(
+        result.outbound_messages[0].content,
+        "waiting for background"
+    );
     assert_eq!(result.outbound_messages[1].content, "background complete");
     let response = result
         .observed_tool_response
@@ -421,7 +440,10 @@ async fn gateway_roundtrip_processes_background_completion_followup() {
     let nested = response["content"]
         .as_str()
         .expect("tool response content should be a string");
-    assert!(nested.contains("\"status\":\"backgrounded\""), "nested={nested}");
+    assert!(
+        nested.contains("\"status\":\"backgrounded\""),
+        "nested={nested}"
+    );
 }
 
 #[tokio::test]
@@ -466,27 +488,32 @@ async fn gateway_roundtrip_summon_tool_invokes_second_agent() {
         .observed_tool_response
         .expect("summon tool response should be captured");
     assert_eq!(response["status"], Value::String("ok".to_owned()));
-    assert_eq!(response["content"], Value::String("helper result".to_owned()));
+    assert_eq!(
+        response["content"],
+        Value::String("helper result".to_owned())
+    );
 }
 
 #[tokio::test]
 async fn gateway_roundtrip_task_tool_invokes_worker_flow() {
     let config = TestHarnessConfig {
-        agents: vec![TestAgentConfig::new(
-            "default",
-            "Default",
-            "default",
-            vec![
-                ProviderScriptStep::ToolCall(ScriptedToolCall {
-                    id: Some("call-task-worker".to_owned()),
-                    name: "task".to_owned(),
-                    args_json: r#"{"prompt":"do delegated work"}"#.to_owned(),
-                }),
-                ProviderScriptStep::Reply("worker result".to_owned()),
-                ProviderScriptStep::Reply("task wrapped up".to_owned()),
-            ],
-        )
-        .with_task_worker_max_steps(Some(2))],
+        agents: vec![
+            TestAgentConfig::new(
+                "default",
+                "Default",
+                "default",
+                vec![
+                    ProviderScriptStep::ToolCall(ScriptedToolCall {
+                        id: Some("call-task-worker".to_owned()),
+                        name: "task".to_owned(),
+                        args_json: r#"{"prompt":"do delegated work"}"#.to_owned(),
+                    }),
+                    ProviderScriptStep::Reply("worker result".to_owned()),
+                    ProviderScriptStep::Reply("task wrapped up".to_owned()),
+                ],
+            )
+            .with_task_worker_max_steps(Some(2)),
+        ],
         ..TestHarnessConfig::default()
     };
     let result = run_single_gateway_roundtrip(config)
@@ -500,5 +527,8 @@ async fn gateway_roundtrip_task_tool_invokes_worker_flow() {
         .observed_tool_response
         .expect("task tool response should be captured");
     assert_eq!(response["status"], Value::String("ok".to_owned()));
-    assert_eq!(response["content"], Value::String("worker result".to_owned()));
+    assert_eq!(
+        response["content"],
+        Value::String("worker result".to_owned())
+    );
 }
