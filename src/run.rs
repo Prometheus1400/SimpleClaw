@@ -29,7 +29,7 @@ pub(crate) use logging::json_log_path;
 pub use logging::{RETAIN_DAILY_LOG_FILES, RotatingLogWriter};
 
 use composition::{
-    RuntimeDependencies, RuntimeState, agent_workspace_memory_paths, assemble_runtime_state,
+    RuntimeDependencies, RuntimeState, agent_persona_memory_paths, assemble_runtime_state,
     start_runtime_services,
 };
 use daemon::{is_process_running, read_pid, state_paths};
@@ -768,7 +768,7 @@ pub async fn show_agent_memory(
         .wrap_err("failed to load configuration for agent memory command")?;
     let agent = resolve_agent(&loaded.global.agents.list, agent_id)?;
     let (_memory_dir, short_term_path, long_term_path) =
-        agent_workspace_memory_paths(&agent.workspace);
+        agent_persona_memory_paths(&agent.persona);
 
     let short = if matches!(memory, MemoryMode::Short | MemoryMode::Both) {
         Some(query_short_memory(&short_term_path, limit)?)
@@ -1564,6 +1564,7 @@ mod tests {
             effective_execution: ExecutionDefaultsConfig::default(),
             owner_ids: vec!["user-1".to_owned()],
             agent_config,
+            persona_root: PathBuf::from("/tmp/simpleclaw-run-test-persona"),
             workspace_root: PathBuf::from("/tmp/simpleclaw-run-test"),
             app_base_dir: PathBuf::from("/tmp/simpleclaw-run-test-app"),
             system_prompt: "base prompt".to_owned(),

@@ -25,6 +25,7 @@ pub struct AgentRuntimeConfig {
     pub effective_execution: ExecutionDefaultsConfig,
     pub owner_ids: Vec<String>,
     pub agent_config: AgentInnerConfig,
+    pub persona_root: PathBuf,
     pub workspace_root: PathBuf,
     #[allow(dead_code)]
     pub app_base_dir: PathBuf,
@@ -104,7 +105,9 @@ impl AgentRuntime {
         fields(
             trace_id = %inbound.trace_id,
             session_id = %memory_session_id,
-            agent_id = %self.config.agent_id
+            agent_id = %self.config.agent_id,
+            persona_root = %self.config.persona_root.display(),
+            workspace_root = %self.config.workspace_root.display()
         )
     )]
     pub async fn run(
@@ -156,6 +159,7 @@ impl AgentRuntime {
             history_messages: self.config.effective_execution.history_messages as usize,
             execution_env: self.config.effective_execution.resolved_env()?,
             memory: memory.clone(),
+            persona_root: self.config.persona_root.clone(),
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.owner_ids.clone(),
@@ -418,8 +422,8 @@ fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
     )
 }
 
-pub(crate) fn load_system_prompt_for_workspace(workspace: &Path) -> Result<String, FrameworkError> {
-    PromptAssembler::from_workspace(workspace)
+pub(crate) fn load_system_prompt_for_persona(persona_root: &Path) -> Result<String, FrameworkError> {
+    PromptAssembler::from_persona(persona_root)
 }
 
 #[cfg(test)]
@@ -713,6 +717,7 @@ mod tests {
             },
             owner_ids: vec!["user-123".to_owned()],
             agent_config,
+            persona_root: PathBuf::from("/tmp/simpleclaw-agent-persona"),
             workspace_root: PathBuf::from("/tmp/simpleclaw-agent-test"),
             app_base_dir: PathBuf::from("/tmp/simpleclaw-agent-app"),
             system_prompt: "base prompt".to_owned(),

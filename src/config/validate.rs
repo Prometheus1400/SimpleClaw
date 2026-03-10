@@ -36,6 +36,8 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
                 agent.id
             )));
         }
+        validate_agent_path(&agent.id, "persona", &agent.persona)?;
+        validate_agent_path(&agent.id, "workspace", &agent.workspace)?;
         validate_execution_env(
             &format!("agents.list[{}].config.execution.env", agent.id),
             agent.config.execution.env.as_ref(),
@@ -50,6 +52,19 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
         )));
     }
 
+    Ok(())
+}
+
+fn validate_agent_path(
+    agent_id: &str,
+    field: &str,
+    path: &std::path::Path,
+) -> Result<(), FrameworkError> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+        return Err(FrameworkError::Config(format!(
+            "agents.list[{agent_id}].{field} must be non-empty"
+        )));
+    }
     Ok(())
 }
 

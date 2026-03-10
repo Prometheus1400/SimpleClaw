@@ -9,7 +9,7 @@ use crate::error::FrameworkError;
 use crate::tools::sandbox::run_wasm_guest;
 use crate::tools::{Tool, ToolExecEnv};
 
-use super::read::{path_within_workspace, resolve_path_for_read};
+use super::read::{host_path_to_guest_path, resolve_path_for_read};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditTool {
@@ -47,28 +47,39 @@ impl Tool for EditTool {
 
         let path = resolve_path_for_read(
             &args.path,
+            &ctx.persona_root,
             &ctx.workspace_root,
             self.config.sandbox.enabled,
             &self.config.sandbox.extra_writable_paths,
         )?;
 
-        if self.config.sandbox.enabled && path_within_workspace(&path, &ctx.workspace_root)? {
-            let output = run_wasm_guest(
-                &ctx.workspace_root,
-                "edit_tool.wasm",
-                &[],
-                args_json.as_bytes(),
-                Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
-            )
-            .await?;
-            if output.exit_code != 0 {
-                return Err(FrameworkError::Tool(format!(
-                    "edit tool failed: exit_code={} stderr={}",
-                    output.exit_code,
-                    output.stderr.trim()
-                )));
+        if self.config.sandbox.enabled {
+            if let Ok(guest_path) =
+                host_path_to_guest_path(&path, &ctx.workspace_root, &ctx.persona_root)
+            {
+                let mut guest_args = args.clone();
+                guest_args.path = guest_path;
+                let guest_args_json = serde_json::to_string(&guest_args).map_err(|e| {
+                    FrameworkError::Tool(format!("failed to serialize edit args: {e}"))
+                })?;
+                let output = run_wasm_guest(
+                    &ctx.workspace_root,
+                    &ctx.persona_root,
+                    "edit_tool.wasm",
+                    &[],
+                    guest_args_json.as_bytes(),
+                    Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
+                )
+                .await?;
+                if output.exit_code != 0 {
+                    return Err(FrameworkError::Tool(format!(
+                        "edit tool failed: exit_code={} stderr={}",
+                        output.exit_code,
+                        output.stderr.trim()
+                    )));
+                }
+                return Ok(output.stdout);
             }
-            return Ok(output.stdout);
         }
 
         apply_edit_command_at_path(&args, &path).map_err(|e| FrameworkError::Tool(e.to_string()))
@@ -206,6 +217,7 @@ mod tests {
         let err = resolve_path_for_read(
             outside.join("secrets.txt").to_string_lossy().as_ref(),
             &workspace,
+            &workspace,
             true,
             &[],
         )
@@ -238,5 +250,26 @@ mod tests {
         assert_eq!(parsed["status"], "dry_run");
         assert!(!path.exists());
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn sandbox_denies_persona_simpleclaw_path() {
+        let workspace = unique_test_dir("persona_workspace");
+        let persona = unique_test_dir("persona_root");
+        fs::create_dir_all(&workspace).expect("should create workspace");
+        fs::create_dir_all(persona.join(".simpleclaw")).expect("should create persona state");
+
+        let err = resolve_path_for_read(
+            persona.join(".simpleclaw/secret.db").to_string_lossy().as_ref(),
+            &persona,
+            &workspace,
+            true,
+            &[],
+        )
+        .expect_err("persona state should be denied");
+        assert!(err.to_string().contains("path denied by sandbox"));
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(persona);
     }
 }

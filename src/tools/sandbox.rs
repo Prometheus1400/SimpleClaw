@@ -17,6 +17,7 @@ use super::{Tool, ToolExecEnv, ToolRunOutput};
 
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
+const WASM_PERSONA_MOUNT: &str = "/persona";
 const WASM_TMP_MOUNT: &str = "/tmp";
 static WASM_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -37,18 +38,22 @@ pub async fn execute_tool_with_sandbox(
 
 pub async fn run_wasm_guest(
     workspace_root: &Path,
+    persona_root: &Path,
     artifact_name: &str,
     args: &[String],
     stdin: &[u8],
     time_limit: Duration,
 ) -> Result<WasmGuestOutput, FrameworkError> {
     let workspace = normalize_workspace_root(workspace_root)?;
+    let persona = normalize_workspace_root(persona_root)?;
     let artifact_path = resolve_guest_artifact_path(artifact_name, &workspace)?;
     let args = args.to_vec();
     let stdin = stdin.to_vec();
 
     let join =
-        spawn_blocking(move || run_wasm_guest_blocking(&workspace, &artifact_path, &args, &stdin));
+        spawn_blocking(move || {
+            run_wasm_guest_blocking(&workspace, &persona, &artifact_path, &args, &stdin)
+        });
 
     let joined = timeout(time_limit, join)
         .await
@@ -58,6 +63,7 @@ pub async fn run_wasm_guest(
 
 fn run_wasm_guest_blocking(
     workspace_root: &Path,
+    persona_root: &Path,
     artifact_path: &Path,
     args: &[String],
     stdin: &[u8],
@@ -102,6 +108,19 @@ fn run_wasm_guest_blocking(
             FrameworkError::Tool(format!(
                 "wasm guest failed to preopen workspace: path={} error={e}",
                 workspace_root.display()
+            ))
+        })?;
+    wasi_builder
+        .preopened_dir(
+            persona_root,
+            WASM_PERSONA_MOUNT,
+            DirPerms::all(),
+            FilePerms::all(),
+        )
+        .map_err(|e| {
+            FrameworkError::Tool(format!(
+                "wasm guest failed to preopen persona: path={} error={e}",
+                persona_root.display()
             ))
         })?;
     wasi_builder
@@ -159,6 +178,10 @@ pub fn normalize_workspace_root(workspace_root: &Path) -> Result<PathBuf, Framew
 
 pub fn workspace_guest_mount_path() -> &'static str {
     WASM_WORKSPACE_MOUNT
+}
+
+pub fn persona_guest_mount_path() -> &'static str {
+    WASM_PERSONA_MOUNT
 }
 
 fn resolve_guest_artifact_path(
@@ -339,6 +362,7 @@ mod tests {
             memory: Arc::new(memory),
             history_messages: 10,
             env: std::collections::BTreeMap::new(),
+            persona_root: PathBuf::from("."),
             workspace_root: PathBuf::from("."),
             user_id: "u".to_owned(),
             owner_ids: vec![],

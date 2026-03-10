@@ -292,6 +292,8 @@ pub async fn run_single_gateway_roundtrip(
         require_mentions: Some(config.require_mentions),
     };
     for agent in &agent_specs {
+        fs::create_dir_all(workspace_dir.join("personas").join(&agent.id))
+            .wrap_err("failed to create test agent persona")?;
         fs::create_dir_all(workspace_dir.join(&agent.id))
             .wrap_err("failed to create test agent workspace")?;
     }
@@ -300,6 +302,7 @@ pub async fn run_single_gateway_roundtrip(
         .map(|agent| AgentEntryConfig {
             id: agent.id.clone(),
             name: agent.name.clone(),
+            persona: workspace_dir.join("personas").join(&agent.id),
             workspace: workspace_dir.join(&agent.id),
             config: agent.agent_config.clone(),
         })

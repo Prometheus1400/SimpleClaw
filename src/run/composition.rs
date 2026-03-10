@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::agent::{
     AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
-    load_system_prompt_for_workspace,
+    load_system_prompt_for_persona,
 };
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::config::{AgentEntryConfig, ChannelOutputMode, GatewayChannelKind, LoadedConfig};
@@ -105,7 +105,7 @@ impl MemoryFactory for DefaultMemoryFactory {
         loaded: &LoadedConfig,
     ) -> color_eyre::Result<DynMemory> {
         let (memory_dir, short_term_path, long_term_path) =
-            agent_workspace_memory_paths(&agent.workspace);
+            agent_persona_memory_paths(&agent.persona);
         fs::create_dir_all(&memory_dir).wrap_err_with(|| {
             format!(
                 "failed to create memory directory for agent '{}': {}",
@@ -236,14 +236,14 @@ pub(crate) async fn assemble_runtime_state(
             .map_err(color_eyre::Report::from)?;
 
         let system_prompt =
-            load_system_prompt_for_workspace(&agent.workspace).wrap_err_with(|| {
+            load_system_prompt_for_persona(&agent.persona).wrap_err_with(|| {
                 format!(
                     "failed to assemble layered system prompt for agent '{}'",
                     agent.id
                 )
             })?;
         let skill_tools = skill_factory
-            .load_for_agent(&agent.id, &agent_config, &agent.workspace)
+            .load_for_agent(&agent.id, &agent_config, &agent.persona)
             .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
         info!(
             agent_id = %agent.id,
@@ -261,6 +261,7 @@ pub(crate) async fn assemble_runtime_state(
                 effective_execution,
                 owner_ids: loaded.global.execution.owner_ids.clone(),
                 agent_config,
+                persona_root: agent.persona.clone(),
                 workspace_root: agent.workspace.clone(),
                 app_base_dir: app_paths.base_dir.clone(),
                 system_prompt,
@@ -357,8 +358,8 @@ pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
     }
 }
 
-pub(crate) fn agent_workspace_memory_paths(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    let memory_dir = workspace.join(".simpleclaw").join("memory");
+pub(crate) fn agent_persona_memory_paths(persona_root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let memory_dir = persona_root.join(".simpleclaw").join("memory");
     let short_term_path = memory_dir.join("short_term_memory.db");
     let long_term_path = memory_dir.join("long_term_memory.db");
     (memory_dir, short_term_path, long_term_path)
@@ -375,7 +376,7 @@ mod tests {
 
     use super::{
         ChannelFactory, MemoryFactory, ProviderFactoryBuilder, RuntimeDependencies,
-        agent_workspace_memory_paths, assemble_runtime_state,
+        agent_persona_memory_paths, assemble_runtime_state,
     };
     use crate::config::{
         AgentEntryConfig, GatewayChannelKind, GlobalConfig, LoadedConfig, MemoryRecallConfig,
@@ -546,11 +547,13 @@ mod tests {
     }
 
     fn test_loaded_config() -> LoadedConfig {
+        let persona = temp_dir("composition_persona");
         let workspace = temp_dir("composition_workspace");
         let mut global = GlobalConfig::default();
         global.agents.list = vec![AgentEntryConfig {
             id: "default".to_owned(),
             name: "Default".to_owned(),
+            persona,
             workspace,
             config: crate::config::AgentInnerConfig::default(),
         }];
@@ -575,12 +578,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_workspace_memory_paths_uses_simpleclaw_memory_layout() {
-        let workspace = PathBuf::from("/tmp/workspace");
+    fn agent_persona_memory_paths_uses_simpleclaw_memory_layout() {
+        let persona = PathBuf::from("/tmp/persona");
         let (memory_dir, short_term_path, long_term_path) =
-            agent_workspace_memory_paths(&workspace);
+            agent_persona_memory_paths(&persona);
 
-        assert_eq!(memory_dir, workspace.join(".simpleclaw").join("memory"));
+        assert_eq!(memory_dir, persona.join(".simpleclaw").join("memory"));
         assert_eq!(short_term_path, memory_dir.join("short_term_memory.db"));
         assert_eq!(long_term_path, memory_dir.join("long_term_memory.db"));
     }
@@ -610,6 +613,45 @@ mod tests {
         );
         assert!(state.context.agents.config("default").is_some());
         assert!(state.context.agents.memory("default").is_some());
+    }
+
+    #[tokio::test]
+    async fn assemble_runtime_state_separates_persona_from_workspace() {
+        let persona = temp_dir("composition_persona_layers");
+        std::fs::write(persona.join("AGENT.md"), "persona prompt\n")
+            .expect("persona prompt should be written");
+        let workspace = temp_dir("composition_workspace_exec");
+        let mut global = GlobalConfig::default();
+        global.agents.list = vec![AgentEntryConfig {
+            id: "default".to_owned(),
+            name: "Default".to_owned(),
+            persona: persona.clone(),
+            workspace: workspace.clone(),
+            config: crate::config::AgentInnerConfig::default(),
+        }];
+        let loaded = LoadedConfig { global };
+        let app_paths = test_app_paths();
+        let deps = RuntimeDependencies {
+            provider_factory_builder: Arc::new(StaticProviderBuilder {
+                include_default: true,
+            }),
+            memory_factory: Arc::new(StaticMemoryFactory),
+            channel_factory: Arc::new(EmptyChannelFactory),
+            ..RuntimeDependencies::default()
+        };
+
+        let (state, _rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
+            .await
+            .expect("runtime state should assemble");
+
+        let config = state
+            .runtimes
+            .get("default")
+            .expect("default runtime should exist")
+            .config();
+        assert_eq!(config.persona_root, persona);
+        assert_eq!(config.workspace_root, workspace);
+        assert_eq!(config.system_prompt, "persona prompt");
     }
 
     #[tokio::test]

@@ -96,6 +96,7 @@ pub(super) fn default_agents_list() -> Vec<AgentEntryConfig> {
     vec![AgentEntryConfig {
         id: default_agent_id(),
         name: "Default".to_owned(),
+        persona: PathBuf::from("./personas/default"),
         workspace: PathBuf::from("./workspace"),
         config: AgentInnerConfig::default(),
     }]
