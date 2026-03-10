@@ -146,7 +146,7 @@ sequenceDiagram
 ### 3) Prompt construction per turn
 - Base prompt: concatenated workspace files in this order:
   - `IDENTITY.md`, `AGENT.md`, `USER.md`, `MEMORY.md`, `SOUL.md`
-- Optional memory recall appends a scored long-term context section.
+- Optional memory recall appends combined semantic memory context: long-term facts plus older same-session short-term messages outside the recent `history_messages` window.
 - Caller context is always injected (`CURRENT SPEAKER` with user id/name).
 
 ### 4) Tool execution security controls
