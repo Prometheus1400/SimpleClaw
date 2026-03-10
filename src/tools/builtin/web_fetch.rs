@@ -163,8 +163,9 @@ mod tests {
 
     #[test]
     fn fetch_returns_plain_text_body_when_not_html() {
-        let output = render_fetch_response("http://example.test", 200, "plain body from server", 100)
-            .expect("plain text response should render");
+        let output =
+            render_fetch_response("http://example.test", 200, "plain body from server", 100)
+                .expect("plain text response should render");
 
         assert_eq!(output, "plain body from server");
     }

@@ -245,7 +245,10 @@ mod tests {
             .err()
             .expect("empty command should fail");
 
-        assert!(err.to_string().contains("exec requires a non-empty command"));
+        assert!(
+            err.to_string()
+                .contains("exec requires a non-empty command")
+        );
     }
 
     #[tokio::test]
@@ -255,18 +258,23 @@ mod tests {
             "allow_background": false,
             "sandbox": { "enabled": false }
         }))
-            .expect("config should apply");
+        .expect("config should apply");
         let ctx = test_ctx().await;
 
         let err = tool
-            .execute(&ctx, "{\"command\":\"sleep 1\",\"background\":true}", "sess-1")
+            .execute(
+                &ctx,
+                "{\"command\":\"sleep 1\",\"background\":true}",
+                "sess-1",
+            )
             .await
             .err()
             .expect("background execution should fail");
 
-        assert!(err
-            .to_string()
-            .contains("exec background mode is disabled by tools.exec.allow_background"));
+        assert!(
+            err.to_string()
+                .contains("exec background mode is disabled by tools.exec.allow_background")
+        );
     }
 
     #[tokio::test]
@@ -299,7 +307,11 @@ mod tests {
         let ctx = test_ctx().await;
 
         let output = tool
-            .execute(&ctx, r#"{"command":"sleep 0.1","background":true}"#, "sess-1")
+            .execute(
+                &ctx,
+                r#"{"command":"sleep 0.1","background":true}"#,
+                "sess-1",
+            )
             .await
             .expect("background exec should succeed");
         let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
@@ -309,6 +321,10 @@ mod tests {
             .as_str()
             .expect("backgrounded response should include session id");
         let sessions = ctx.process_manager.list().await;
-        assert!(sessions.iter().any(|snapshot| snapshot.session_id == session_id));
+        assert!(
+            sessions
+                .iter()
+                .any(|snapshot| snapshot.session_id == session_id)
+        );
     }
 }

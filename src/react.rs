@@ -2,7 +2,7 @@ use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
 use crate::gateway::Gateway;
 use crate::providers::ProviderFactory;
-use crate::providers::{Message, Provider, Role};
+use crate::providers::{Message, Provider, ProviderResponse, Role, StreamEvent};
 use crate::reply_policy::no_reply_prompt_instruction;
 use crate::tools::ProcessManager;
 use crate::tools::skill::SkillFactory;
@@ -11,6 +11,7 @@ use crate::{channels::InboundMessage, memory::DynMemory};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub struct RunParams<'a> {
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
     pub source_message_id: Option<String>,
+    pub on_text_delta: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,10 +151,15 @@ async fn run_loop(
         let provider_started = Instant::now();
         let turn_span = info_span!("provider.turn");
         debug!(parent: &turn_span, status = "started", "provider turn");
-        let response = match provider
-            .generate(&effective_system_prompt, history, &tool_specs)
-            .instrument(turn_span.clone())
-            .await
+        let response = match generate_provider_response(
+            provider,
+            &effective_system_prompt,
+            history,
+            &tool_specs,
+            params.on_text_delta.as_deref(),
+        )
+        .instrument(turn_span.clone())
+        .await
         {
             Ok(response) => response,
             Err(err) => {
@@ -219,6 +226,43 @@ async fn run_loop(
     })
 }
 
+async fn generate_provider_response(
+    provider: &dyn Provider,
+    system_prompt: &str,
+    history: &[Message],
+    tool_specs: &[crate::providers::ToolDefinition],
+    on_text_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> Result<ProviderResponse, FrameworkError> {
+    let Some(on_text_delta) = on_text_delta else {
+        return provider.generate(system_prompt, history, tool_specs).await;
+    };
+
+    let mut stream = provider
+        .generate_stream(system_prompt, history, tool_specs)
+        .await?;
+    let mut output_text = String::new();
+    let mut tool_calls = Vec::new();
+
+    while let Some(event) = stream.next().await {
+        match event {
+            StreamEvent::TextDelta(delta) => {
+                output_text.push_str(&delta);
+                on_text_delta(&output_text);
+            }
+            StreamEvent::ToolCallComplete(tool_call) => tool_calls.push(tool_call),
+            StreamEvent::Done => break,
+            StreamEvent::Error(message) => {
+                return Err(FrameworkError::Provider(message));
+            }
+        }
+    }
+
+    Ok(ProviderResponse {
+        output_text: (!output_text.is_empty()).then_some(output_text),
+        tool_calls,
+    })
+}
+
 fn resolve_dispatcher(supports_native_tools: bool) -> &'static dyn ToolDispatcher {
     static NATIVE: crate::dispatch::NativeDispatcher = crate::dispatch::NativeDispatcher;
     static XML: crate::dispatch::XmlDispatcher = crate::dispatch::XmlDispatcher;
@@ -233,11 +277,42 @@ pub(crate) fn sanitize_log_preview(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use tokio_stream::iter;
 
     use crate::config::ToolsConfig;
+    use crate::providers::{ProviderStream, ToolCall, ToolDefinition};
     use crate::tools::default_factory;
 
     use super::*;
+
+    struct StreamingTestProvider {
+        response: ProviderResponse,
+        stream_events: Vec<StreamEvent>,
+    }
+
+    #[async_trait]
+    impl Provider for StreamingTestProvider {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _history: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            Ok(self.response.clone())
+        }
+
+        async fn generate_stream(
+            &self,
+            _system_prompt: &str,
+            _history: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderStream, FrameworkError> {
+            Ok(Box::pin(iter(self.stream_events.clone())))
+        }
+    }
 
     fn tools_enabled(allowed: &[&str]) -> ToolsConfig {
         const ALL: &[&str] = &[
@@ -335,5 +410,67 @@ mod tests {
     fn sanitize_log_preview_flattens_newlines() {
         let preview = sanitize_log_preview("first line\nsecond\tline\r\nthird", 512);
         assert_eq!(preview, "first line second line third");
+    }
+
+    #[tokio::test]
+    async fn generate_provider_response_streams_accumulated_text_and_tool_calls() {
+        let provider = StreamingTestProvider {
+            response: ProviderResponse {
+                output_text: Some("unused".to_owned()),
+                tool_calls: Vec::new(),
+            },
+            stream_events: vec![
+                StreamEvent::TextDelta("hel".to_owned()),
+                StreamEvent::TextDelta("lo".to_owned()),
+                StreamEvent::ToolCallComplete(ToolCall {
+                    id: Some("call-1".to_owned()),
+                    name: "clock".to_owned(),
+                    args_json: r#"{"timezone":"UTC"}"#.to_owned(),
+                }),
+                StreamEvent::Done,
+            ],
+        };
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let on_text_delta: Arc<dyn Fn(&str) + Send + Sync> = {
+            let observed = Arc::clone(&observed);
+            Arc::new(move |text| {
+                observed
+                    .lock()
+                    .expect("test callback mutex should not be poisoned")
+                    .push(text.to_owned());
+            })
+        };
+
+        let response =
+            generate_provider_response(&provider, "system", &[], &[], Some(on_text_delta.as_ref()))
+                .await
+                .expect("streaming response should succeed");
+
+        assert_eq!(response.output_text.as_deref(), Some("hello"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            observed
+                .lock()
+                .expect("test callback mutex should not be poisoned")
+                .clone(),
+            vec!["hel".to_owned(), "hello".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_provider_response_returns_stream_errors() {
+        let provider = StreamingTestProvider {
+            response: ProviderResponse {
+                output_text: None,
+                tool_calls: Vec::new(),
+            },
+            stream_events: vec![StreamEvent::Error("boom".to_owned())],
+        };
+
+        let err = generate_provider_response(&provider, "system", &[], &[], Some(&|_| {}))
+            .await
+            .expect_err("streaming response should fail");
+
+        assert!(matches!(err, FrameworkError::Provider(message) if message == "boom"));
     }
 }

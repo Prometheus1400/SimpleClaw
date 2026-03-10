@@ -29,7 +29,7 @@ pub use execution::ExecutionDefaultsConfig;
 pub use execution::{AgentExecutionOverrides, MemoryRecallOverrides};
 #[allow(unused_imports)]
 pub use execution::{ExecutionConfig, LogLevel, MemoryRecallConfig, TransparencyConfig};
-pub use gateway::{ChannelConfig, GatewayChannelKind, GatewayConfig};
+pub use gateway::{ChannelConfig, ChannelOutputMode, GatewayChannelKind, GatewayConfig};
 pub use providers::{GeminiProviderConfig, ProviderEntryConfig, ProviderKind, ProvidersConfig};
 #[allow(unused_imports)]
 pub use routing::RoutingConfig;
@@ -524,6 +524,39 @@ api_key_env: GEMINI_API_KEY
         let yaml = r#"
 token: "${secret:discord_token}"
 token_env: DISCORD_TOKEN
+"#;
+        let parsed = serde_yaml::from_str::<ChannelConfig>(yaml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn channel_config_defaults_to_streaming_output() {
+        let parsed: ChannelConfig = serde_yaml::from_str("{}\n").expect("valid yaml");
+        assert_eq!(parsed.output, ChannelOutputMode::Streaming);
+    }
+
+    #[test]
+    fn channel_config_accepts_streaming_output() {
+        let yaml = r#"
+output: streaming
+"#;
+        let parsed = serde_yaml::from_str::<ChannelConfig>(yaml).expect("valid yaml");
+        assert_eq!(parsed.output, ChannelOutputMode::Streaming);
+    }
+
+    #[test]
+    fn channel_config_accepts_normal_output() {
+        let yaml = r#"
+output: normal
+"#;
+        let parsed = serde_yaml::from_str::<ChannelConfig>(yaml).expect("valid yaml");
+        assert_eq!(parsed.output, ChannelOutputMode::Normal);
+    }
+
+    #[test]
+    fn channel_config_rejects_unknown_output() {
+        let yaml = r#"
+output: fancy
 "#;
         let parsed = serde_yaml::from_str::<ChannelConfig>(yaml);
         assert!(parsed.is_err());

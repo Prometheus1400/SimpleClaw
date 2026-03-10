@@ -1,18 +1,19 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::WrapErr;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
+use tokio::sync::Notify;
 use tracing::{info, info_span};
 
 use crate::channels::InboundMessage;
 use crate::cli::{Cli, MemoryMode};
-use crate::config::{AgentEntryConfig, LoadedConfig};
+use crate::config::{AgentEntryConfig, ChannelOutputMode, LoadedConfig};
 use crate::paths::AppPaths;
 use crate::reply_policy::is_no_reply;
 
@@ -37,6 +38,259 @@ use session::{SessionHandler, SessionWorkerCoordinator};
 
 const SESSION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
 const INBOUND_ACK_REACTION: &str = "👀";
+const STREAMING_EDIT_INTERVAL: Duration = Duration::from_millis(1_500);
+
+struct StreamingDisplay {
+    gateway: Arc<crate::gateway::Gateway>,
+    inbound: InboundMessage,
+    latest_content: String,
+    displayed_content: Option<String>,
+    message_id: Option<String>,
+    last_edit: Instant,
+    initial_send_attempted: bool,
+    send_in_flight: bool,
+    edit_in_flight: bool,
+    finalized: bool,
+    error_message: Option<String>,
+    notify: Arc<Notify>,
+}
+
+impl StreamingDisplay {
+    fn new(gateway: Arc<crate::gateway::Gateway>, inbound: InboundMessage) -> Self {
+        Self {
+            gateway,
+            inbound,
+            latest_content: String::new(),
+            displayed_content: None,
+            message_id: None,
+            last_edit: Instant::now() - STREAMING_EDIT_INTERVAL,
+            initial_send_attempted: false,
+            send_in_flight: false,
+            edit_in_flight: false,
+            finalized: false,
+            error_message: None,
+            notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
+enum StreamingDisplayAction {
+    SendInitial {
+        gateway: Arc<crate::gateway::Gateway>,
+        inbound: InboundMessage,
+        content: String,
+    },
+    Edit {
+        gateway: Arc<crate::gateway::Gateway>,
+        inbound: InboundMessage,
+        message_id: String,
+        content: String,
+    },
+}
+
+fn spawn_streaming_display_update(display: &Arc<Mutex<StreamingDisplay>>, content: &str) {
+    {
+        let mut state = match display.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        state.latest_content = content.to_owned();
+        state.notify.notify_waiters();
+    }
+    spawn_next_streaming_display_action(display);
+}
+
+fn next_streaming_display_action(
+    display: &Arc<Mutex<StreamingDisplay>>,
+) -> Option<StreamingDisplayAction> {
+    let mut state = match display.lock() {
+        Ok(state) => state,
+        Err(_) => return None,
+    };
+
+    if state.latest_content.is_empty() {
+        return None;
+    }
+
+    if state.message_id.is_none() {
+        if state.send_in_flight || state.displayed_content.is_some() || state.initial_send_attempted
+        {
+            return None;
+        }
+        state.initial_send_attempted = true;
+        state.send_in_flight = true;
+        return Some(StreamingDisplayAction::SendInitial {
+            gateway: Arc::clone(&state.gateway),
+            inbound: state.inbound.clone(),
+            content: state.latest_content.clone(),
+        });
+    }
+
+    if state.edit_in_flight {
+        return None;
+    }
+
+    if state.displayed_content.as_deref() == Some(state.latest_content.as_str()) {
+        return None;
+    }
+
+    if !state.finalized && state.last_edit.elapsed() < STREAMING_EDIT_INTERVAL {
+        return None;
+    }
+
+    let message_id = state.message_id.clone()?;
+    state.edit_in_flight = true;
+    Some(StreamingDisplayAction::Edit {
+        gateway: Arc::clone(&state.gateway),
+        inbound: state.inbound.clone(),
+        message_id,
+        content: state.latest_content.clone(),
+    })
+}
+
+fn spawn_next_streaming_display_action(display: &Arc<Mutex<StreamingDisplay>>) {
+    let Some(action) = next_streaming_display_action(display) else {
+        return;
+    };
+    let display = Arc::clone(display);
+    tokio::spawn(async move {
+        match action {
+            StreamingDisplayAction::SendInitial {
+                gateway,
+                inbound,
+                content,
+            } => {
+                let result = gateway.send_message_with_id(&inbound, &content).await;
+                let mut should_retry = false;
+                {
+                    let mut state = match display.lock() {
+                        Ok(state) => state,
+                        Err(_) => return,
+                    };
+                    state.send_in_flight = false;
+                    match result {
+                        Ok(Some(message_id)) => {
+                            state.message_id = Some(message_id);
+                            state.displayed_content = Some(content);
+                            state.last_edit = Instant::now();
+                            state.error_message = None;
+                            should_retry = true;
+                        }
+                        Ok(None) => {
+                            state.displayed_content = Some(content);
+                            state.error_message = None;
+                        }
+                        Err(err) => {
+                            state.error_message = Some(err.to_string());
+                            tracing::warn!(
+                                status = "failed",
+                                error_kind = "streaming_initial_send",
+                                error = %err,
+                                trace_id = %inbound.trace_id,
+                                session_id = %inbound.session_key,
+                                "streaming initial send failed"
+                            );
+                        }
+                    }
+                    state.notify.notify_waiters();
+                }
+                if should_retry {
+                    spawn_next_streaming_display_action(&display);
+                }
+            }
+            StreamingDisplayAction::Edit {
+                gateway,
+                inbound,
+                message_id,
+                content,
+            } => {
+                let result = gateway.edit_message(&inbound, &message_id, &content).await;
+                let mut should_retry = false;
+                {
+                    let mut state = match display.lock() {
+                        Ok(state) => state,
+                        Err(_) => return,
+                    };
+                    state.edit_in_flight = false;
+                    if let Err(err) = result {
+                        state.error_message = Some(err.to_string());
+                        tracing::warn!(
+                            status = "failed",
+                            error_kind = "streaming_edit",
+                            error = %err,
+                            trace_id = %inbound.trace_id,
+                            session_id = %inbound.session_key,
+                            message_id = %message_id,
+                            "streaming edit failed"
+                        );
+                    } else {
+                        state.displayed_content = Some(content);
+                        state.last_edit = Instant::now();
+                        state.error_message = None;
+                        should_retry = true;
+                    }
+                    state.notify.notify_waiters();
+                }
+                if should_retry {
+                    spawn_next_streaming_display_action(&display);
+                }
+            }
+        }
+    });
+}
+
+async fn finalize_streaming_display(
+    display: &Arc<Mutex<StreamingDisplay>>,
+    content: &str,
+) -> Result<(), crate::error::FrameworkError> {
+    {
+        let mut state = display.lock().map_err(|_| {
+            crate::error::FrameworkError::Tool("streaming display mutex poisoned".to_owned())
+        })?;
+        state.latest_content = content.to_owned();
+        state.finalized = true;
+        state.notify.notify_waiters();
+    }
+    spawn_next_streaming_display_action(display);
+
+    loop {
+        let fallback = {
+            let state = display.lock().map_err(|_| {
+                crate::error::FrameworkError::Tool("streaming display mutex poisoned".to_owned())
+            })?;
+            if !state.send_in_flight
+                && !state.edit_in_flight
+                && let Some(error_message) = state.error_message.clone()
+            {
+                if state.message_id.is_some() || state.displayed_content.is_some() {
+                    return Err(crate::error::FrameworkError::Tool(error_message));
+                }
+            }
+            if !state.send_in_flight
+                && !state.edit_in_flight
+                && state.displayed_content.as_deref() == Some(content)
+            {
+                return Ok(());
+            }
+            if !state.send_in_flight
+                && !state.edit_in_flight
+                && state.message_id.is_none()
+                && state.displayed_content.is_none()
+            {
+                Some((Arc::clone(&state.gateway), state.inbound.clone()))
+            } else {
+                None
+            }
+        };
+
+        if let Some((gateway, inbound)) = fallback {
+            return gateway.send_message(&inbound, content).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        spawn_next_streaming_display_action(display);
+    }
+}
 
 #[tracing::instrument(
     name = "inbound.message",
@@ -113,8 +367,31 @@ pub(crate) async fn handle_inbound_once(
     }
     tracing::debug!(status = "dispatching", "invoke inbound");
 
+    let streaming_display = (state.gateway.output_mode(&inbound) == ChannelOutputMode::Streaming
+        && state
+            .gateway
+            .supports_message_editing(&inbound)
+            .unwrap_or(false))
+    .then(|| {
+        Arc::new(Mutex::new(StreamingDisplay::new(
+            Arc::clone(&state.gateway),
+            inbound.clone(),
+        )))
+    });
+    let on_text_delta = streaming_display.as_ref().map(|streaming_display| {
+        let streaming_display = Arc::clone(streaming_display);
+        Arc::new(move |text: &str| {
+            spawn_streaming_display_update(&streaming_display, text);
+        }) as Arc<dyn Fn(&str) + Send + Sync>
+    });
+
     match runtime
-        .run(&inbound, &memory_session_id, state.context.as_ref())
+        .run(
+            &inbound,
+            &memory_session_id,
+            state.context.as_ref(),
+            on_text_delta,
+        )
         .await
     {
         Ok(outcome) => {
@@ -141,7 +418,12 @@ pub(crate) async fn handle_inbound_once(
                 outcome.memory_recall_hits,
                 inbound.source_channel,
             );
-            if let Err(err) = state.gateway.send_message(&inbound, &outbound).await {
+            let send_result = if let Some(streaming_display) = streaming_display.as_ref() {
+                finalize_streaming_display(streaming_display, &outbound).await
+            } else {
+                state.gateway.send_message(&inbound, &outbound).await
+            };
+            if let Err(err) = send_result {
                 tracing::error!(
                     status = "failed",
                     error_kind = "channel_send",
@@ -157,11 +439,15 @@ pub(crate) async fn handle_inbound_once(
                 error = %err,
                 "agent execution failed"
             );
-            if let Err(send_err) = state
-                .gateway
-                .send_message(&inbound, &state.safe_error_reply)
-                .await
-            {
+            let send_result = if let Some(streaming_display) = streaming_display.as_ref() {
+                finalize_streaming_display(streaming_display, &state.safe_error_reply).await
+            } else {
+                state
+                    .gateway
+                    .send_message(&inbound, &state.safe_error_reply)
+                    .await
+            };
+            if let Err(send_err) = send_result {
                 tracing::error!(
                     status = "failed",
                     error_kind = "safe_reply_send",
@@ -499,36 +785,43 @@ mod tests {
     use std::future::pending;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
     use rusqlite::Connection;
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::{Mutex, Notify, mpsc};
     use tokio::time::{Duration, timeout};
 
     use super::{
-        INBOUND_ACK_REACTION, dispatch_inbound_with_ack, handle_inbound_once, query_long_memory,
-        query_short_memory,
+        INBOUND_ACK_REACTION, StreamingDisplay, dispatch_inbound_with_ack, handle_inbound_once,
+        query_long_memory, query_short_memory, spawn_streaming_display_update,
     };
-    use crate::agent::{AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime};
+    use crate::agent::{
+        AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
+    };
     use crate::channels::{Channel, ChannelInbound, InboundMessage};
     use crate::config::{
-        AgentInnerConfig, ExecutionDefaultsConfig, GatewayChannelKind, MemoryRecallConfig,
-        RoutingConfig,
+        AgentInnerConfig, ChannelOutputMode, ExecutionDefaultsConfig, GatewayChannelKind,
+        MemoryRecallConfig, RoutingConfig,
     };
     use crate::error::FrameworkError;
     use crate::gateway::Gateway;
     use crate::memory::{
-        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory, MemoryRecallHit,
-        MemoryStoreScope, StoredMessage, StoredRole,
+        DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory,
+        MemoryRecallHit, MemoryStoreScope, StoredMessage, StoredRole,
     };
-    use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
+    use crate::providers::{
+        Message, Provider, ProviderFactory, ProviderResponse, ProviderStream, StreamEvent,
+        ToolDefinition,
+    };
     use crate::react::ReactLoop;
-    use crate::tools::skill::SkillFactory;
     use crate::run::session::{SessionHandler, SessionWorkerCoordinator};
     use crate::telemetry::next_trace_id;
-    use crate::tools::{AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory};
+    use crate::tools::skill::SkillFactory;
+    use crate::tools::{
+        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory,
+    };
 
     use super::composition::RuntimeState;
 
@@ -772,6 +1065,58 @@ mod tests {
         }
     }
 
+    struct StreamingProvider {
+        events: Vec<StreamEvent>,
+    }
+
+    impl StreamingProvider {
+        fn new(events: Vec<StreamEvent>) -> Self {
+            Self { events }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for StreamingProvider {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _history: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderResponse, FrameworkError> {
+            Ok(ProviderResponse {
+                output_text: None,
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn generate_stream(
+            &self,
+            _system_prompt: &str,
+            _history: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<ProviderStream, FrameworkError> {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let events = self.events.clone();
+            tokio::spawn(async move {
+                for event in events {
+                    match &event {
+                        StreamEvent::Done => {
+                            let _ = tx.send(event);
+                            break;
+                        }
+                        _ => {
+                            let _ = tx.send(event);
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+            });
+            Ok(Box::pin(
+                tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+            ))
+        }
+    }
+
     struct ForwardProvider {
         inner: Arc<dyn Provider>,
     }
@@ -785,6 +1130,17 @@ mod tests {
             tools: &[ToolDefinition],
         ) -> Result<ProviderResponse, FrameworkError> {
             self.inner.generate(system_prompt, history, tools).await
+        }
+
+        async fn generate_stream(
+            &self,
+            system_prompt: &str,
+            history: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<ProviderStream, FrameworkError> {
+            self.inner
+                .generate_stream(system_prompt, history, tools)
+                .await
         }
     }
 
@@ -807,12 +1163,34 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct LifecycleChannel {
         outbound: Mutex<Vec<(String, String)>>,
+        outbound_with_id: Mutex<Vec<(String, String, String)>>,
+        edits: Mutex<Vec<(String, String, String)>>,
         typing_events: Mutex<Vec<String>>,
         fail_typing: AtomicBool,
         fail_send: AtomicBool,
+        editable: AtomicBool,
+        send_delay_ms: AtomicUsize,
+        edit_delay_ms: AtomicUsize,
+        next_message_id: AtomicUsize,
+    }
+
+    impl Default for LifecycleChannel {
+        fn default() -> Self {
+            Self {
+                outbound: Mutex::new(Vec::new()),
+                outbound_with_id: Mutex::new(Vec::new()),
+                edits: Mutex::new(Vec::new()),
+                typing_events: Mutex::new(Vec::new()),
+                fail_typing: AtomicBool::new(false),
+                fail_send: AtomicBool::new(false),
+                editable: AtomicBool::new(true),
+                send_delay_ms: AtomicUsize::new(0),
+                edit_delay_ms: AtomicUsize::new(0),
+                next_message_id: AtomicUsize::new(0),
+            }
+        }
     }
 
     impl LifecycleChannel {
@@ -830,8 +1208,37 @@ mod tests {
             }
         }
 
+        fn non_editable() -> Self {
+            Self {
+                editable: AtomicBool::new(false),
+                ..Default::default()
+            }
+        }
+
+        fn with_send_delay(ms: usize) -> Self {
+            Self {
+                send_delay_ms: AtomicUsize::new(ms),
+                ..Default::default()
+            }
+        }
+
+        fn with_edit_delay(ms: usize) -> Self {
+            Self {
+                edit_delay_ms: AtomicUsize::new(ms),
+                ..Default::default()
+            }
+        }
+
         async fn outbound(&self) -> Vec<(String, String)> {
             self.outbound.lock().await.clone()
+        }
+
+        async fn outbound_with_id(&self) -> Vec<(String, String, String)> {
+            self.outbound_with_id.lock().await.clone()
+        }
+
+        async fn edits(&self) -> Vec<(String, String, String)> {
+            self.edits.lock().await.clone()
         }
 
         async fn typing_events(&self) -> Vec<String> {
@@ -841,6 +1248,10 @@ mod tests {
 
     #[async_trait]
     impl Channel for LifecycleChannel {
+        fn supports_message_editing(&self) -> bool {
+            self.editable.load(Ordering::Relaxed)
+        }
+
         async fn send_message(
             &self,
             channel_id: &str,
@@ -869,6 +1280,55 @@ mod tests {
             self.typing_events.lock().await.push(channel_id.to_owned());
             if self.fail_typing.load(Ordering::Relaxed) {
                 return Err(FrameworkError::Tool("simulated typing failure".to_owned()));
+            }
+            Ok(())
+        }
+
+        async fn send_message_with_id(
+            &self,
+            channel_id: &str,
+            content: &str,
+        ) -> Result<Option<String>, FrameworkError> {
+            if !self.supports_message_editing() {
+                self.send_message(channel_id, content).await?;
+                return Ok(None);
+            }
+            let delay_ms = self.send_delay_ms.load(Ordering::Relaxed) as u64;
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            let message_id = format!(
+                "stream-msg-{}",
+                self.next_message_id.fetch_add(1, Ordering::Relaxed)
+            );
+            self.outbound_with_id.lock().await.push((
+                channel_id.to_owned(),
+                message_id.clone(),
+                content.to_owned(),
+            ));
+            if self.fail_send.load(Ordering::Relaxed) {
+                return Err(FrameworkError::Tool("simulated send failure".to_owned()));
+            }
+            Ok(Some(message_id))
+        }
+
+        async fn edit_message(
+            &self,
+            channel_id: &str,
+            message_id: &str,
+            content: &str,
+        ) -> Result<(), FrameworkError> {
+            let delay_ms = self.edit_delay_ms.load(Ordering::Relaxed) as u64;
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            self.edits.lock().await.push((
+                channel_id.to_owned(),
+                message_id.to_owned(),
+                content.to_owned(),
+            ));
+            if self.fail_send.load(Ordering::Relaxed) {
+                return Err(FrameworkError::Tool("simulated send failure".to_owned()));
             }
             Ok(())
         }
@@ -937,18 +1397,27 @@ mod tests {
     fn test_gateway(channel: Arc<dyn Channel>) -> Gateway {
         let mut channels = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
-        Gateway::new(channels, RoutingConfig::default())
+        Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        )
     }
 
     fn lifecycle_runtime_state(
         channel: Arc<LifecycleChannel>,
         provider: Arc<dyn Provider>,
         memory: DynMemory,
+        output_mode: ChannelOutputMode,
     ) -> RuntimeState {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel);
         let (gateway_tx, _gateway_rx) = mpsc::channel(4);
-        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default()));
+        let gateway = Arc::new(Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, output_mode)]),
+            RoutingConfig::default(),
+        ));
         let mut agent_config = AgentInnerConfig::default();
         agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
         let runtime_config = AgentRuntimeConfig {
@@ -964,7 +1433,10 @@ mod tests {
         let react_loop = Arc::new(ReactLoop::new(
             ProviderFactory::from_parts(HashMap::from([(
                 "default".to_owned(),
-                (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
+                (
+                    Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>,
+                    true,
+                ),
             )])),
             default_factory(),
             SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
@@ -1097,7 +1569,11 @@ mod tests {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, channel.clone());
         let (gateway_tx, _gateway_rx) = mpsc::channel(4);
-        let gateway = Arc::new(Gateway::new(channels, RoutingConfig::default()));
+        let gateway = Arc::new(Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        ));
         let context = Arc::new(RuntimeContext {
             react_loop: Arc::new(ReactLoop::new(
                 ProviderFactory::from_parts(HashMap::new()),
@@ -1126,7 +1602,9 @@ mod tests {
         };
         let inbound = inbound_message();
 
-        handle_inbound_once(&state, inbound).await.expect("handler should not fail");
+        handle_inbound_once(&state, inbound)
+            .await
+            .expect("handler should not fail");
 
         let outbound = channel.outbound().await;
         assert_eq!(outbound.len(), 1);
@@ -1142,7 +1620,12 @@ mod tests {
         let memory_impl = Arc::new(FakeMemory::default());
         let memory: DynMemory = memory_impl.clone();
         let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("unused"));
-        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
         let mut inbound = inbound_message();
         inbound.invoke = false;
 
@@ -1164,16 +1647,22 @@ mod tests {
         let memory_impl = Arc::new(FakeMemory::default());
         let memory: DynMemory = memory_impl.clone();
         let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("hello back"));
-        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
 
         handle_inbound_once(&state, inbound_message())
             .await
             .expect("handler should succeed");
 
         assert_eq!(channel.typing_events().await.len(), 1);
-        let outbound = channel.outbound().await;
+        let outbound = channel.outbound_with_id().await;
         assert_eq!(outbound.len(), 1);
-        assert_eq!(outbound[0].1, "hello back");
+        assert_eq!(outbound[0].2, "hello back");
+        assert!(channel.edits().await.is_empty());
     }
 
     #[tokio::test]
@@ -1181,15 +1670,21 @@ mod tests {
         let channel = Arc::new(LifecycleChannel::default());
         let memory: DynMemory = Arc::new(FakeMemory::default());
         let provider: Arc<dyn Provider> = Arc::new(StaticProvider::err("boom"));
-        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
 
         handle_inbound_once(&state, inbound_message())
             .await
             .expect("handler should swallow runtime failure");
 
-        let outbound = channel.outbound().await;
-        assert_eq!(outbound.len(), 1);
-        assert_eq!(outbound[0].1, "safe fallback");
+        let streamed = channel.outbound_with_id().await;
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0].2, "safe fallback");
+        assert!(channel.outbound().await.is_empty());
     }
 
     #[tokio::test]
@@ -1197,14 +1692,171 @@ mod tests {
         let channel = Arc::new(LifecycleChannel::with_send_failure());
         let memory: DynMemory = Arc::new(FakeMemory::default());
         let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("reply"));
-        let state = lifecycle_runtime_state(channel.clone(), provider, memory);
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
 
         handle_inbound_once(&state, inbound_message())
             .await
             .expect("handler should succeed despite send failure");
 
+        let streamed = channel.outbound_with_id().await;
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0].2, "reply");
         let outbound = channel.outbound().await;
         assert_eq!(outbound.len(), 1);
         assert_eq!(outbound[0].1, "reply");
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_uses_streaming_message_send_and_final_edit() {
+        let channel = Arc::new(LifecycleChannel::default());
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("streamed reply"));
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed");
+
+        let initial = channel.outbound_with_id().await;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].2, "streamed reply");
+        assert!(channel.edits().await.is_empty());
+        assert!(channel.outbound().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_waits_for_slow_initial_stream_send_without_duplicate_fallback() {
+        let channel = Arc::new(LifecycleChannel::with_send_delay(150));
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("slow streamed reply"));
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed");
+
+        let initial = channel.outbound_with_id().await;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].2, "slow streamed reply");
+        assert!(channel.edits().await.is_empty());
+        assert!(channel.outbound().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_uses_single_final_send_for_non_editable_channels() {
+        let channel = Arc::new(LifecycleChannel::non_editable());
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("plain reply"));
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed");
+
+        let outbound = channel.outbound().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].1, "plain reply");
+        assert!(channel.outbound_with_id().await.is_empty());
+        assert!(channel.edits().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_uses_single_final_send_when_output_mode_is_normal() {
+        let channel = Arc::new(LifecycleChannel::default());
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StaticProvider::ok("plain reply"));
+        let state =
+            lifecycle_runtime_state(channel.clone(), provider, memory, ChannelOutputMode::Normal);
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed");
+
+        let outbound = channel.outbound().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].1, "plain reply");
+        assert!(channel.outbound_with_id().await.is_empty());
+        assert!(channel.edits().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_once_finalizes_after_in_flight_edit_without_duplicate_send() {
+        let channel = Arc::new(LifecycleChannel::with_edit_delay(150));
+        let memory: DynMemory = Arc::new(FakeMemory::default());
+        let provider: Arc<dyn Provider> = Arc::new(StreamingProvider::new(vec![
+            StreamEvent::TextDelta("hel".to_owned()),
+            StreamEvent::TextDelta("lo".to_owned()),
+            StreamEvent::Done,
+        ]));
+        let state = lifecycle_runtime_state(
+            channel.clone(),
+            provider,
+            memory,
+            ChannelOutputMode::Streaming,
+        );
+
+        handle_inbound_once(&state, inbound_message())
+            .await
+            .expect("handler should succeed");
+
+        let initial = channel.outbound_with_id().await;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].2, "hel");
+        let edits = channel.edits().await;
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].1, initial[0].1);
+        assert_eq!(edits[0].2, "hello");
+        assert!(channel.outbound().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_display_rate_limits_edit_spawns() {
+        let channel = Arc::new(LifecycleChannel::default());
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, channel.clone());
+        let gateway = Arc::new(Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        ));
+        let display = Arc::new(std::sync::Mutex::new(StreamingDisplay {
+            gateway,
+            inbound: inbound_message(),
+            latest_content: "first".to_owned(),
+            displayed_content: Some("stale".to_owned()),
+            message_id: Some("stream-msg-1".to_owned()),
+            last_edit: Instant::now(),
+            initial_send_attempted: true,
+            send_in_flight: false,
+            edit_in_flight: false,
+            finalized: false,
+            error_message: None,
+            notify: Arc::new(Notify::new()),
+        }));
+
+        spawn_streaming_display_update(&display, "first");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert!(channel.edits().await.is_empty());
     }
 }

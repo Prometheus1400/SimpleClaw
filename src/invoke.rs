@@ -71,6 +71,7 @@ impl AgentInvoker for DirectAgentInvoker {
             completion_tx: None,
             completion_route: None,
             source_message_id: None,
+            on_text_delta: None,
         };
         self.react_loop
             .upgrade()
@@ -119,6 +120,7 @@ impl AgentInvoker for DirectAgentInvoker {
             completion_tx: None,
             completion_route: None,
             source_message_id: None,
+            on_text_delta: None,
         };
         self.react_loop
             .upgrade()
@@ -150,7 +152,9 @@ mod tests {
         DynMemory, LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory,
         MemoryRecallHit, MemoryStoreScope, StoredMessage, StoredRole,
     };
-    use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, Role, ToolDefinition};
+    use crate::providers::{
+        Message, Provider, ProviderFactory, ProviderResponse, Role, ToolDefinition,
+    };
     use crate::react::ReactLoop;
     use crate::tools::skill::SkillFactory;
     use crate::tools::{
@@ -363,7 +367,10 @@ mod tests {
         Arc::new(ReactLoop::new(
             ProviderFactory::from_parts(HashMap::from([(
                 "default".to_owned(),
-                (Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>, true),
+                (
+                    Box::new(ForwardProvider { inner: provider }) as Box<dyn Provider>,
+                    true,
+                ),
             )])),
             default_factory(),
             SkillFactory::new(PathBuf::from("/tmp/simpleclaw-invoke-skills")),

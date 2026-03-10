@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serenity::builder::EditMessage;
 use serenity::http::Http;
 use serenity::model::channel::Message as DiscordMessage;
 use serenity::model::channel::MessageReaction;
@@ -112,6 +113,10 @@ impl EventHandler for DiscordHandler {
 
 #[async_trait]
 impl Channel for DiscordChannel {
+    fn supports_message_editing(&self) -> bool {
+        true
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
         tracing::debug!(status = "sending", "discord send");
@@ -120,6 +125,36 @@ impl Channel for DiscordChannel {
             .await
             .map_err(|e| FrameworkError::Config(format!("discord send failed: {e}")))?;
         tracing::debug!(status = "completed", "discord send");
+        Ok(())
+    }
+
+    async fn send_message_with_id(
+        &self,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<Option<String>, FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        tracing::debug!(status = "sending", "discord send");
+        let message = channel_id
+            .say(&self.http, content)
+            .await
+            .map_err(|e| FrameworkError::Config(format!("discord send failed: {e}")))?;
+        tracing::debug!(status = "completed", message_id = %message.id.get(), "discord send");
+        Ok(Some(message.id.get().to_string()))
+    }
+
+    async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        let message_id = parse_message_id(message_id)?;
+        channel_id
+            .edit_message(&self.http, message_id, EditMessage::new().content(content))
+            .await
+            .map_err(|e| FrameworkError::Config(format!("discord edit failed: {e}")))?;
         Ok(())
     }
 

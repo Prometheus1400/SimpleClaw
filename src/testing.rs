@@ -510,9 +510,11 @@ impl Provider for StaticMockProvider {
 
 struct CaptureChannel {
     outbound: Mutex<Vec<TestOutboundMessage>>,
+    outbound_ids: Mutex<Vec<String>>,
     typing_events: AtomicUsize,
     listen_tx: tokio::sync::mpsc::Sender<ChannelInbound>,
     listen_rx: Mutex<tokio::sync::mpsc::Receiver<ChannelInbound>>,
+    next_message_id: AtomicUsize,
 }
 
 impl CaptureChannel {
@@ -520,9 +522,11 @@ impl CaptureChannel {
         let (listen_tx, listen_rx) = tokio::sync::mpsc::channel(1);
         Self {
             outbound: Mutex::new(Vec::new()),
+            outbound_ids: Mutex::new(Vec::new()),
             typing_events: AtomicUsize::new(0),
             listen_tx,
             listen_rx: Mutex::new(listen_rx),
+            next_message_id: AtomicUsize::new(0),
         }
     }
 
@@ -544,8 +548,58 @@ impl CaptureChannel {
 
 #[async_trait]
 impl Channel for CaptureChannel {
+    fn supports_message_editing(&self) -> bool {
+        true
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let mut outbound = self.outbound.lock().await;
+        outbound.push(TestOutboundMessage {
+            channel_id: channel_id.to_owned(),
+            content: content.to_owned(),
+        });
+        self.outbound_ids.lock().await.push(String::new());
+        Ok(())
+    }
+
+    async fn send_message_with_id(
+        &self,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<Option<String>, FrameworkError> {
+        let message_id = format!(
+            "test-msg-{}",
+            self.next_message_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let mut outbound = self.outbound.lock().await;
+        outbound.push(TestOutboundMessage {
+            channel_id: channel_id.to_owned(),
+            content: content.to_owned(),
+        });
+        self.outbound_ids.lock().await.push(message_id.clone());
+        Ok(Some(message_id))
+    }
+
+    async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<(), FrameworkError> {
+        let mut outbound = self.outbound.lock().await;
+        let outbound_ids = self.outbound_ids.lock().await;
+        if let Some((index, _)) = outbound_ids
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.as_str() == message_id)
+        {
+            outbound[index] = TestOutboundMessage {
+                channel_id: channel_id.to_owned(),
+                content: content.to_owned(),
+            };
+            return Ok(());
+        }
+
         outbound.push(TestOutboundMessage {
             channel_id: channel_id.to_owned(),
             content: content.to_owned(),

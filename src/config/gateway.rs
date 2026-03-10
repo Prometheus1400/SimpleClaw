@@ -34,10 +34,25 @@ impl GatewayChannelKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelOutputMode {
+    Streaming,
+    Normal,
+}
+
+impl Default for ChannelOutputMode {
+    fn default() -> Self {
+        Self::Streaming
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChannelConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub output: ChannelOutputMode,
     #[serde(default)]
     pub token: Option<String>,
 }
@@ -46,6 +61,7 @@ impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            output: ChannelOutputMode::Streaming,
             token: None,
         }
     }
