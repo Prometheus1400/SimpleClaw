@@ -961,6 +961,15 @@ routing:
                 .and_then(|secret| secret.exposed()),
             Some("web-search-secret")
         );
+        let web_search_config = global.agents.list[0]
+            .config
+            .tools
+            .config_for_tool("web_search")
+            .expect("web search config should serialize");
+        assert_eq!(
+            web_search_config.get("api_key").and_then(|value| value.as_str()),
+            Some("web-search-secret")
+        );
 
         unsafe {
             std::env::remove_var(provider_env);
