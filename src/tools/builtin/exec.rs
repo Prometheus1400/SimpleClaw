@@ -63,11 +63,12 @@ impl Tool for ExecTool {
                         args.command.trim(),
                         &ctx.workspace_root,
                         &self.config.sandbox,
+                        &ctx.env,
                     )
                     .await?
             } else {
                 ctx.process_manager
-                    .spawn(args.command.trim(), Some(&ctx.workspace_root))
+                    .spawn(args.command.trim(), Some(&ctx.workspace_root), &ctx.env)
                     .await?
             };
             ctx.process_manager.spawn_completion_watcher(
@@ -87,10 +88,17 @@ impl Tool for ExecTool {
                 self.config
                     .timeout_seconds
                     .unwrap_or(DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS),
+                &ctx.env,
             )
             .await?
         } else {
-            exec_shell_command(args.command.trim(), None).await?
+            exec_shell_command(
+                args.command.trim(),
+                Some(&ctx.workspace_root),
+                &ctx.env,
+                self.config.timeout_seconds.unwrap_or(20),
+            )
+            .await?
         };
         Ok(result.to_string())
     }
@@ -101,6 +109,7 @@ async fn exec_with_sandbox_runtime(
     workspace_root: &Path,
     sandbox: &ToolSandboxConfig,
     timeout_seconds: u64,
+    env: &std::collections::BTreeMap<String, String>,
 ) -> Result<serde_json::Value, FrameworkError> {
     debug!(
         status = "started",
@@ -112,6 +121,7 @@ async fn exec_with_sandbox_runtime(
         sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
     let mut runner = Command::new("bash");
     runner.arg("-lc").arg(prepared.wrapped_command());
+    runner.envs(env);
     runner.current_dir(crate::tools::sandbox::normalize_workspace_root(
         workspace_root,
     )?);
@@ -223,6 +233,7 @@ mod tests {
             agent_id: "test-agent".to_owned(),
             memory: Arc::new(memory),
             history_messages: 10,
+            env: std::collections::BTreeMap::new(),
             workspace_root: PathBuf::from(&root),
             user_id: "user-1".to_owned(),
             owner_ids: vec!["user-1".to_owned()],
@@ -297,6 +308,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_injects_configured_env_into_foreground_command() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({ "sandbox": { "enabled": false } }))
+            .expect("config should apply");
+        let mut ctx = test_ctx().await;
+        ctx.env
+            .insert("SIMPLECLAW_EXEC_TEST_TOKEN".to_owned(), "from-config".to_owned());
+
+        let output = tool
+            .execute(
+                &ctx,
+                r#"{"command":"printf %s \"$SIMPLECLAW_EXEC_TEST_TOKEN\""}"#,
+                "sess-1",
+            )
+            .await
+            .expect("foreground exec should succeed");
+        let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
+
+        assert_eq!(parsed["stdout"], "from-config");
+    }
+
+    #[tokio::test]
     async fn exec_backgrounds_process_when_enabled() {
         let mut tool = ExecTool::default();
         tool.configure(serde_json::json!({
@@ -326,5 +359,43 @@ mod tests {
                 .iter()
                 .any(|snapshot| snapshot.session_id == session_id)
         );
+    }
+
+    #[tokio::test]
+    async fn exec_injects_configured_env_into_background_command() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({
+            "allow_background": true,
+            "sandbox": { "enabled": false }
+        }))
+        .expect("config should apply");
+        let mut ctx = test_ctx().await;
+        ctx.env.insert(
+            "SIMPLECLAW_EXEC_BG_TOKEN".to_owned(),
+            "background-value".to_owned(),
+        );
+        let output_path = ctx.workspace_root.join("bg-env.txt");
+
+        let command = format!(
+            "printf %s \"$SIMPLECLAW_EXEC_BG_TOKEN\" > {}",
+            output_path.display()
+        );
+        tool.execute(
+            &ctx,
+            &serde_json::json!({ "command": command, "background": true }).to_string(),
+            "sess-1",
+        )
+        .await
+        .expect("background exec should succeed");
+
+        for _ in 0..20 {
+            if let Ok(content) = std::fs::read_to_string(&output_path) {
+                assert_eq!(content, "background-value");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        panic!("background exec did not write env output");
     }
 }

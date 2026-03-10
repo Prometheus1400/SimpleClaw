@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
@@ -272,15 +273,18 @@ pub(super) fn parse_process_args(args_json: &str) -> ProcessArgs {
 pub(super) async fn exec_shell_command(
     command: &str,
     workspace: Option<&std::path::Path>,
+    env: &BTreeMap<String, String>,
+    timeout_seconds: u64,
 ) -> Result<Value, FrameworkError> {
     let mut child = Command::new("bash");
     child.arg("-lc").arg(command);
+    child.envs(env);
     if let Some(workspace) = workspace {
         child.current_dir(workspace);
     }
-    let output = timeout(Duration::from_secs(20), child.output())
+    let output = timeout(Duration::from_secs(timeout_seconds), child.output())
         .await
-        .map_err(|_| FrameworkError::Tool("exec timed out after 20s".to_owned()))?
+        .map_err(|_| FrameworkError::Tool(format!("exec timed out after {timeout_seconds}s")))?
         .map_err(|e| FrameworkError::Tool(format!("exec failed to start: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

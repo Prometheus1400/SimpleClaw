@@ -11,6 +11,7 @@ mod validate;
 
 use std::fs;
 use std::path::Path;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +104,10 @@ impl LoadedConfig {
                 })?;
             default_agent.workspace = workspace;
         }
+        validate::validate_execution_env(
+            "execution.defaults.env",
+            Some(&global.execution.defaults.env),
+        )?;
         validate::validate_providers_config(&global.providers)?;
         validate::validate_agents_config(&global.agents)?;
         validate::reconcile_routing_default_agent(&mut global.gateway.routing, &global.agents);
@@ -117,14 +122,38 @@ impl GlobalConfig {
     fn resolve_secrets(&mut self, paths: &AppPaths) -> Result<(), FrameworkError> {
         let resolver = SecretResolver::new(paths)?;
         self.providers.resolve_secrets(&resolver)?;
+        resolve_execution_env_secrets(
+            "execution.defaults.env",
+            &mut self.execution.defaults.env,
+            &resolver,
+        )?;
         for (kind, channel) in &mut self.gateway.channels {
             resolve_channel_secrets(kind, channel, &resolver)?;
         }
         for agent in &mut self.agents.list {
+            if let Some(env) = agent.config.execution.env.as_mut() {
+                let field_path = format!("agents.list[{}].config.execution.env", agent.id);
+                resolve_execution_env_secrets(&field_path, env, &resolver)?;
+            }
             resolve_agent_tool_secrets(agent, &resolver)?;
         }
         Ok(())
     }
+}
+
+fn resolve_execution_env_secrets(
+    field_path: &str,
+    env: &mut BTreeMap<String, String>,
+    resolver: &SecretResolver,
+) -> Result<(), FrameworkError> {
+    for (key, value) in env.iter_mut() {
+        let entry_path = format!("{field_path}.{key}");
+        let secret_name = parse_secret_reference(&entry_path, value)?;
+        *value = resolver
+            .resolve(&secret_name)
+            .map_err(|err| FrameworkError::Config(format!("{entry_path} failed to resolve: {err}")))?;
+    }
+    Ok(())
 }
 
 fn resolve_agent_tool_secrets(
@@ -169,6 +198,7 @@ fn resolve_channel_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -376,10 +406,28 @@ mod tests {
     fn execution_defaults_history_window() {
         let execution = ExecutionConfig::default();
         assert_eq!(execution.defaults.history_messages, 10);
+        assert!(execution.defaults.env.is_empty());
         assert_eq!(execution.log_level, LogLevel::Info);
         assert!(execution.defaults.memory_recall.enabled);
         assert_eq!(execution.defaults.memory_recall.top_k, 3);
         assert!((execution.defaults.memory_recall.min_score - 0.72).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn execution_defaults_env_accepts_map() {
+        let yaml = r#"
+env:
+  API_TOKEN: "${secret:api_token}"
+  SERVICE_URL: "${secret:service_url}"
+"#;
+        let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml).expect("valid yaml");
+        assert_eq!(
+            parsed.env,
+            BTreeMap::from([
+                ("API_TOKEN".to_owned(), "${secret:api_token}".to_owned()),
+                ("SERVICE_URL".to_owned(), "${secret:service_url}".to_owned()),
+            ])
+        );
     }
 
     #[test]
@@ -835,10 +883,14 @@ routing:
         let provider_env = "SIMPLECLAW_TEST_PROVIDER_SECRET";
         let discord_env = "SIMPLECLAW_TEST_DISCORD_SECRET";
         let web_search_env = "SIMPLECLAW_TEST_WEB_SEARCH_SECRET";
+        let execution_env = "SIMPLECLAW_TEST_EXECUTION_SECRET";
+        let agent_execution_env = "SIMPLECLAW_TEST_AGENT_EXECUTION_SECRET";
         unsafe {
             std::env::set_var(provider_env, "provider-secret");
             std::env::set_var(discord_env, "discord-secret");
             std::env::set_var(web_search_env, "web-search-secret");
+            std::env::set_var(execution_env, "execution-secret");
+            std::env::set_var(agent_execution_env, "agent-execution-secret");
         }
 
         let dir = unique_test_dir("resolve_refs");
@@ -858,6 +910,14 @@ routing:
         {
             provider.api_key = Some(format!("${{secret:{provider_env}}}"));
         }
+        global.execution.defaults.env = BTreeMap::from([(
+            "GLOBAL_TOKEN".to_owned(),
+            format!("${{secret:{execution_env}}}"),
+        )]);
+        global.agents.list[0].config.execution.env = Some(BTreeMap::from([(
+            "AGENT_TOKEN".to_owned(),
+            format!("${{secret:{agent_execution_env}}}"),
+        )]));
         global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
             enabled: true,
             owner_restricted: true,
@@ -883,6 +943,20 @@ routing:
         assert_eq!(
             global.agents.list[0]
                 .config
+                .execution
+                .env
+                .as_ref()
+                .and_then(|env| env.get("AGENT_TOKEN"))
+                .map(String::as_str),
+            Some("agent-execution-secret")
+        );
+        assert_eq!(
+            global.execution.defaults.env.get("GLOBAL_TOKEN").map(String::as_str),
+            Some("execution-secret")
+        );
+        assert_eq!(
+            global.agents.list[0]
+                .config
                 .tools
                 .web_search
                 .as_ref()
@@ -894,6 +968,8 @@ routing:
             std::env::remove_var(provider_env);
             std::env::remove_var(discord_env);
             std::env::remove_var(web_search_env);
+            std::env::remove_var(execution_env);
+            std::env::remove_var(agent_execution_env);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -960,6 +1036,45 @@ routing:
         ));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn global_config_rejects_plaintext_execution_env_value() {
+        let dir = unique_test_dir("reject_plaintext_execution_env");
+        fs::create_dir_all(&dir).expect("should create test dir");
+        let paths = test_paths(dir.clone());
+
+        let mut global = GlobalConfig::default();
+        global
+            .execution
+            .defaults
+            .env
+            .insert("API_TOKEN".to_owned(), "plaintext".to_owned());
+
+        let err = global.resolve_secrets(&paths).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("execution.defaults.env.API_TOKEN must use secret reference syntax")
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn global_config_rejects_invalid_execution_env_key() {
+        let mut global = GlobalConfig::default();
+        global
+            .execution
+            .defaults
+            .env
+            .insert("BAD-KEY".to_owned(), "${secret:token}".to_owned());
+
+        let err = validate::validate_execution_env(
+            "execution.defaults.env",
+            Some(&global.execution.defaults.env),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("execution.defaults.env.BAD-KEY is invalid"));
     }
 
     #[test]

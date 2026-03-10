@@ -6,6 +6,7 @@ pub mod skill;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -94,6 +95,7 @@ pub(crate) struct ToolExecEnv {
     pub agent_id: String,
     pub memory: DynMemory,
     pub history_messages: usize,
+    pub env: BTreeMap<String, String>,
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
@@ -344,6 +346,7 @@ impl ProcessManager {
         &self,
         command: &str,
         workspace_root: Option<&std::path::Path>,
+        env: &BTreeMap<String, String>,
     ) -> Result<(String, CompletionHandle), FrameworkError> {
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
@@ -359,6 +362,7 @@ impl ProcessManager {
 
         let mut cmd = std::process::Command::new("bash");
         cmd.arg("-lc").arg(command);
+        cmd.envs(env);
         if let Some(workspace_root) = workspace_root {
             cmd.current_dir(workspace_root);
         }
@@ -418,6 +422,7 @@ impl ProcessManager {
         command: &str,
         workspace_root: &std::path::Path,
         sandbox: &ToolSandboxConfig,
+        env: &BTreeMap<String, String>,
     ) -> Result<(String, CompletionHandle), FrameworkError> {
         let prepared =
             sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
@@ -438,6 +443,7 @@ impl ProcessManager {
         let child = std::process::Command::new("bash")
             .arg("-lc")
             .arg(wrapped)
+            .envs(env)
             .current_dir(&workspace)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
@@ -991,7 +997,7 @@ mod tests {
     async fn completion_watcher_marks_background_process_complete_without_route() {
         let manager = Arc::new(ProcessManager::new());
         let (session_id, handle) = manager
-            .spawn("echo hello", None)
+            .spawn("echo hello", None, &BTreeMap::new())
             .await
             .expect("spawn should succeed");
         manager.spawn_completion_watcher(session_id.clone(), handle, None, None);

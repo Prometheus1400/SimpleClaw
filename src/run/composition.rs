@@ -330,6 +330,16 @@ pub(crate) async fn assemble_runtime_state(
 }
 
 pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
+    let cron_env_by_agent = state
+        .runtimes
+        .iter()
+        .map(|(agent_id, runtime)| {
+            (
+                agent_id.clone(),
+                runtime.config().effective_execution.env.clone(),
+            )
+        })
+        .collect();
     RuntimeServices {
         _gateway_listeners: state
             .gateway
@@ -337,6 +347,7 @@ pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
         _cron_scheduler: super::cron_scheduler::spawn(
             Arc::clone(&state.cron_store),
             state.context.tool_runtime.completion_tx.clone(),
+            cron_env_by_agent,
             10,
         ),
     }

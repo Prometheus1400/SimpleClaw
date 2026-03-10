@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::error::FrameworkError;
 
@@ -35,6 +35,10 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
                 agent.id
             )));
         }
+        validate_execution_env(
+            &format!("agents.list[{}].config.execution.env", agent.id),
+            agent.config.execution.env.as_ref(),
+        )?;
         validate_tools_config(&agent.id, &agent.config.tools)?;
     }
 
@@ -46,6 +50,29 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
     }
 
     Ok(())
+}
+
+pub(super) fn validate_execution_env(
+    field_path: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<(), FrameworkError> {
+    let Some(env) = env else {
+        return Ok(());
+    };
+    for key in env.keys() {
+        if !is_valid_env_name(key) {
+            return Err(FrameworkError::Config(format!(
+                "{field_path}.{key} is invalid; expected env key matching [A-Za-z_][A-Za-z0-9_]*"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_env_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn validate_tools_config(agent_id: &str, tools: &ToolsConfig) -> Result<(), FrameworkError> {
