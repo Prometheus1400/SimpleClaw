@@ -41,7 +41,7 @@ pub use tools::{
     ClockToolConfig, CronToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig,
     MemorizeToolConfig, MemoryToolConfig, ProcessToolConfig, ReactToolConfig, ReadToolConfig,
     SkillsToolConfig, SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig,
-    WebFetchToolConfig, WebSearchProvider, WebSearchToolConfig,
+    WebFetchToolConfig, WebSearchProvider, WebSearchToolConfig, WebSearchToolRuntimeConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -968,7 +968,8 @@ routing:
             .config
             .tools
             .config_for_tool("web_search")
-            .expect("web search config should serialize");
+            .expect("web search config should serialize")
+            .expect("web search config should exist");
         assert_eq!(
             web_search_config.get("api_key").and_then(|value| value.as_str()),
             Some("web-search-secret")

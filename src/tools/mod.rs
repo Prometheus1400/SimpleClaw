@@ -210,7 +210,7 @@ impl ToolFactory {
                 )));
             };
             let mut tool = tool_template.box_clone();
-            if let Some(config) = tools_config.config_for_tool(&name) {
+            if let Some(config) = tools_config.config_for_tool(&name)? {
                 tool.configure(config)?;
             }
             let tool: Arc<dyn Tool> = Arc::from(tool);

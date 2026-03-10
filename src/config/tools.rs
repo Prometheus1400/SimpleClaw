@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::FrameworkError;
 use crate::secrets::Secret;
 
 fn default_enabled() -> bool {
@@ -102,38 +103,33 @@ impl ToolsConfig {
         names
     }
 
-    pub fn config_for_tool(&self, name: &str) -> Option<Value> {
-        let mut value = match name {
-            "read" => serde_json::to_value(self.read.clone().unwrap_or_default()).ok()?,
-            "edit" => serde_json::to_value(self.edit.clone().unwrap_or_default()).ok()?,
-            "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok()?,
-            "process" => serde_json::to_value(self.process.clone().unwrap_or_default()).ok()?,
-            "web_search" => {
-                serde_json::to_value(self.web_search.clone().unwrap_or_default()).ok()?
-            }
-            "web_fetch" => serde_json::to_value(self.web_fetch.clone().unwrap_or_default()).ok()?,
-            "memory" => serde_json::to_value(self.memory.clone().unwrap_or_default()).ok()?,
-            "memorize" => serde_json::to_value(self.memorize.clone().unwrap_or_default()).ok()?,
-            "forget" => serde_json::to_value(self.forget.clone().unwrap_or_default()).ok()?,
-            "summon" => serde_json::to_value(self.summon.clone().unwrap_or_default()).ok()?,
-            "task" => serde_json::to_value(self.task.clone().unwrap_or_default()).ok()?,
-            "clock" => serde_json::to_value(self.clock.clone().unwrap_or_default()).ok()?,
-            "cron" => serde_json::to_value(self.cron.clone().unwrap_or_default()).ok()?,
-            "react" => serde_json::to_value(self.react.clone().unwrap_or_default()).ok()?,
-            "skills" => serde_json::to_value(self.skills.clone().unwrap_or_default()).ok()?,
-            _ => return None,
+    pub fn config_for_tool(&self, name: &str) -> Result<Option<Value>, FrameworkError> {
+        let value = match name {
+            "read" => serde_json::to_value(self.read.clone().unwrap_or_default()).ok(),
+            "edit" => serde_json::to_value(self.edit.clone().unwrap_or_default()).ok(),
+            "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok(),
+            "process" => serde_json::to_value(self.process.clone().unwrap_or_default()).ok(),
+            "web_search" => Some(
+                serde_json::to_value(self.web_search.clone().unwrap_or_default().to_runtime()?)
+                    .map_err(|err| {
+                        FrameworkError::Config(format!(
+                            "failed to serialize runtime web_search config: {err}"
+                        ))
+                    })?,
+            ),
+            "web_fetch" => serde_json::to_value(self.web_fetch.clone().unwrap_or_default()).ok(),
+            "memory" => serde_json::to_value(self.memory.clone().unwrap_or_default()).ok(),
+            "memorize" => serde_json::to_value(self.memorize.clone().unwrap_or_default()).ok(),
+            "forget" => serde_json::to_value(self.forget.clone().unwrap_or_default()).ok(),
+            "summon" => serde_json::to_value(self.summon.clone().unwrap_or_default()).ok(),
+            "task" => serde_json::to_value(self.task.clone().unwrap_or_default()).ok(),
+            "clock" => serde_json::to_value(self.clock.clone().unwrap_or_default()).ok(),
+            "cron" => serde_json::to_value(self.cron.clone().unwrap_or_default()).ok(),
+            "react" => serde_json::to_value(self.react.clone().unwrap_or_default()).ok(),
+            "skills" => serde_json::to_value(self.skills.clone().unwrap_or_default()).ok(),
+            _ => None,
         };
-        if name == "web_search"
-            && let Some(api_key) = self
-                .web_search
-                .as_ref()
-                .and_then(|cfg| cfg.api_key.as_ref())
-                .and_then(|secret| secret.exposed())
-            && let Some(object) = value.as_object_mut()
-        {
-            object.insert("api_key".to_owned(), Value::String(api_key.to_owned()));
-        }
-        Some(value)
+        Ok(value)
     }
 
     pub fn owner_restricted_for_tool(&self, name: &str) -> Option<bool> {
@@ -310,6 +306,19 @@ pub struct WebSearchToolConfig {
     pub timeout_seconds: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSearchToolRuntimeConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
+    #[serde(default)]
+    pub provider: WebSearchProvider,
+    pub api_key: Option<String>,
+    pub timeout_seconds: Option<u64>,
+}
+
 impl Default for WebSearchToolConfig {
     fn default() -> Self {
         Self {
@@ -319,6 +328,42 @@ impl Default for WebSearchToolConfig {
             api_key: None,
             timeout_seconds: None,
         }
+    }
+}
+
+impl Default for WebSearchToolRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
+            provider: WebSearchProvider::default(),
+            api_key: None,
+            timeout_seconds: None,
+        }
+    }
+}
+
+impl WebSearchToolConfig {
+    pub fn to_runtime(&self) -> Result<WebSearchToolRuntimeConfig, FrameworkError> {
+        let api_key = self
+            .api_key
+            .as_ref()
+            .map(|secret| {
+                secret.exposed().map(str::to_owned).ok_or_else(|| {
+                    FrameworkError::Config(
+                        "web_search api_key was not resolved before runtime assembly".to_owned(),
+                    )
+                })
+            })
+            .transpose()?;
+
+        Ok(WebSearchToolRuntimeConfig {
+            enabled: self.enabled,
+            owner_restricted: self.owner_restricted,
+            provider: self.provider,
+            api_key,
+            timeout_seconds: self.timeout_seconds,
+        })
     }
 }
 
@@ -524,5 +569,29 @@ impl Default for SkillsToolConfig {
             enabled: default_enabled(),
             disabled_skills: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WebSearchProvider, WebSearchToolConfig};
+    use crate::secrets::Secret;
+
+    #[test]
+    fn web_search_to_runtime_rejects_unresolved_secret() {
+        let config = WebSearchToolConfig {
+            enabled: true,
+            owner_restricted: true,
+            provider: WebSearchProvider::Brave,
+            api_key: Some(Secret::from_name("BRAVE_API_KEY")),
+            timeout_seconds: Some(20),
+        };
+
+        let err = config
+            .to_runtime()
+            .expect_err("unresolved secret should fail runtime assembly");
+        assert!(err
+            .to_string()
+            .contains("web_search api_key was not resolved before runtime assembly"));
     }
 }

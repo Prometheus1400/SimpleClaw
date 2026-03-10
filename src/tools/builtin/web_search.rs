@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
-use crate::config::WebSearchProvider;
+use crate::config::{WebSearchProvider, WebSearchToolRuntimeConfig};
 use crate::error::FrameworkError;
 use crate::tools::{Tool, ToolExecEnv};
 
@@ -18,17 +18,7 @@ const DUCKDUCKGO_SEARCH_URL: &str = "https://api.duckduckgo.com/";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebSearchTool {
-    config: WebSearchRuntimeConfig,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-struct WebSearchRuntimeConfig {
-    enabled: bool,
-    owner_restricted: bool,
-    provider: WebSearchProvider,
-    api_key: Option<String>,
-    timeout_seconds: Option<u64>,
+    config: WebSearchToolRuntimeConfig,
 }
 
 #[async_trait]
@@ -76,8 +66,8 @@ impl Tool for WebSearchTool {
                     .config
                     .api_key
                     .as_ref()
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty())
+                    .map(|value: &String| value.trim())
+                    .filter(|value: &&str| !value.is_empty())
                     .ok_or_else(|| {
                         FrameworkError::Tool(
                             "search is misconfigured: api_key is required for provider=brave"
