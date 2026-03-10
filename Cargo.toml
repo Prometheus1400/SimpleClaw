@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
@@ -40,6 +40,9 @@ sandbox_common = { path = "sandbox/common" }
 sandbox-runtime = "0.1.1"
 cron = "0.15"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"
 
 [patch.crates-io]
 sandbox-runtime = { path = "third_party/sandbox-runtime-rs" }

@@ -36,6 +36,10 @@ pub enum Command {
         #[command(subcommand)]
         action: ListAction,
     },
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
     Agent {
         #[command(subcommand)]
         action: AgentAction,
@@ -67,6 +71,40 @@ pub enum AgentAction {
     },
 }
 
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum AuthAction {
+    Login {
+        #[arg(long, value_enum)]
+        provider: AuthProvider,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    Status {
+        #[arg(long, value_enum)]
+        provider: AuthProvider,
+    },
+    Logout {
+        #[arg(long, value_enum)]
+        provider: AuthProvider,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum AuthProvider {
+    #[value(name = "openai_codex")]
+    OpenaiCodex,
+}
+
+impl AuthProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiCodex => "openai_codex",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum MemoryMode {
     Short,
@@ -88,7 +126,7 @@ fn parse_limit(raw: &str) -> Result<usize, String> {
 mod tests {
     use clap::Parser;
 
-    use super::{AgentAction, Cli, Command, MemoryMode};
+    use super::{AgentAction, AuthAction, AuthProvider, Cli, Command, MemoryMode};
 
     #[test]
     fn parses_agent_memory_short() {
@@ -219,5 +257,43 @@ mod tests {
             "0",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_auth_login_defaults_profile_to_none() {
+        let cli = Cli::parse_from(["simpleclaw", "auth", "login", "--provider", "openai_codex"]);
+
+        match cli.command {
+            Some(Command::Auth {
+                action: AuthAction::Login { provider, profile },
+            }) => {
+                assert_eq!(provider, AuthProvider::OpenaiCodex);
+                assert!(profile.is_none());
+            }
+            _ => panic!("expected auth login command"),
+        }
+    }
+
+    #[test]
+    fn parses_auth_logout_with_profile() {
+        let cli = Cli::parse_from([
+            "simpleclaw",
+            "auth",
+            "logout",
+            "--provider",
+            "openai_codex",
+            "--profile",
+            "work",
+        ]);
+
+        match cli.command {
+            Some(Command::Auth {
+                action: AuthAction::Logout { provider, profile },
+            }) => {
+                assert_eq!(provider, AuthProvider::OpenaiCodex);
+                assert_eq!(profile.as_deref(), Some("work"));
+            }
+            _ => panic!("expected auth logout command"),
+        }
     }
 }

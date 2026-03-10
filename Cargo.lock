@@ -3902,6 +3902,7 @@ name = "simpleclaw"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "cap-std",
  "chrono",
  "clap",
@@ -3909,6 +3910,7 @@ dependencies = [
  "cron",
  "deadpool-sqlite",
  "fastembed",
+ "rand 0.8.5",
  "regex",
  "reqwest",
  "rusqlite",
@@ -3919,6 +3921,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serenity",
+ "sha2",
  "sqlite-vec",
  "thiserror 2.0.18",
  "tokio",

@@ -7,6 +7,7 @@ use crate::error::FrameworkError;
 
 use super::gemini::GeminiProvider;
 use super::moonshot_compatible::MoonshotCompatibleProvider;
+use super::openai_codex::OpenAiCodexProvider;
 use super::types::Provider;
 
 pub struct ProviderMetadata {
@@ -33,6 +34,10 @@ impl ProviderRegistry {
         let mut adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>> = HashMap::new();
         adapters.insert(ProviderKind::Gemini, Arc::new(GeminiProviderAdapter));
         adapters.insert(ProviderKind::Moonshot, Arc::new(MoonshotProviderAdapter));
+        adapters.insert(
+            ProviderKind::OpenAiCodex,
+            Arc::new(OpenAiCodexProviderAdapter),
+        );
         Self { adapters }
     }
 
@@ -174,6 +179,32 @@ impl ProviderAdapter for MoonshotProviderAdapter {
         };
         let provider =
             MoonshotCompatibleProvider::from_moonshot_config(provider_key, config.clone())?;
+        Ok(Box::new(provider))
+    }
+}
+
+struct OpenAiCodexProviderAdapter;
+
+impl ProviderAdapter for OpenAiCodexProviderAdapter {
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            kind: ProviderKind::OpenAiCodex,
+            supports_native_tools: true,
+            known_models: &["gpt-5.3-codex", "gpt-5-codex", "gpt-5.1-codex-mini"],
+        }
+    }
+
+    fn create(
+        &self,
+        _provider_key: &str,
+        entry: &ProviderEntryConfig,
+    ) -> Result<Box<dyn Provider>, FrameworkError> {
+        let ProviderEntryConfig::OpenAiCodex(config) = entry else {
+            return Err(FrameworkError::Config(
+                "openai_codex provider adapter received wrong provider config variant".to_owned(),
+            ));
+        };
+        let provider = OpenAiCodexProvider::from_config(config.clone());
         Ok(Box::new(provider))
     }
 }
