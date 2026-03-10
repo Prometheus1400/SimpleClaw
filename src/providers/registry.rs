@@ -204,7 +204,7 @@ impl ProviderAdapter for OpenAiCodexProviderAdapter {
                 "openai_codex provider adapter received wrong provider config variant".to_owned(),
             ));
         };
-        let provider = OpenAiCodexProvider::from_config(config.clone());
+        let provider = OpenAiCodexProvider::from_config(config.clone())?;
         Ok(Box::new(provider))
     }
 }
