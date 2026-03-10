@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::secrets::Secret;
+
 fn default_enabled() -> bool {
     true
 }
@@ -294,7 +296,7 @@ pub struct WebSearchToolConfig {
     #[serde(default)]
     pub provider: WebSearchProvider,
     #[serde(default)]
-    pub api_key: Option<String>,
+    pub api_key: Option<Secret<String>>,
     pub timeout_seconds: Option<u64>,
 }
 

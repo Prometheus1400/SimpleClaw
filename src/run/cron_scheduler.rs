@@ -332,7 +332,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "must be run outside the Codex sandbox"]
     async fn guard_command_receives_execution_env() {
-        let nanos = Utc::now().timestamp_nanos_opt().expect("nanos should exist");
+        let nanos = Utc::now()
+            .timestamp_nanos_opt()
+            .expect("nanos should exist");
         let workspace = std::env::temp_dir().join(format!("simpleclaw_cron_env_{nanos}"));
         fs::create_dir_all(&workspace).expect("workspace should exist");
         let output_path = workspace.join("guard-env.txt");
@@ -344,10 +346,7 @@ mod tests {
         let ok = run_guard_command(
             &command,
             &workspace,
-            &BTreeMap::from([(
-                "SIMPLECLAW_CRON_ENV".to_owned(),
-                "cron-secret".to_owned(),
-            )]),
+            &BTreeMap::from([("SIMPLECLAW_CRON_ENV".to_owned(), "cron-secret".to_owned())]),
             10,
         )
         .await

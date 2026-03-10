@@ -9,16 +9,15 @@ mod routing;
 mod tools;
 mod validate;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::FrameworkError;
 use crate::paths::AppPaths;
 use crate::secrets::SecretResolver;
-use crate::secrets::parse_secret_reference;
 
 // ── Re-exports (preserves all consumer imports) ─────────────────────────────
 
@@ -43,6 +42,8 @@ pub use tools::{
 };
 
 // Re-exports used only by test code in other modules.
+#[allow(unused_imports)]
+pub use crate::secrets::Secret;
 #[allow(unused_imports)]
 pub use execution::SummonMode;
 #[allow(unused_imports)]
@@ -143,15 +144,12 @@ impl GlobalConfig {
 
 fn resolve_execution_env_secrets(
     field_path: &str,
-    env: &mut BTreeMap<String, String>,
+    env: &mut BTreeMap<String, crate::secrets::Secret<String>>,
     resolver: &SecretResolver,
 ) -> Result<(), FrameworkError> {
-    for (key, value) in env.iter_mut() {
+    for (key, secret) in env.iter_mut() {
         let entry_path = format!("{field_path}.{key}");
-        let secret_name = parse_secret_reference(&entry_path, value)?;
-        *value = resolver
-            .resolve(&secret_name)
-            .map_err(|err| FrameworkError::Config(format!("{entry_path} failed to resolve: {err}")))?;
+        secret.resolve(resolver, &entry_path)?;
     }
     Ok(())
 }
@@ -163,17 +161,12 @@ fn resolve_agent_tool_secrets(
     let Some(web_search) = agent.config.tools.web_search.as_mut() else {
         return Ok(());
     };
-    let Some(raw) = web_search.api_key.as_deref() else {
+    let Some(secret) = web_search.api_key.as_mut() else {
         return Ok(());
     };
 
     let field_path = format!("agents.list[{}].config.tools.web_search.api_key", agent.id);
-    let secret_name = parse_secret_reference(&field_path, raw)?;
-    let value = resolver
-        .resolve(&secret_name)
-        .map_err(|err| FrameworkError::Config(format!("{field_path} failed to resolve: {err}")))?;
-    web_search.api_key = Some(value);
-    Ok(())
+    secret.resolve(resolver, &field_path)
 }
 
 fn resolve_channel_secrets(
@@ -181,16 +174,11 @@ fn resolve_channel_secrets(
     channel: &mut gateway::ChannelConfig,
     resolver: &SecretResolver,
 ) -> Result<(), FrameworkError> {
-    let Some(raw) = channel.token.as_deref() else {
+    let Some(secret) = channel.token.as_mut() else {
         return Ok(());
     };
     let field_path = format!("gateway.channels.{}.token", kind.as_str());
-    let secret_name = parse_secret_reference(&field_path, raw)?;
-    let value = resolver
-        .resolve(&secret_name)
-        .map_err(|err| FrameworkError::Config(format!("{field_path} failed to resolve: {err}")))?;
-    channel.token = Some(value);
-    Ok(())
+    secret.resolve(resolver, &field_path)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -424,8 +412,8 @@ env:
         assert_eq!(
             parsed.env,
             BTreeMap::from([
-                ("API_TOKEN".to_owned(), "${secret:api_token}".to_owned()),
-                ("SERVICE_URL".to_owned(), "${secret:service_url}".to_owned()),
+                ("API_TOKEN".to_owned(), Secret::from_name("api_token")),
+                ("SERVICE_URL".to_owned(), Secret::from_name("service_url")),
             ])
         );
     }
@@ -794,7 +782,7 @@ skills:
                             enabled: true,
                             owner_restricted: true,
                             provider: WebSearchProvider::Duckduckgo,
-                            api_key: Some("resolved-key".to_owned()),
+                            api_key: Some(Secret::from_name("resolved-key")),
                             timeout_seconds: Some(10),
                         }),
                         ..ToolsConfig::default()
@@ -901,28 +889,26 @@ routing:
         global.gateway.channels.insert(
             GatewayChannelKind::Discord,
             ChannelConfig {
-                token: Some(format!("${{secret:{discord_env}}}")),
+                token: Some(Secret::from_name(discord_env)),
                 ..ChannelConfig::default()
             },
         );
         if let Some(ProviderEntryConfig::Gemini(provider)) =
             global.providers.entries.get_mut(&global.providers.default)
         {
-            provider.api_key = Some(format!("${{secret:{provider_env}}}"));
+            provider.api_key = Some(Secret::from_name(provider_env));
         }
-        global.execution.defaults.env = BTreeMap::from([(
-            "GLOBAL_TOKEN".to_owned(),
-            format!("${{secret:{execution_env}}}"),
-        )]);
+        global.execution.defaults.env =
+            BTreeMap::from([("GLOBAL_TOKEN".to_owned(), Secret::from_name(execution_env))]);
         global.agents.list[0].config.execution.env = Some(BTreeMap::from([(
             "AGENT_TOKEN".to_owned(),
-            format!("${{secret:{agent_execution_env}}}"),
+            Secret::from_name(agent_execution_env),
         )]));
         global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
             enabled: true,
             owner_restricted: true,
             provider: WebSearchProvider::Brave,
-            api_key: Some(format!("${{secret:{web_search_env}}}")),
+            api_key: Some(Secret::from_name(web_search_env)),
             timeout_seconds: Some(20),
         });
 
@@ -930,7 +916,10 @@ routing:
             .resolve_secrets(&paths)
             .expect("secret references should resolve");
         let api_key = match global.providers.entries.get(&global.providers.default) {
-            Some(ProviderEntryConfig::Gemini(provider)) => provider.api_key.as_deref(),
+            Some(ProviderEntryConfig::Gemini(provider)) => provider
+                .api_key
+                .as_ref()
+                .and_then(|secret| secret.exposed()),
             None => None,
         };
         assert_eq!(api_key, Some("provider-secret"));
@@ -939,7 +928,10 @@ routing:
             .channels
             .get(&GatewayChannelKind::Discord)
             .expect("discord channel config should exist");
-        assert_eq!(channel.token.as_deref(), Some("discord-secret"));
+        assert_eq!(
+            channel.token.as_ref().and_then(|secret| secret.exposed()),
+            Some("discord-secret")
+        );
         assert_eq!(
             global.agents.list[0]
                 .config
@@ -947,11 +939,16 @@ routing:
                 .env
                 .as_ref()
                 .and_then(|env| env.get("AGENT_TOKEN"))
-                .map(String::as_str),
+                .and_then(|secret| secret.exposed()),
             Some("agent-execution-secret")
         );
         assert_eq!(
-            global.execution.defaults.env.get("GLOBAL_TOKEN").map(String::as_str),
+            global
+                .execution
+                .defaults
+                .env
+                .get("GLOBAL_TOKEN")
+                .and_then(|secret| secret.exposed()),
             Some("execution-secret")
         );
         assert_eq!(
@@ -960,7 +957,8 @@ routing:
                 .tools
                 .web_search
                 .as_ref()
-                .and_then(|cfg| cfg.api_key.as_deref()),
+                .and_then(|cfg| cfg.api_key.as_ref())
+                .and_then(|secret| secret.exposed()),
             Some("web-search-secret")
         );
 
@@ -976,88 +974,47 @@ routing:
 
     #[test]
     fn global_config_rejects_plaintext_secret_values() {
-        let dir = unique_test_dir("reject_plaintext");
-        fs::create_dir_all(&dir).expect("should create test dir");
-        let paths = test_paths(dir.clone());
-
-        let mut global = GlobalConfig::default();
-        global.gateway.channels.insert(
-            GatewayChannelKind::Discord,
-            ChannelConfig {
-                token: Some("${secret:discord_token}".to_owned()),
-                ..ChannelConfig::default()
-            },
-        );
-        if let Some(ProviderEntryConfig::Gemini(provider)) =
-            global.providers.entries.get_mut(&global.providers.default)
-        {
-            provider.api_key = Some("plaintext-key".to_owned());
-        }
-        global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
-            enabled: true,
-            owner_restricted: true,
-            provider: WebSearchProvider::Brave,
-            api_key: Some("plaintext-key".to_owned()),
-            timeout_seconds: Some(20),
-        });
-
-        let err = global.resolve_secrets(&paths).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("providers.entries.default.api_key must use secret reference syntax")
-        );
-
-        let _ = fs::remove_dir_all(dir);
+        let yaml = r#"
+providers:
+  entries:
+    default:
+      kind: gemini
+      api_key: plaintext-key
+"#;
+        let err = serde_yaml::from_str::<GlobalConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("must use secret reference syntax"));
     }
 
     #[test]
     fn global_config_rejects_plaintext_web_search_api_key() {
-        let dir = unique_test_dir("reject_plaintext_web_search");
-        fs::create_dir_all(&dir).expect("should create test dir");
-        let paths = test_paths(dir.clone());
-
-        let mut global = GlobalConfig::default();
-        if let Some(ProviderEntryConfig::Gemini(provider)) =
-            global.providers.entries.get_mut(&global.providers.default)
-        {
-            provider.api_key = None;
-        }
-        global.agents.list[0].config.tools.web_search = Some(WebSearchToolConfig {
-            enabled: true,
-            owner_restricted: true,
-            provider: WebSearchProvider::Brave,
-            api_key: Some("plaintext-key".to_owned()),
-            timeout_seconds: Some(20),
-        });
-
-        let err = global.resolve_secrets(&paths).unwrap_err();
-        assert!(err.to_string().contains(
-            "agents.list[default].config.tools.web_search.api_key must use secret reference syntax"
-        ));
-
-        let _ = fs::remove_dir_all(dir);
+        let yaml = r#"
+agents:
+  list:
+    - id: default
+      name: Default
+      workspace: ./workspace
+      config:
+        tools:
+          web_search:
+            enabled: true
+            owner_restricted: true
+            provider: brave
+            api_key: plaintext-key
+"#;
+        let err = serde_yaml::from_str::<GlobalConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("must use secret reference syntax"));
     }
 
     #[test]
     fn global_config_rejects_plaintext_execution_env_value() {
-        let dir = unique_test_dir("reject_plaintext_execution_env");
-        fs::create_dir_all(&dir).expect("should create test dir");
-        let paths = test_paths(dir.clone());
-
-        let mut global = GlobalConfig::default();
-        global
-            .execution
-            .defaults
-            .env
-            .insert("API_TOKEN".to_owned(), "plaintext".to_owned());
-
-        let err = global.resolve_secrets(&paths).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("execution.defaults.env.API_TOKEN must use secret reference syntax")
-        );
-
-        let _ = fs::remove_dir_all(dir);
+        let yaml = r#"
+execution:
+  defaults:
+    env:
+      API_TOKEN: plaintext
+"#;
+        let err = serde_yaml::from_str::<GlobalConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("must use secret reference syntax"));
     }
 
     #[test]
@@ -1067,14 +1024,17 @@ routing:
             .execution
             .defaults
             .env
-            .insert("BAD-KEY".to_owned(), "${secret:token}".to_owned());
+            .insert("BAD-KEY".to_owned(), Secret::from_name("token"));
 
         let err = validate::validate_execution_env(
             "execution.defaults.env",
             Some(&global.execution.defaults.env),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("execution.defaults.env.BAD-KEY is invalid"));
+        assert!(
+            err.to_string()
+                .contains("execution.defaults.env.BAD-KEY is invalid")
+        );
     }
 
     #[test]

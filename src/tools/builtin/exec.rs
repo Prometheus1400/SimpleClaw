@@ -313,8 +313,10 @@ mod tests {
         tool.configure(serde_json::json!({ "sandbox": { "enabled": false } }))
             .expect("config should apply");
         let mut ctx = test_ctx().await;
-        ctx.env
-            .insert("SIMPLECLAW_EXEC_TEST_TOKEN".to_owned(), "from-config".to_owned());
+        ctx.env.insert(
+            "SIMPLECLAW_EXEC_TEST_TOKEN".to_owned(),
+            "from-config".to_owned(),
+        );
 
         let output = tool
             .execute(

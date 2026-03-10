@@ -154,7 +154,7 @@ impl AgentRuntime {
             session_id: memory_session_id,
             max_steps: effective_max_steps,
             history_messages: self.config.effective_execution.history_messages as usize,
-            execution_env: self.config.effective_execution.env.clone(),
+            execution_env: self.config.effective_execution.resolved_env()?,
             memory: memory.clone(),
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),

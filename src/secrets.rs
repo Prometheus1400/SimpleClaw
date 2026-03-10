@@ -1,8 +1,78 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::FrameworkError;
 use crate::paths::AppPaths;
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret<T> {
+    name: String,
+    resolved: Option<T>,
+}
+
+impl<T> Secret<T> {
+    pub fn from_name(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            resolved: None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn into_name(self) -> String {
+        self.name
+    }
+}
+
+impl Secret<String> {
+    pub fn exposed(&self) -> Option<&str> {
+        self.resolved.as_deref()
+    }
+
+    pub fn resolve(
+        &mut self,
+        resolver: &SecretResolver,
+        field_path: &str,
+    ) -> Result<(), FrameworkError> {
+        let value = resolver.resolve(&self.name).map_err(|err| {
+            FrameworkError::Config(format!("{field_path} failed to resolve: {err}"))
+        })?;
+        self.resolved = Some(value);
+        Ok(())
+    }
+}
+
+impl<T> fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret([redacted])")
+    }
+}
+
+impl Serialize for Secret<String> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("${{secret:{}}}", self.name))
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret<String> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let name = parse_secret_reference("secret", &raw).map_err(serde::de::Error::custom)?;
+        Ok(Self::from_name(name))
+    }
+}
 
 pub struct SecretResolver {
     file_secrets: HashMap<String, String>,
@@ -105,7 +175,7 @@ fn ensure_nonempty(
 
 #[cfg(test)]
 mod tests {
-    use super::{SecretResolver, parse_secret_reference};
+    use super::{Secret, SecretResolver, parse_secret_reference};
     use crate::paths::AppPaths;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -154,6 +224,27 @@ mod tests {
     fn parse_secret_reference_rejects_invalid_name() {
         let err = parse_secret_reference("provider.api_key", "${secret:bad name}").unwrap_err();
         assert!(err.to_string().contains("invalid secret reference"));
+    }
+
+    #[test]
+    fn secret_deserialize_accepts_valid_pattern() {
+        let secret: Secret<String> =
+            serde_yaml::from_str("\"${secret:gemini_api_key}\"").expect("secret should parse");
+        assert_eq!(secret.name(), "gemini_api_key");
+        assert_eq!(secret.exposed(), None);
+    }
+
+    #[test]
+    fn secret_deserialize_rejects_plaintext() {
+        let err = serde_yaml::from_str::<Secret<String>>("\"plaintext\"").unwrap_err();
+        assert!(err.to_string().contains("must use secret reference syntax"));
+    }
+
+    #[test]
+    fn secret_serialize_preserves_reference_format() {
+        let secret = Secret::<String>::from_name("gemini_api_key");
+        let rendered = serde_yaml::to_string(&secret).expect("secret should serialize");
+        assert!(rendered.contains("${secret:gemini_api_key}"));
     }
 
     #[test]
@@ -210,6 +301,30 @@ mod tests {
         let err = resolver.resolve(key).unwrap_err();
         assert!(err.to_string().contains("not found"));
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn secret_resolve_populates_exposed_value() {
+        let key = "SIMPLECLAW_TEST_SECRET_TYPED_RESOLVE";
+        unsafe {
+            std::env::set_var(key, "resolved");
+        }
+
+        let dir = unique_test_dir("secret_typed_resolve");
+        fs::create_dir_all(&dir).expect("should create test dir");
+        let paths = test_paths(dir.clone());
+        let resolver = SecretResolver::new(&paths).expect("resolver should load");
+        let mut secret = Secret::<String>::from_name(key);
+
+        secret
+            .resolve(&resolver, "providers.entries.default.api_key")
+            .expect("typed secret should resolve");
+        assert_eq!(secret.exposed(), Some("resolved"));
+
+        unsafe {
+            std::env::remove_var(key);
+        }
         let _ = fs::remove_dir_all(dir);
     }
 }

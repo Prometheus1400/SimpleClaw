@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::FrameworkError;
-use crate::secrets::{SecretResolver, parse_secret_reference};
+use crate::secrets::{Secret, SecretResolver};
 
 use super::defaults::{default_provider_api_base, default_provider_key, default_provider_model};
 
@@ -79,7 +79,7 @@ pub struct GeminiProviderConfig {
     #[serde(default = "default_provider_api_base")]
     pub api_base: String,
     #[serde(default)]
-    pub api_key: Option<String>,
+    pub api_key: Option<Secret<String>>,
 }
 
 impl Default for GeminiProviderConfig {
@@ -98,16 +98,11 @@ impl GeminiProviderConfig {
         resolver: &SecretResolver,
         key: &str,
     ) -> Result<(), FrameworkError> {
-        let Some(raw) = self.api_key.as_deref() else {
+        let Some(secret) = self.api_key.as_mut() else {
             return Ok(());
         };
         let path = format!("providers.entries.{key}.api_key");
-        let secret_name = parse_secret_reference(&path, raw)?;
-        let value = resolver
-            .resolve(&secret_name)
-            .map_err(|err| FrameworkError::Config(format!("{path} failed to resolve: {err}")))?;
-        self.api_key = Some(value);
-        Ok(())
+        secret.resolve(resolver, &path)
     }
 }
 
