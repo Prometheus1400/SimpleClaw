@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use super::agents::AgentEntryConfig;
 use super::agents::AgentsConfig;
 
-pub(super) fn normalize_agents_workspace_paths(agents: &mut AgentsConfig) {
+pub(super) fn normalize_agent_directory_paths(agents: &mut AgentsConfig) {
     agents.list = agents
         .list
         .iter()
         .map(|agent| AgentEntryConfig {
             id: agent.id.clone(),
             name: agent.name.clone(),
+            persona: normalize_workspace_path(&agent.persona),
             workspace: normalize_workspace_path(&agent.workspace),
             config: agent.config.clone(),
         })

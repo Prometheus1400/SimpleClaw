@@ -29,6 +29,7 @@ impl Default for AgentsConfig {
 pub struct AgentEntryConfig {
     pub id: String,
     pub name: String,
+    pub persona: PathBuf,
     pub workspace: PathBuf,
     #[serde(default)]
     pub config: AgentInnerConfig,

@@ -234,6 +234,7 @@ mod tests {
             memory: Arc::new(memory),
             history_messages: 10,
             env: std::collections::BTreeMap::new(),
+            persona_root: PathBuf::from(&root),
             workspace_root: PathBuf::from(&root),
             user_id: "user-1".to_owned(),
             owner_ids: vec!["user-1".to_owned()],

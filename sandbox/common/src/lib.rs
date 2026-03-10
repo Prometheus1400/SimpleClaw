@@ -1,12 +1,20 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 const PREVIEW_CHARS: usize = 1_000;
-const WORKSPACE_ROOT: &str = "/workspace";
+pub const WORKSPACE_ROOT: &str = "/workspace";
+pub const PERSONA_ROOT: &str = "/persona";
+const PROMPT_FILES: &[&str] = &[
+    "IDENTITY.md",
+    "AGENT.md",
+    "USER.md",
+    "MEMORY.md",
+    "SOUL.md",
+];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditArgs {
     pub command: String,
     pub path: String,
@@ -44,7 +52,7 @@ pub fn normalize_absolute_path(path: &Path) -> PathBuf {
     normalized
 }
 
-pub fn resolve_workspace_path(raw_path: &str) -> Result<PathBuf, String> {
+pub fn resolve_guest_path(raw_path: &str) -> Result<PathBuf, String> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
         return Err("path must be non-empty".to_owned());
@@ -58,19 +66,46 @@ pub fn resolve_workspace_path(raw_path: &str) -> Result<PathBuf, String> {
     };
 
     let normalized = normalize_absolute_path(&absolute);
-    let workspace_root = Path::new(WORKSPACE_ROOT);
-    if !normalized.starts_with(workspace_root) {
-        return Err(format!(
-            "path denied by sandbox: path={} workspace={}",
-            normalized.display(),
-            workspace_root.display()
-        ));
+    if normalized.starts_with(Path::new(WORKSPACE_ROOT)) {
+        return Ok(normalized);
     }
-    Ok(normalized)
+
+    if normalized.starts_with(Path::new(PERSONA_ROOT)) && guest_persona_path_allowed(&normalized) {
+        return Ok(normalized);
+    }
+
+    Err(format!(
+        "path denied by sandbox: path={} workspace={} persona={}",
+        normalized.display(),
+        WORKSPACE_ROOT,
+        PERSONA_ROOT
+    ))
+}
+
+pub fn guest_persona_path_allowed(path: &Path) -> bool {
+    let normalized = normalize_absolute_path(path);
+    let persona_root = Path::new(PERSONA_ROOT);
+    let Ok(relative) = normalized.strip_prefix(persona_root) else {
+        return false;
+    };
+    persona_relative_path_allowed(relative)
+}
+
+pub fn persona_relative_path_allowed(relative: &Path) -> bool {
+    let mut components = relative.components();
+    match components.next() {
+        None => false,
+        Some(Component::Normal(first)) if first == ".simpleclaw" => false,
+        Some(Component::Normal(first)) if first == "skills" => true,
+        Some(Component::Normal(first)) => {
+            components.next().is_none() && PROMPT_FILES.iter().any(|file| first == *file)
+        }
+        _ => false,
+    }
 }
 
 pub fn apply_edit_command(args: &EditArgs) -> Result<String, String> {
-    let path = resolve_workspace_path(&args.path)?;
+    let path = resolve_guest_path(&args.path)?;
     apply_edit_command_at_path(args, &path)
 }
 
@@ -320,5 +355,59 @@ pub fn byte_index_for_line(content: &str, line: usize) -> Option<usize> {
         Some(content.len())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{guest_persona_path_allowed, persona_relative_path_allowed, resolve_guest_path};
+    use std::path::Path;
+
+    #[test]
+    fn resolve_guest_path_allows_workspace_relative_paths() {
+        let resolved = resolve_guest_path("docs/file.txt").expect("workspace path should resolve");
+        assert_eq!(resolved, Path::new("/workspace/docs/file.txt"));
+    }
+
+    #[test]
+    fn resolve_guest_path_allows_prompt_files_in_persona() {
+        let resolved = resolve_guest_path("/persona/AGENT.md").expect("prompt file should resolve");
+        assert_eq!(resolved, Path::new("/persona/AGENT.md"));
+    }
+
+    #[test]
+    fn resolve_guest_path_allows_persona_skills_tree() {
+        let resolved = resolve_guest_path("/persona/skills/reviewer/SKILL.md")
+            .expect("skill path should resolve");
+        assert_eq!(resolved, Path::new("/persona/skills/reviewer/SKILL.md"));
+    }
+
+    #[test]
+    fn resolve_guest_path_denies_persona_simpleclaw() {
+        let err = resolve_guest_path("/persona/.simpleclaw/memory/short.db")
+            .expect_err("persona state should be denied");
+        assert!(err.contains("path denied by sandbox"));
+    }
+
+    #[test]
+    fn resolve_guest_path_denies_other_persona_files() {
+        let err = resolve_guest_path("/persona/notes.txt")
+            .expect_err("non-prompt persona file should be denied");
+        assert!(err.contains("path denied by sandbox"));
+    }
+
+    #[test]
+    fn persona_relative_path_allowed_matches_expected_surface() {
+        assert!(persona_relative_path_allowed(Path::new("AGENT.md")));
+        assert!(persona_relative_path_allowed(Path::new("skills/reviewer/SKILL.md")));
+        assert!(!persona_relative_path_allowed(Path::new(".simpleclaw/memory/short.db")));
+        assert!(!persona_relative_path_allowed(Path::new("notes.txt")));
+        assert!(!persona_relative_path_allowed(Path::new("nested/AGENT.md")));
+    }
+
+    #[test]
+    fn guest_persona_path_allowed_requires_persona_prefix() {
+        assert!(guest_persona_path_allowed(Path::new("/persona/USER.md")));
+        assert!(!guest_persona_path_allowed(Path::new("/workspace/USER.md")));
     }
 }

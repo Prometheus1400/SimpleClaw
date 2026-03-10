@@ -91,7 +91,7 @@ impl LoadedConfig {
         global.resolve_secrets(&paths)?;
         global.database.path = paths.db_path;
         global.database.long_term_path = paths.long_term_db_path;
-        normalize::normalize_agents_workspace_paths(&mut global.agents);
+        normalize::normalize_agent_directory_paths(&mut global.agents);
         if let Some(workspace_override) = workspace_override {
             let workspace = normalize::normalize_workspace_path(workspace_override);
             let default_id = global.agents.default.clone();
@@ -724,6 +724,7 @@ skills:
             list: vec![AgentEntryConfig {
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
+                persona: PathBuf::from("./personas/default"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig {
                     tools: ToolsConfig {
@@ -751,6 +752,7 @@ skills:
             list: vec![AgentEntryConfig {
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
+                persona: PathBuf::from("./personas/default"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig {
                     tools: ToolsConfig {
@@ -778,6 +780,7 @@ skills:
             list: vec![AgentEntryConfig {
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
+                persona: PathBuf::from("./personas/default"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig {
                     tools: ToolsConfig {
@@ -805,6 +808,7 @@ skills:
             list: vec![AgentEntryConfig {
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
+                persona: PathBuf::from("./personas/default"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig {
                     tools: ToolsConfig {
@@ -831,6 +835,7 @@ skills:
             list: vec![AgentEntryConfig {
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
+                persona: PathBuf::from("./personas/default"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig {
                     tools: ToolsConfig {
@@ -1090,8 +1095,8 @@ execution:
     }
 
     #[test]
-    fn normalize_agents_workspace_paths_updates_entries() {
-        use normalize::normalize_agents_workspace_paths;
+    fn normalize_agent_directory_paths_updates_entries() {
+        use normalize::normalize_agent_directory_paths;
 
         let key = "SIMPLECLAW_TEST_SUMMON_ROOT";
         unsafe {
@@ -1103,19 +1108,31 @@ execution:
                 AgentEntryConfig {
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
+                    persona: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/personas/default"),
                     workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/default"),
                     config: AgentInnerConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "researcher".to_owned(),
                     name: "Researcher".to_owned(),
+                    persona: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/personas/researcher"),
                     workspace: PathBuf::from("$SIMPLECLAW_TEST_SUMMON_ROOT/research"),
                     config: AgentInnerConfig::default(),
                 },
             ],
         };
 
-        normalize_agents_workspace_paths(&mut agents);
+        normalize_agent_directory_paths(&mut agents);
+
+        assert_eq!(
+            agents
+                .list
+                .iter()
+                .find(|agent| agent.id == "default")
+                .expect("default target should exist")
+                .persona,
+            PathBuf::from("/tmp/simpleclaw-summon-root/personas/default")
+        );
 
         assert_eq!(
             agents
@@ -1135,6 +1152,7 @@ execution:
             &AgentEntryConfig {
                 id: "researcher".to_owned(),
                 name: "Researcher".to_owned(),
+                persona: PathBuf::from("/tmp/simpleclaw-summon-root/personas/researcher"),
                 workspace: PathBuf::from("/tmp/simpleclaw-summon-root/research"),
                 config: AgentInnerConfig::default()
             }
@@ -1153,12 +1171,14 @@ execution:
                 AgentEntryConfig {
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
+                    persona: PathBuf::from("./personas/default"),
                     workspace: PathBuf::from("./workspace"),
                     config: AgentInnerConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "default".to_owned(),
                     name: "Duplicate".to_owned(),
+                    persona: PathBuf::from("./personas/duplicate"),
                     workspace: PathBuf::from("./other"),
                     config: AgentInnerConfig::default(),
                 },
@@ -1174,6 +1194,7 @@ execution:
             list: vec![AgentEntryConfig {
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
+                persona: PathBuf::from("./personas/default"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig::default(),
             }],
@@ -1189,6 +1210,7 @@ execution:
             list: vec![AgentEntryConfig {
                 id: "researcher".to_owned(),
                 name: "Researcher".to_owned(),
+                persona: PathBuf::from("./personas/researcher"),
                 workspace: PathBuf::from("./workspace"),
                 config: AgentInnerConfig::default(),
             }],
@@ -1207,12 +1229,14 @@ execution:
                 AgentEntryConfig {
                     id: "default".to_owned(),
                     name: "Default".to_owned(),
+                    persona: PathBuf::from("./personas/default"),
                     workspace: PathBuf::from("./workspace"),
                     config: AgentInnerConfig::default(),
                 },
                 AgentEntryConfig {
                     id: "researcher".to_owned(),
                     name: "Researcher".to_owned(),
+                    persona: PathBuf::from("./personas/researcher"),
                     workspace: PathBuf::from("./workspace-researcher"),
                     config: AgentInnerConfig::default(),
                 },

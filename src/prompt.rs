@@ -17,11 +17,11 @@ pub struct PromptLayerInfo {
 }
 
 impl PromptAssembler {
-    pub fn inspect_workspace(workspace: &Path) -> Result<Vec<PromptLayerInfo>, FrameworkError> {
+    pub fn inspect_persona(persona_root: &Path) -> Result<Vec<PromptLayerInfo>, FrameworkError> {
         let layers: Vec<PromptLayerInfo> = prompt_layers()
             .iter()
             .map(|(title, file)| -> Result<PromptLayerInfo, FrameworkError> {
-                let path = workspace.join(file);
+                let path = persona_root.join(file);
                 if !path.exists() {
                     return Ok(PromptLayerInfo {
                         title,
@@ -46,10 +46,10 @@ impl PromptAssembler {
         Ok(layers)
     }
 
-    pub fn from_workspace(workspace: &Path) -> Result<String, FrameworkError> {
+    pub fn from_persona(persona_root: &Path) -> Result<String, FrameworkError> {
         let started = std::time::Instant::now();
         let mut sections = Vec::new();
-        for layer in Self::inspect_workspace(workspace)? {
+        for layer in Self::inspect_persona(persona_root)? {
             append_layer(
                 &mut sections,
                 &layer.path,
@@ -114,7 +114,7 @@ mod tests {
         .expect("write AGENT");
         fs::write(workspace.join("SOUL.md"), "# Soul\nsoul content\n").expect("write SOUL");
 
-        let prompt = PromptAssembler::from_workspace(&workspace).expect("assemble prompt");
+        let prompt = PromptAssembler::from_persona(&workspace).expect("assemble prompt");
 
         assert_eq!(
             prompt,
@@ -138,7 +138,7 @@ mod tests {
         fs::write(workspace.join("IDENTITY.md"), "identity\n").expect("write IDENTITY");
         fs::write(workspace.join("SOUL.md"), "").expect("write empty SOUL");
 
-        let layers = PromptAssembler::inspect_workspace(&workspace).expect("inspect workspace");
+        let layers = PromptAssembler::inspect_persona(&workspace).expect("inspect workspace");
 
         let identity = layers
             .iter()

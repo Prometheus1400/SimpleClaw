@@ -96,6 +96,7 @@ pub(crate) struct ToolExecEnv {
     pub memory: DynMemory,
     pub history_messages: usize,
     pub env: BTreeMap<String, String>,
+    pub persona_root: PathBuf,
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,

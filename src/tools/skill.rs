@@ -42,12 +42,12 @@ impl SkillFactory {
         &self,
         agent_id: &str,
         config: &AgentInnerConfig,
-        workspace: &Path,
+        persona_root: &Path,
     ) -> Result<Vec<Arc<dyn Tool>>, FrameworkError> {
         let loaded = load_skill_tools(
             agent_id,
             &config.tools.skills_config(),
-            workspace,
+            persona_root,
             &self.app_base_dir,
         )?;
         Ok(loaded
@@ -126,10 +126,10 @@ impl Tool for DynamicSkillTool {
 pub fn load_skill_tools(
     agent_id: &str,
     skills: &SkillsToolConfig,
-    agent_workspace: &Path,
+    persona_root: &Path,
     app_base_dir: &Path,
 ) -> Result<LoadedSkillTools, FrameworkError> {
-    let skill_ids = active_skill_ids(skills, agent_workspace, app_base_dir)?;
+    let skill_ids = active_skill_ids(skills, persona_root, app_base_dir)?;
     let mut stats = SkillToolLoadStats {
         requested: skill_ids.len(),
         loaded: 0,
@@ -139,7 +139,7 @@ pub fn load_skill_tools(
     let mut tools = Vec::new();
 
     for skill_id in skill_ids {
-        let resolved = resolve_skill_path(agent_workspace, app_base_dir, &skill_id);
+        let resolved = resolve_skill_path(persona_root, app_base_dir, &skill_id);
         let Some((path, source_scope)) = resolved else {
             warn!(
                 agent_id = %agent_id,
@@ -195,11 +195,11 @@ fn extract_description(content: &str, skill_id: &str) -> String {
 }
 
 fn resolve_skill_path(
-    agent_workspace: &Path,
+    persona_root: &Path,
     base_dir: &Path,
     skill_id: &str,
 ) -> Option<(PathBuf, &'static str)> {
-    let agent_path = agent_workspace
+    let agent_path = persona_root
         .join("skills")
         .join(skill_id)
         .join("SKILL.md");
@@ -217,7 +217,7 @@ fn resolve_skill_path(
 
 fn active_skill_ids(
     skills: &SkillsToolConfig,
-    agent_workspace: &Path,
+    persona_root: &Path,
     base_dir: &Path,
 ) -> Result<Vec<String>, FrameworkError> {
     if !skills.enabled {
@@ -225,7 +225,7 @@ fn active_skill_ids(
     }
 
     let disabled_skill_ids = normalized_disabled_skill_ids(skills)?;
-    let mut discovered = discover_skill_ids(agent_workspace, base_dir)?;
+    let mut discovered = discover_skill_ids(persona_root, base_dir)?;
     discovered.retain(|skill_id| !disabled_skill_ids.contains(skill_id));
     Ok(discovered)
 }
@@ -252,11 +252,11 @@ fn normalized_disabled_skill_ids(
 }
 
 fn discover_skill_ids(
-    agent_workspace: &Path,
+    persona_root: &Path,
     base_dir: &Path,
 ) -> Result<Vec<String>, FrameworkError> {
     let mut discovered = BTreeSet::new();
-    collect_skill_ids_from_root(&agent_workspace.join("skills"), &mut discovered)?;
+    collect_skill_ids_from_root(&persona_root.join("skills"), &mut discovered)?;
     collect_skill_ids_from_root(&base_dir.join("skills"), &mut discovered)?;
     Ok(discovered.into_iter().collect())
 }

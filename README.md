@@ -144,7 +144,7 @@ sequenceDiagram
 - Workers expire after idle timeout (5 minutes), then respawn on next message.
 
 ### 3) Prompt construction per turn
-- Base prompt: concatenated workspace files in this order:
+- Base prompt: concatenated persona files in this order:
   - `IDENTITY.md`, `AGENT.md`, `USER.md`, `MEMORY.md`, `SOUL.md`
 - Optional memory recall appends combined semantic memory context: long-term facts plus older same-session short-term messages outside the recent `history_messages` window.
 - Caller context is always injected (`CURRENT SPEAKER` with user id/name).
@@ -191,13 +191,14 @@ Built-in tools are registered in `src/tools/builtin/mod.rs`:
 - `web_search`, `web_fetch`, `clock`
 - `read`, `edit`, `exec`, `process`
 
-Skill tools are loaded from `skills/<skill_id>/SKILL.md` (agent workspace first, then global `~/.simpleclaw/skills`).
+Skill tools are loaded from `skills/<skill_id>/SKILL.md` (agent persona first, then global `~/.simpleclaw/skills`).
 
 ## Configuration Model (Current)
 
 There is a single global config file: `~/.simpleclaw/config.yaml`.
 
 Agent-specific behavior is embedded in `agents.list[*]` entries:
+- persona path
 - workspace path
 - provider override
 - sandbox mode
@@ -233,10 +234,15 @@ providers:
   - `~/.simpleclaw/logs/service.log`
   - `~/.simpleclaw/logs/service.jsonl`
 - PID file: `~/.simpleclaw/run/service.pid`
-- Prompt files: inside each agent workspace
-- Memory databases per agent workspace:
-  - `<workspace>/.simpleclaw/memory/short_term_memory.db`
-  - `<workspace>/.simpleclaw/memory/long_term_memory.db`
+- Prompt files: inside each agent persona
+- Sandboxed `read`/`edit` persona access:
+  - allowed: `IDENTITY.md`, `AGENT.md`, `USER.md`, `MEMORY.md`, `SOUL.md`
+  - allowed: `<persona>/skills/**`
+  - denied: `<persona>/.simpleclaw/**`
+- Memory databases per agent persona:
+  - `<persona>/.simpleclaw/memory/short_term_memory.db`
+  - `<persona>/.simpleclaw/memory/long_term_memory.db`
+- Tool execution cwd: the configured agent workspace
 
 ## Operational Commands
 
