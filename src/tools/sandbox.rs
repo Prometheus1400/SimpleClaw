@@ -338,6 +338,7 @@ mod tests {
             agent_id: "test-agent".to_owned(),
             memory: Arc::new(memory),
             history_messages: 10,
+            env: std::collections::BTreeMap::new(),
             workspace_root: PathBuf::from("."),
             user_id: "u".to_owned(),
             owner_ids: vec![],

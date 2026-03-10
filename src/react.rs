@@ -8,6 +8,7 @@ use crate::tools::ProcessManager;
 use crate::tools::skill::SkillFactory;
 use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
 use crate::{channels::InboundMessage, memory::DynMemory};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -32,6 +33,7 @@ pub struct RunParams<'a> {
     pub session_id: &'a str,
     pub max_steps: u32,
     pub history_messages: usize,
+    pub execution_env: BTreeMap<String, String>,
     pub memory: DynMemory,
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,
@@ -88,6 +90,7 @@ impl ReactLoop {
             agent_id: params.agent_id.to_owned(),
             memory: params.memory.clone(),
             history_messages: params.history_messages,
+            env: params.execution_env.clone(),
             workspace_root: params.workspace_root.clone(),
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),

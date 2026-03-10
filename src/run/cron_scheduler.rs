@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -19,13 +20,14 @@ use crate::tools::sandbox_runtime;
 pub fn spawn(
     store: Arc<Mutex<CronStore>>,
     gateway_tx: mpsc::Sender<InboundMessage>,
+    env_by_agent: BTreeMap<String, BTreeMap<String, String>>,
     default_guard_timeout: u64,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(60));
         loop {
             ticker.tick().await;
-            run_tick(&store, &gateway_tx, default_guard_timeout).await;
+            run_tick(&store, &gateway_tx, &env_by_agent, default_guard_timeout).await;
         }
     })
 }
@@ -33,6 +35,7 @@ pub fn spawn(
 async fn run_tick(
     store: &Arc<Mutex<CronStore>>,
     gateway_tx: &mpsc::Sender<InboundMessage>,
+    env_by_agent: &BTreeMap<String, BTreeMap<String, String>>,
     default_guard_timeout: u64,
 ) {
     let jobs = {
@@ -70,8 +73,14 @@ async fn run_tick(
             } else {
                 job.guard_timeout_seconds
             };
-            match run_guard_command(guard_command, Path::new(&job.workspace_root), timeout_secs)
-                .await
+            let env = env_by_agent.get(&job.agent_id).cloned().unwrap_or_default();
+            match run_guard_command(
+                guard_command,
+                Path::new(&job.workspace_root),
+                &env,
+                timeout_secs,
+            )
+            .await
             {
                 Ok(true) => {}
                 Ok(false) => {
@@ -206,6 +215,7 @@ fn parse_schedule(raw: &str) -> Result<Schedule, cron::error::Error> {
 async fn run_guard_command(
     command: &str,
     workspace_root: &Path,
+    env: &BTreeMap<String, String>,
     timeout_seconds: u64,
 ) -> Result<bool, crate::error::FrameworkError> {
     let sandbox_cfg = ToolSandboxConfig {
@@ -220,6 +230,7 @@ async fn run_guard_command(
 
     let mut runner = Command::new("bash");
     runner.arg("-lc").arg(prepared.wrapped_command());
+    runner.envs(env);
     runner.current_dir(crate::tools::sandbox::normalize_workspace_root(
         workspace_root,
     )?);
@@ -249,11 +260,14 @@ fn parse_source_channel(raw: &str) -> Option<GatewayChannelKind> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+
     use chrono::{Duration as ChronoDuration, Timelike, Utc};
 
     use crate::tools::builtin::cron::CronJob;
 
-    use super::should_fire;
+    use super::{run_guard_command, should_fire};
 
     fn sample_job(schedule: &str, last_fired_at: Option<chrono::DateTime<Utc>>) -> CronJob {
         CronJob {
@@ -311,5 +325,40 @@ mod tests {
         let job = sample_job("* * * * *", None);
 
         assert!(should_fire(&job, aligned + ChronoDuration::seconds(10)));
+    }
+
+    // Manual test: this exercises the real sandboxed cron guard command path
+    // and must be run outside the Codex sandbox.
+    #[tokio::test]
+    #[ignore = "must be run outside the Codex sandbox"]
+    async fn guard_command_receives_execution_env() {
+        let nanos = Utc::now().timestamp_nanos_opt().expect("nanos should exist");
+        let workspace = std::env::temp_dir().join(format!("simpleclaw_cron_env_{nanos}"));
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let output_path = workspace.join("guard-env.txt");
+        let command = format!(
+            "test \"$SIMPLECLAW_CRON_ENV\" = cron-secret && printf %s \"$SIMPLECLAW_CRON_ENV\" > {}",
+            output_path.display()
+        );
+
+        let ok = run_guard_command(
+            &command,
+            &workspace,
+            &BTreeMap::from([(
+                "SIMPLECLAW_CRON_ENV".to_owned(),
+                "cron-secret".to_owned(),
+            )]),
+            10,
+        )
+        .await
+        .expect("guard command should run");
+
+        assert!(ok);
+        assert_eq!(
+            fs::read_to_string(&output_path).expect("guard output should exist"),
+            "cron-secret"
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
     }
 }
