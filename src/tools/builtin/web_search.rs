@@ -65,7 +65,8 @@ impl Tool for WebSearchTool {
                 let api_key = self
                     .config
                     .api_key
-                    .as_deref()
+                    .as_ref()
+                    .and_then(|secret| secret.exposed())
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .ok_or_else(|| {

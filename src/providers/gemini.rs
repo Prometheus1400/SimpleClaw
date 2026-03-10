@@ -35,7 +35,15 @@ impl GeminiProvider {
 
     fn api_key(&self) -> Result<String, FrameworkError> {
         match self.config.api_key.clone() {
-            Some(api_key) if !api_key.trim().is_empty() => Ok(api_key),
+            Some(api_key)
+                if api_key
+                    .exposed()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_some() =>
+            {
+                Ok(api_key.exposed().expect("checked above").to_owned())
+            }
             _ => Err(FrameworkError::Config(
                 "missing provider API key: set providers.entries.<key>.api_key to a ${secret:<name>} reference"
                     .to_owned(),

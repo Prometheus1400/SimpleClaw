@@ -336,7 +336,11 @@ pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
         .map(|(agent_id, runtime)| {
             (
                 agent_id.clone(),
-                runtime.config().effective_execution.env.clone(),
+                runtime
+                    .config()
+                    .effective_execution
+                    .resolved_env()
+                    .expect("execution env should be resolved before runtime services start"),
             )
         })
         .collect();

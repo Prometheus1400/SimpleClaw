@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::error::FrameworkError;
+use crate::secrets::Secret;
 
 use super::agents::AgentsConfig;
 use super::defaults::default_agent_id;
@@ -54,7 +55,7 @@ pub(super) fn validate_agents_config(agents: &AgentsConfig) -> Result<(), Framew
 
 pub(super) fn validate_execution_env(
     field_path: &str,
-    env: Option<&BTreeMap<String, String>>,
+    env: Option<&BTreeMap<String, Secret<String>>>,
 ) -> Result<(), FrameworkError> {
     let Some(env) = env else {
         return Ok(());
@@ -92,14 +93,7 @@ fn validate_tools_config(agent_id: &str, tools: &ToolsConfig) -> Result<(), Fram
         )?;
         match web_search.provider {
             WebSearchProvider::Brave => {
-                if web_search.enabled
-                    && web_search
-                        .api_key
-                        .as_deref()
-                        .map(str::trim)
-                        .map(str::is_empty)
-                        .unwrap_or(true)
-                {
+                if web_search.enabled && web_search.api_key.is_none() {
                     return Err(FrameworkError::Config(format!(
                         "agents.list[{agent_id}].config.tools.web_search.api_key is required when tools.web_search.provider=brave and enabled=true"
                     )));

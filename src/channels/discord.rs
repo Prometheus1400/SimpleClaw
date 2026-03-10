@@ -24,7 +24,15 @@ pub struct DiscordChannel {
 impl DiscordChannel {
     pub async fn from_config(config: &ChannelConfig) -> Result<Self, FrameworkError> {
         let token = match config.token.clone() {
-            Some(token) if !token.trim().is_empty() => token,
+            Some(token)
+                if token
+                    .exposed()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_some() =>
+            {
+                token.exposed().expect("checked above").to_owned()
+            }
             _ => {
                 return Err(FrameworkError::Config(
                     "missing Discord token: set gateway.channels.discord.token to a ${secret:<name>} reference"

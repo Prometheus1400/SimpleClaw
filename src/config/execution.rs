@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::FrameworkError;
+use crate::secrets::Secret;
+
 use super::defaults::{default_history_messages, default_max_steps, default_safe_error_reply};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +32,7 @@ impl Default for ExecutionConfig {
 pub struct ExecutionDefaultsConfig {
     pub max_steps: u32,
     pub history_messages: u32,
-    pub env: BTreeMap<String, String>,
+    pub env: BTreeMap<String, Secret<String>>,
     pub transparency: TransparencyConfig,
     pub memory_recall: MemoryRecallConfig,
     pub safe_error_reply: String,
@@ -97,6 +100,20 @@ impl ExecutionDefaultsConfig {
                 .clone()
                 .unwrap_or_else(|| self.safe_error_reply.clone()),
         }
+    }
+
+    pub fn resolved_env(&self) -> Result<BTreeMap<String, String>, FrameworkError> {
+        self.env
+            .iter()
+            .map(|(key, secret)| {
+                let value = secret.exposed().ok_or_else(|| {
+                    FrameworkError::Config(format!(
+                        "execution env secret '{key}' was not resolved before runtime assembly"
+                    ))
+                })?;
+                Ok((key.clone(), value.to_owned()))
+            })
+            .collect()
     }
 }
 
@@ -187,7 +204,7 @@ pub enum SummonMode {
 pub struct AgentExecutionOverrides {
     pub max_steps: Option<u32>,
     pub history_messages: Option<u32>,
-    pub env: Option<BTreeMap<String, String>>,
+    pub env: Option<BTreeMap<String, Secret<String>>>,
     pub transparency: Option<TransparencyOverrides>,
     pub memory_recall: Option<MemoryRecallOverrides>,
     pub safe_error_reply: Option<String>,
@@ -216,6 +233,7 @@ mod tests {
         AgentExecutionOverrides, ExecutionDefaultsConfig, MemoryRecallOverrides,
         TransparencyOverrides,
     };
+    use crate::secrets::Secret;
     use std::collections::BTreeMap;
 
     #[test]
@@ -224,7 +242,10 @@ mod tests {
         let overrides = AgentExecutionOverrides {
             max_steps: Some(42),
             history_messages: None,
-            env: Some(BTreeMap::from([("CHILD".to_owned(), "override".to_owned())])),
+            env: Some(BTreeMap::from([(
+                "CHILD".to_owned(),
+                Secret::from_name("override"),
+            )])),
             transparency: Some(TransparencyOverrides {
                 tool_calls: Some(true),
                 memory_recall: Some(true),
@@ -240,8 +261,8 @@ mod tests {
         };
         let defaults = ExecutionDefaultsConfig {
             env: BTreeMap::from([
-                ("BASE".to_owned(), "base".to_owned()),
-                ("CHILD".to_owned(), "default".to_owned()),
+                ("BASE".to_owned(), Secret::from_name("base")),
+                ("CHILD".to_owned(), Secret::from_name("default")),
             ]),
             ..defaults
         };
@@ -252,8 +273,8 @@ mod tests {
         assert_eq!(
             merged.env,
             BTreeMap::from([
-                ("BASE".to_owned(), "base".to_owned()),
-                ("CHILD".to_owned(), "override".to_owned()),
+                ("BASE".to_owned(), Secret::from_name("base")),
+                ("CHILD".to_owned(), Secret::from_name("override")),
             ])
         );
         assert!(merged.transparency.tool_calls);

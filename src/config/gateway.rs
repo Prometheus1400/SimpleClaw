@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::secrets::Secret;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GatewayConfig {
@@ -54,7 +56,7 @@ pub struct ChannelConfig {
     #[serde(default)]
     pub output: ChannelOutputMode,
     #[serde(default)]
-    pub token: Option<String>,
+    pub token: Option<Secret<String>>,
 }
 
 impl Default for ChannelConfig {
