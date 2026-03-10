@@ -2,18 +2,46 @@ use async_trait::async_trait;
 use reqwest::Client;
 use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
-use tracing::{debug, error, warn};
+use std::collections::BTreeMap;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::{debug, error};
 
 use crate::auth::{AuthService, OPENAI_CODEX_PROVIDER, extract_account_id_from_jwt};
 use crate::config::OpenAiCodexProviderConfig;
 use crate::error::FrameworkError;
 
-use super::types::{Message, Provider, ProviderResponse, Role, ToolCall, ToolDefinition};
+use super::types::{
+    Message, Provider, ProviderResponse, ProviderStream, Role, StreamEvent, ToolCall,
+    ToolDefinition,
+};
 
 const OPENAI_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_CODEX_INSTRUCTIONS: &str =
     "You are SimpleClaw, a concise and helpful coding assistant.";
 const MAX_IDENTIFIER_LEN: usize = 64;
+const ERROR_BODY_PREVIEW_CHARS: usize = 1_000;
+const DEFAULT_REASONING_EFFORT: &str = "high";
+const DEFAULT_REASONING_SUMMARY: &str = "auto";
+const DEFAULT_TEXT_VERBOSITY: &str = "medium";
+
+#[derive(Debug, Clone)]
+struct RequestContext {
+    access_token: String,
+    account_id: Option<String>,
+    input: Vec<Value>,
+    tools: Vec<Value>,
+    instructions: String,
+}
+
+fn resolve_instructions(system_prompt: &str) -> String {
+    if system_prompt.trim().is_empty() {
+        DEFAULT_CODEX_INSTRUCTIONS.to_owned()
+    } else {
+        system_prompt.to_owned()
+    }
+}
 
 pub struct OpenAiCodexProvider {
     model: String,
@@ -27,31 +55,6 @@ impl OpenAiCodexProvider {
             model: config.model,
             auth: AuthService::new_default(),
             client: Client::new(),
-        }
-    }
-}
-
-fn resolve_instructions(system_prompt: &str) -> String {
-    if system_prompt.trim().is_empty() {
-        DEFAULT_CODEX_INSTRUCTIONS.to_owned()
-    } else {
-        system_prompt.to_owned()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestVariant {
-    Full,
-    NoTools,
-    Minimal,
-}
-
-impl RequestVariant {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::NoTools => "no_tools",
-            Self::Minimal => "minimal",
         }
     }
 }
@@ -80,6 +83,14 @@ fn normalize_tool_arguments(args_json: &str) -> String {
     match serde_json::from_str::<Value>(args_json) {
         Ok(Value::Object(map)) => Value::Object(map).to_string(),
         Ok(_) | Err(_) => "{}".to_owned(),
+    }
+}
+
+fn normalize_tool_result_output(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(text.clone()),
+        Value::Array(items) if items.iter().all(Value::is_object) => Value::Array(items.clone()),
+        _ => Value::String(value.to_string()),
     }
 }
 
@@ -122,7 +133,7 @@ fn build_input(history: &[Message]) -> Vec<Value> {
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": result.response,
+                    "output": normalize_tool_result_output(&result.response),
                 }));
             }
             if message.content.trim().is_empty() {
@@ -376,21 +387,6 @@ fn parse_provider_response(response: &Value) -> ProviderResponse {
     }
 }
 
-fn merge_provider_responses(base: &mut ProviderResponse, incoming: ProviderResponse) {
-    if base.output_text.is_none() && incoming.output_text.is_some() {
-        base.output_text = incoming.output_text;
-    }
-    for call in incoming.tool_calls {
-        if !base.tool_calls.iter().any(|existing| {
-            existing.id == call.id
-                && existing.name == call.name
-                && existing.args_json == call.args_json
-        }) {
-            base.tool_calls.push(call);
-        }
-    }
-}
-
 fn extract_stream_error_message(event: &Value) -> Option<String> {
     let event_type = event.get("type").and_then(Value::as_str);
     if event_type == Some("error") {
@@ -419,33 +415,94 @@ fn extract_stream_error_message(event: &Value) -> Option<String> {
     None
 }
 
-fn parse_sse_provider_response(body: &str) -> Result<ProviderResponse, FrameworkError> {
-    let mut parsed = ProviderResponse {
-        output_text: None,
-        tool_calls: Vec::new(),
-    };
-    let mut saw_delta = false;
-    let mut delta_text = String::new();
-    let mut saw_any_event = false;
+#[derive(Default)]
+struct CodexStreamAccumulator {
+    line_buffer: String,
+    event_data_lines: Vec<String>,
+    tool_call_indices_by_id: BTreeMap<String, usize>,
+    tool_calls: Vec<ToolCall>,
+    saw_text_delta: bool,
+    emitted_fallback_text: bool,
+}
 
-    for chunk in body.split("\n\n") {
-        let data_lines = chunk
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && *line != "[DONE]")
-            .collect::<Vec<_>>();
-        if data_lines.is_empty() {
-            continue;
+impl CodexStreamAccumulator {
+    fn push_bytes(
+        &mut self,
+        bytes: &[u8],
+        events: &mut Vec<StreamEvent>,
+    ) -> Result<(), FrameworkError> {
+        let chunk = std::str::from_utf8(bytes).map_err(|err| {
+            FrameworkError::Provider(format!("invalid codex stream bytes: {err}"))
+        })?;
+        self.line_buffer.push_str(chunk);
+
+        while let Some(newline_index) = self.line_buffer.find('\n') {
+            let mut line = self.line_buffer[..newline_index].to_owned();
+            self.line_buffer.drain(..=newline_index);
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            self.process_line(&line, events)?;
         }
-        saw_any_event = true;
 
-        let joined = data_lines.join("\n");
+        Ok(())
+    }
+
+    fn finish(mut self, events: &mut Vec<StreamEvent>) -> Result<(), FrameworkError> {
+        if !self.line_buffer.is_empty() {
+            let mut trailing = std::mem::take(&mut self.line_buffer);
+            if trailing.ends_with('\r') {
+                trailing.pop();
+            }
+            self.process_line(&trailing, events)?;
+        }
+        self.flush_event(events)?;
+
+        for tool_call in self.tool_calls {
+            events.push(StreamEvent::ToolCallComplete(tool_call));
+        }
+        events.push(StreamEvent::Done);
+        Ok(())
+    }
+
+    fn process_line(
+        &mut self,
+        line: &str,
+        events: &mut Vec<StreamEvent>,
+    ) -> Result<(), FrameworkError> {
+        if line.is_empty() {
+            self.flush_event(events)?;
+            return Ok(());
+        }
+
+        if let Some(data) = line.strip_prefix("data:") {
+            self.event_data_lines.push(data.trim_start().to_owned());
+        }
+
+        Ok(())
+    }
+
+    fn flush_event(&mut self, events: &mut Vec<StreamEvent>) -> Result<(), FrameworkError> {
+        if self.event_data_lines.is_empty() {
+            return Ok(());
+        }
+
+        let payload = self.event_data_lines.join("\n");
+        self.event_data_lines.clear();
+        let trimmed = payload.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            return Ok(());
+        }
+
         let mut event_values = Vec::new();
-        if let Ok(value) = serde_json::from_str::<Value>(&joined) {
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             event_values.push(value);
         } else {
-            for line in data_lines {
+            for line in payload.lines() {
+                let line = line.trim();
+                if line.is_empty() || line == "[DONE]" {
+                    continue;
+                }
                 if let Ok(value) = serde_json::from_str::<Value>(line) {
                     event_values.push(value);
                 }
@@ -453,57 +510,105 @@ fn parse_sse_provider_response(body: &str) -> Result<ProviderResponse, Framework
         }
 
         for event in event_values {
-            if let Some(message) = extract_stream_error_message(&event) {
-                if parsed.output_text.is_some() || !parsed.tool_calls.is_empty() || saw_delta {
-                    warn!(
-                        provider = "openai_codex",
-                        message = %message,
-                        "ignoring stream error after partial response"
-                    );
-                    continue;
-                }
-                return Err(FrameworkError::Provider(format!(
-                    "openai_codex stream error: {message}"
-                )));
-            }
+            self.process_event(&event, events)?;
+        }
 
-            let event_type = event.get("type").and_then(Value::as_str);
-            if event_type == Some("response.output_text.delta")
-                && let Some(delta) = event.get("delta").and_then(Value::as_str)
-                && !delta.is_empty()
-            {
-                saw_delta = true;
-                delta_text.push_str(delta);
-            }
+        Ok(())
+    }
 
-            if (event_type == Some("response.output_item.done")
-                || event_type == Some("response.output_item.added"))
-                && let Some(item) = event.get("item")
-            {
-                let wrapped = json!({ "output": [item.clone()] });
-                merge_provider_responses(&mut parsed, parse_provider_response(&wrapped));
-            }
+    fn process_event(
+        &mut self,
+        event: &Value,
+        events: &mut Vec<StreamEvent>,
+    ) -> Result<(), FrameworkError> {
+        if let Some(message) = extract_stream_error_message(event) {
+            return Err(FrameworkError::Provider(format!(
+                "openai_codex stream error: {message}"
+            )));
+        }
 
-            if (event_type == Some("response.completed") || event_type == Some("response.done"))
-                && let Some(response_payload) = event.get("response")
+        let event_type = event.get("type").and_then(Value::as_str);
+        if event_type == Some("response.output_text.delta")
+            && let Some(delta) = event.get("delta").and_then(Value::as_str)
+            && !delta.is_empty()
+        {
+            self.saw_text_delta = true;
+            events.push(StreamEvent::TextDelta(delta.to_owned()));
+        }
+
+        if event_type == Some("response.output_text.done")
+            && !self.saw_text_delta
+            && !self.emitted_fallback_text
+            && let Some(text) = first_nonempty_str(event.get("text").and_then(Value::as_str))
+        {
+            self.emitted_fallback_text = true;
+            events.push(StreamEvent::TextDelta(text));
+        }
+
+        if (event_type == Some("response.output_item.done")
+            || event_type == Some("response.output_item.added"))
+            && let Some(item) = event.get("item")
+            && let Some(tool_call) = parse_tool_call(item)
+        {
+            self.record_tool_call(tool_call);
+        }
+
+        if (event_type == Some("response.completed") || event_type == Some("response.done"))
+            && let Some(response_payload) = event.get("response")
+        {
+            let parsed = parse_provider_response(response_payload);
+            if !self.saw_text_delta
+                && !self.emitted_fallback_text
+                && let Some(text) = parsed.output_text
             {
-                merge_provider_responses(&mut parsed, parse_provider_response(response_payload));
+                self.emitted_fallback_text = true;
+                events.push(StreamEvent::TextDelta(text));
             }
+            for tool_call in parsed.tool_calls {
+                self.record_tool_call(tool_call);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn record_tool_call(&mut self, tool_call: ToolCall) {
+        if let Some(id) = tool_call.id.clone() {
+            if let Some(index) = self.tool_call_indices_by_id.get(&id).copied() {
+                self.tool_calls[index] = tool_call;
+            } else {
+                self.tool_call_indices_by_id
+                    .insert(id, self.tool_calls.len());
+                self.tool_calls.push(tool_call);
+            }
+        } else {
+            self.tool_calls.push(tool_call);
+        }
+    }
+}
+
+fn parse_sse_provider_response(body: &str) -> Result<ProviderResponse, FrameworkError> {
+    let mut accumulator = CodexStreamAccumulator::default();
+    let mut events = Vec::new();
+    accumulator.push_bytes(body.as_bytes(), &mut events)?;
+    accumulator.finish(&mut events)?;
+
+    let mut output_text = String::new();
+    let mut tool_calls = Vec::new();
+
+    for event in events {
+        match event {
+            StreamEvent::TextDelta(delta) => output_text.push_str(&delta),
+            StreamEvent::ToolCallComplete(tool_call) => tool_calls.push(tool_call),
+            StreamEvent::Done => {}
+            StreamEvent::Error(message) => return Err(FrameworkError::Provider(message)),
         }
     }
 
-    if saw_delta {
-        let trimmed = delta_text.trim();
-        if !trimmed.is_empty() {
-            parsed.output_text = Some(trimmed.to_owned());
-        }
-    }
-
-    if !saw_any_event {
-        return Ok(parsed);
-    }
-
-    Ok(parsed)
+    Ok(ProviderResponse {
+        output_text: (!output_text.is_empty()).then_some(output_text),
+        tool_calls,
+    })
 }
 
 async fn decode_responses_body(
@@ -529,7 +634,7 @@ async fn decode_responses_body(
 
 fn sanitize_body_for_error(body: &str) -> String {
     let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    compact.chars().take(800).collect()
+    compact.chars().take(ERROR_BODY_PREVIEW_CHARS).collect()
 }
 
 fn build_request_body(
@@ -537,20 +642,25 @@ fn build_request_body(
     instructions: &str,
     input: &[Value],
     tools: &[Value],
-    variant: RequestVariant,
+    stream: bool,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "input": input,
         "instructions": instructions,
-        "stream": true,
+        "store": false,
+        "stream": stream,
+        "text": {
+            "verbosity": DEFAULT_TEXT_VERBOSITY,
+        },
+        "reasoning": {
+            "effort": DEFAULT_REASONING_EFFORT,
+            "summary": DEFAULT_REASONING_SUMMARY,
+        },
+        "include": ["reasoning.encrypted_content"],
     });
 
-    if variant != RequestVariant::Minimal {
-        body["store"] = json!(false);
-    }
-
-    if variant == RequestVariant::Full && !tools.is_empty() {
+    if !tools.is_empty() {
         body["tools"] = json!(tools);
         body["tool_choice"] = json!("auto");
         body["parallel_tool_calls"] = json!(true);
@@ -564,13 +674,19 @@ async fn send_request_attempt(
     access_token: &str,
     account_id: Option<&str>,
     body: &Value,
+    stream: bool,
 ) -> Result<reqwest::Response, FrameworkError> {
+    let accept_header = if stream {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
     let mut request_builder = client
         .post(OPENAI_CODEX_RESPONSES_URL)
         .header(AUTHORIZATION, format!("Bearer {access_token}"))
         .header("OpenAI-Beta", "responses=experimental")
         .header("originator", "pi")
-        .header("accept", "text/event-stream")
+        .header("accept", accept_header)
         .header("Content-Type", "application/json")
         .json(body);
 
@@ -584,16 +700,24 @@ async fn send_request_attempt(
         .map_err(|err| FrameworkError::Provider(format!("openai_codex request failed: {err}")))
 }
 
-#[async_trait]
-impl Provider for OpenAiCodexProvider {
-    #[tracing::instrument(name = "provider.generate", skip(self, system_prompt, history, tools))]
-    async fn generate(
+fn summarize_openai_codex_error(body: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(body)
+        && let Some(error_obj) = value.get("error").and_then(Value::as_object)
+        && let Some(message) = error_obj.get("message").and_then(Value::as_str)
+        && !message.trim().is_empty()
+    {
+        return message.trim().to_owned();
+    }
+    sanitize_body_for_error(body)
+}
+
+impl OpenAiCodexProvider {
+    async fn build_request_context(
         &self,
         system_prompt: &str,
         history: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<ProviderResponse, FrameworkError> {
-        let request_started = std::time::Instant::now();
+    ) -> Result<RequestContext, FrameworkError> {
         let access_token = self
             .auth
             .get_valid_openai_access_token(None)
@@ -609,79 +733,202 @@ impl Provider for OpenAiCodexProvider {
             .and_then(|loaded| loaded.account_id)
             .or_else(|| extract_account_id_from_jwt(&access_token));
 
-        let input = build_input(history);
-        let tools = build_tools(tools);
-        let instructions = resolve_instructions(system_prompt);
-        let mut attempts = vec![RequestVariant::Full];
-        if !tools.is_empty() {
-            attempts.push(RequestVariant::NoTools);
-        }
-        attempts.push(RequestVariant::Minimal);
+        Ok(RequestContext {
+            access_token,
+            account_id,
+            input: build_input(history),
+            tools: build_tools(tools),
+            instructions: resolve_instructions(system_prompt),
+        })
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiCodexProvider {
+    #[tracing::instrument(name = "provider.generate", skip(self, system_prompt, history, tools))]
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        history: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderResponse, FrameworkError> {
+        let request_started = std::time::Instant::now();
+        let context = self
+            .build_request_context(system_prompt, history, tools)
+            .await?;
+        let request_body = build_request_body(
+            &self.model,
+            &context.instructions,
+            &context.input,
+            &context.tools,
+            false,
+        );
 
         debug!(
             status = "started",
             provider = "openai_codex",
             "provider request"
         );
-        for (index, variant) in attempts.iter().enumerate() {
-            let request_body =
-                build_request_body(&self.model, &instructions, &input, &tools, *variant);
-            let response = send_request_attempt(
-                &self.client,
-                &access_token,
-                account_id.as_deref(),
-                &request_body,
-            )
-            .await
-            .map_err(|err| {
-                error!(
-                    status = "failed",
-                    provider = "openai_codex",
-                    error_kind = "http_send",
-                    variant = variant.as_str(),
-                    elapsed_ms = request_started.elapsed().as_millis() as u64,
-                    error = %err,
-                    "provider request"
-                );
-                err
-            })?;
+        let response = send_request_attempt(
+            &self.client,
+            &context.access_token,
+            context.account_id.as_deref(),
+            &request_body,
+            false,
+        )
+        .await
+        .map_err(|err| {
+            error!(
+                status = "failed",
+                provider = "openai_codex",
+                error_kind = "http_send",
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                error = %err,
+                "provider request"
+            );
+            err
+        })?;
 
-            if response.status().is_success() {
-                let parsed = decode_responses_body(response).await?;
-                debug!(
-                    status = "completed",
-                    provider = "openai_codex",
-                    variant = variant.as_str(),
-                    elapsed_ms = request_started.elapsed().as_millis() as u64,
-                    "provider request"
-                );
-                return Ok(parsed);
-            }
-
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let sanitized = sanitize_body_for_error(&body);
-            let has_more_attempts = index + 1 < attempts.len();
-            if status.as_u16() == 400 && has_more_attempts {
-                warn!(
-                    provider = "openai_codex",
-                    status = %status,
-                    variant = variant.as_str(),
-                    next_variant = attempts[index + 1].as_str(),
-                    error = %sanitized,
-                    "retrying openai_codex request with relaxed payload"
-                );
-                continue;
-            }
-
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            let error_summary = summarize_openai_codex_error(&error_body);
+            error!(
+                status = "failed",
+                provider = "openai_codex",
+                error_kind = "http_status",
+                http_status = %status,
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                response_error = %error_summary,
+                "provider request"
+            );
             return Err(FrameworkError::Provider(format!(
-                "openai_codex returned error ({status}): {sanitized}"
+                "openai_codex returned {status}: {error_summary}"
             )));
         }
 
-        Err(FrameworkError::Provider(
-            "openai_codex request failed after retries".to_owned(),
-        ))
+        let parsed = decode_responses_body(response).await?;
+        debug!(
+            status = "completed",
+            provider = "openai_codex",
+            elapsed_ms = request_started.elapsed().as_millis() as u64,
+            "provider request"
+        );
+        Ok(parsed)
+    }
+
+    #[tracing::instrument(
+        name = "provider.generate_stream",
+        skip(self, system_prompt, history, tools)
+    )]
+    async fn generate_stream(
+        &self,
+        system_prompt: &str,
+        history: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderStream, FrameworkError> {
+        let request_started = std::time::Instant::now();
+        let context = self
+            .build_request_context(system_prompt, history, tools)
+            .await?;
+        let request_body = build_request_body(
+            &self.model,
+            &context.instructions,
+            &context.input,
+            &context.tools,
+            true,
+        );
+
+        debug!(
+            status = "started",
+            provider = "openai_codex",
+            "provider stream request"
+        );
+        let response = send_request_attempt(
+            &self.client,
+            &context.access_token,
+            context.account_id.as_deref(),
+            &request_body,
+            true,
+        )
+        .await
+        .map_err(|err| {
+            error!(
+                status = "failed",
+                provider = "openai_codex",
+                error_kind = "http_send",
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                error = %err,
+                "provider stream request"
+            );
+            err
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            let error_summary = summarize_openai_codex_error(&error_body);
+            error!(
+                status = "failed",
+                provider = "openai_codex",
+                error_kind = "http_status",
+                http_status = %status,
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                response_error = %error_summary,
+                "provider stream request"
+            );
+            return Err(FrameworkError::Provider(format!(
+                "openai_codex returned {status}: {error_summary}"
+            )));
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut accumulator = CodexStreamAccumulator::default();
+            while let Some(chunk) = byte_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        let mut events = Vec::new();
+                        match accumulator.push_bytes(&bytes, &mut events) {
+                            Ok(()) => {
+                                for event in events {
+                                    if tx.send(event).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(StreamEvent::Error(err.to_string()));
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(StreamEvent::Error(format!(
+                            "openai_codex stream read failed: {err}"
+                        )));
+                        return;
+                    }
+                }
+            }
+
+            let mut events = Vec::new();
+            match accumulator.finish(&mut events) {
+                Ok(()) => {
+                    for event in events {
+                        if tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(StreamEvent::Error(err.to_string()));
+                }
+            }
+        });
+
+        Ok(Box::pin(UnboundedReceiverStream::new(rx)))
     }
 }
 
@@ -709,6 +956,7 @@ mod tests {
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[1]["type"], "function_call_output");
+        assert!(input[1]["output"].is_string());
     }
 
     #[test]
@@ -731,6 +979,15 @@ mod tests {
         assert_eq!(input[0]["call_id"], "call_id___1");
         assert_eq!(input[0]["arguments"], "{}");
         assert_eq!(input[1]["call_id"], "call_id___1");
+        assert!(input[1]["output"].is_string());
+    }
+
+    #[test]
+    fn normalize_tool_result_output_preserves_array_of_objects() {
+        let value = json!([{"type":"text","text":"ok"}]);
+        let normalized = normalize_tool_result_output(&value);
+        assert!(normalized.is_array());
+        assert_eq!(normalized[0]["type"], "text");
     }
 
     #[test]
@@ -833,7 +1090,32 @@ data: [DONE]
     }
 
     #[test]
-    fn build_request_body_varies_by_request_variant() {
+    fn parse_sse_provider_response_dedupes_tool_calls_by_id() {
+        let payload = r#"data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"clock","arguments":"{\"timezone\":\"UTC\"}"}}
+data: {"type":"response.done","response":{"output":[{"type":"function_call","call_id":"call_1","name":"clock","arguments":"{\"timezone\":\"America/Chicago\"}"}]}}
+data: [DONE]
+"#;
+
+        let parsed = parse_sse_provider_response(payload).expect("sse should parse");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(
+            parsed.tool_calls[0].args_json,
+            r#"{"timezone":"America/Chicago"}"#
+        );
+    }
+
+    #[test]
+    fn parse_sse_provider_response_uses_output_text_done_without_delta() {
+        let payload = r#"data: {"type":"response.output_text.done","text":"Hello from done"}
+data: [DONE]
+"#;
+        let parsed = parse_sse_provider_response(payload).expect("sse should parse");
+        assert_eq!(parsed.output_text.as_deref(), Some("Hello from done"));
+    }
+
+    #[test]
+    fn build_request_body_includes_tools_without_variant_downgrade() {
         let input = vec![
             json!({"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}),
         ];
@@ -841,21 +1123,12 @@ data: [DONE]
             json!({"type":"function","name":"clock","parameters":{"type":"object","properties":{}}}),
         ];
 
-        let full = build_request_body("model-a", "inst", &input, &tools, RequestVariant::Full);
-        assert!(full.get("tools").is_some());
-        assert_eq!(full["stream"], true);
-        assert_eq!(full["parallel_tool_calls"], true);
-
-        let no_tools =
-            build_request_body("model-a", "inst", &input, &tools, RequestVariant::NoTools);
-        assert!(no_tools.get("tools").is_none());
-        assert!(no_tools.get("parallel_tool_calls").is_none());
-        assert_eq!(no_tools["stream"], true);
-
-        let minimal =
-            build_request_body("model-a", "inst", &input, &tools, RequestVariant::Minimal);
-        assert!(minimal.get("tools").is_none());
-        assert!(minimal.get("store").is_none());
-        assert_eq!(minimal["stream"], true);
+        let body = build_request_body("model-a", "inst", &input, &tools, true);
+        assert!(body.get("tools").is_some());
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["text"]["verbosity"], "medium");
+        assert_eq!(body["reasoning"]["effort"], "high");
     }
 }
