@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::config::MemoryToolConfig;
 use crate::error::FrameworkError;
 use crate::memory::MemoryStoreScope;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::{MemoryAction, parse_memory_args};
 
@@ -39,7 +39,7 @@ impl Tool for MemoryTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         match parse_memory_args(args_json) {
             MemoryAction::Query {
                 query,
@@ -59,14 +59,14 @@ impl Tool for MemoryTool {
                     )
                     .await?;
                 if results.is_empty() {
-                    return Ok("no memory hits".to_owned());
+                    return Ok(ToolExecutionOutcome::completed("no memory hits".to_owned()));
                 }
-                Ok(results
+                Ok(ToolExecutionOutcome::completed(results
                     .iter()
                     .enumerate()
                     .map(|(i, hit)| format!("{}. {}", i + 1, hit))
                     .collect::<Vec<_>>()
-                    .join("\n"))
+                    .join("\n")))
             }
             MemoryAction::List { kind, limit } => {
                 let facts = ctx
@@ -74,7 +74,9 @@ impl Tool for MemoryTool {
                     .list_long_term_facts(kind.as_deref(), limit)
                     .await?;
                 if facts.is_empty() {
-                    return Ok("no long-term memories stored".to_owned());
+                    return Ok(ToolExecutionOutcome::completed(
+                        "no long-term memories stored".to_owned(),
+                    ));
                 }
                 let lines: Vec<String> = facts
                     .iter()
@@ -85,7 +87,11 @@ impl Tool for MemoryTool {
                         )
                     })
                     .collect();
-                Ok(format!("{} memories:\n{}", facts.len(), lines.join("\n")))
+                Ok(ToolExecutionOutcome::completed(format!(
+                    "{} memories:\n{}",
+                    facts.len(),
+                    lines.join("\n")
+                )))
             }
         }
     }

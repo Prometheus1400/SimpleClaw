@@ -4,7 +4,7 @@ use crate::gateway::Gateway;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, ProviderResponse, Role, StreamEvent};
 use crate::reply_policy::no_reply_prompt_instruction;
-use crate::tools::ProcessManager;
+use crate::tools::AsyncToolRunManager;
 use crate::tools::{AgentInvoker, AgentToolRegistry, CompletionRoute, ToolExecEnv};
 use crate::{channels::InboundMessage, memory::DynMemory};
 use std::collections::BTreeMap;
@@ -35,7 +35,7 @@ pub struct RunParams<'a> {
     pub workspace_root: std::path::PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
-    pub process_manager: Arc<ProcessManager>,
+    pub async_tool_runs: Arc<AsyncToolRunManager>,
     pub tool_registry: AgentToolRegistry,
     pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
@@ -86,7 +86,7 @@ impl ReactLoop {
             workspace_root: params.workspace_root.clone(),
             user_id: params.user_id.clone(),
             owner_ids: params.owner_ids.clone(),
-            process_manager: Arc::clone(&params.process_manager),
+            async_tool_runs: Arc::clone(&params.async_tool_runs),
             invoker,
             gateway: params.gateway.clone(),
             completion_tx: params.completion_tx.clone(),

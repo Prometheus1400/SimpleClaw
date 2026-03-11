@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::error::FrameworkError;
 use crate::memory::MemorizeResult;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::parse_memorize_args;
 
@@ -30,7 +30,7 @@ impl Tool for MemorizeTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let (fact, kind, importance) = parse_memorize_args(args_json);
         let result = ctx
             .memory
@@ -38,22 +38,22 @@ impl Tool for MemorizeTool {
             .await?;
         let clamped = importance.clamp(1, 5);
         match result {
-            MemorizeResult::Duplicate => Ok(format!(
+            MemorizeResult::Duplicate => Ok(ToolExecutionOutcome::completed(format!(
                 "already memorized long-term fact (kind={kind}, importance={clamped})"
-            )),
+            ))),
             MemorizeResult::Updated { superseded_content } => {
                 let preview = if superseded_content.len() > 80 {
                     format!("{}…", &superseded_content[..80])
                 } else {
                     superseded_content
                 };
-                Ok(format!(
+                Ok(ToolExecutionOutcome::completed(format!(
                     "updated existing long-term fact (kind={kind}, importance={clamped}); superseded: \"{preview}\""
-                ))
+                )))
             }
-            MemorizeResult::Inserted => Ok(format!(
+            MemorizeResult::Inserted => Ok(ToolExecutionOutcome::completed(format!(
                 "memorized long-term fact (kind={kind}, importance={clamped})"
-            )),
+            ))),
         }
     }
 }

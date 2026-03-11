@@ -234,7 +234,7 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output() {
     let response = result
         .observed_tool_response
         .expect("tool response should be captured");
-    assert_eq!(response["status"], Value::String("ok".to_owned()));
+    assert_eq!(response["status"], Value::String("accepted".to_owned()));
     let nested = response["content"]
         .as_str()
         .expect("tool response content should be a string");
@@ -445,12 +445,12 @@ async fn gateway_roundtrip_processes_background_completion_followup() {
     let response = result
         .observed_tool_response
         .expect("background tool response should be captured");
-    assert_eq!(response["status"], Value::String("ok".to_owned()));
+    assert_eq!(response["status"], Value::String("accepted".to_owned()));
     let nested = response["content"]
         .as_str()
         .expect("tool response content should be a string");
     assert!(
-        nested.contains("\"status\":\"backgrounded\""),
+        nested.contains("\"status\":\"accepted\""),
         "nested={nested}"
     );
 }

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::config::CronToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 pub(crate) use store::{CronJob, CronStore};
 
@@ -81,7 +81,7 @@ impl Tool for CronTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let args: CronArgs = serde_json::from_str(args_json).map_err(|e| {
             FrameworkError::Tool(format!("cron args must be valid JSON object: {e}"))
         })?;
@@ -166,7 +166,7 @@ impl Tool for CronTool {
 
                 store.create_job(&job)?;
 
-                Ok(json!({
+                Ok(ToolExecutionOutcome::completed(json!({
                     "status": "created",
                     "id": job.id,
                     "schedule": job.schedule,
@@ -175,7 +175,7 @@ impl Tool for CronTool {
                     "guardCommand": job.guard_command,
                     "guardTimeoutSeconds": job.guard_timeout_seconds
                 })
-                .to_string())
+                .to_string()))
             }
             CronAction::Delete => {
                 let id = args
@@ -188,7 +188,9 @@ impl Tool for CronTool {
                     })?;
                 let store = self.lock_store()?;
                 let deleted = store.delete_job(id, &ctx.agent_id)?;
-                Ok(json!({"status":"ok","deleted":deleted,"id":id}).to_string())
+                Ok(ToolExecutionOutcome::completed(
+                    json!({"status":"ok","deleted":deleted,"id":id}).to_string(),
+                ))
             }
             CronAction::List => {
                 let query = args
@@ -200,7 +202,9 @@ impl Tool for CronTool {
                 let store = self.lock_store()?;
                 let jobs = store.list_jobs(&ctx.agent_id, query.as_deref())?;
                 let jobs_json: Vec<serde_json::Value> = jobs.iter().map(job_to_json).collect();
-                Ok(json!({"status":"ok","jobs":jobs_json}).to_string())
+                Ok(ToolExecutionOutcome::completed(
+                    json!({"status":"ok","jobs":jobs_json}).to_string(),
+                ))
             }
         }
     }

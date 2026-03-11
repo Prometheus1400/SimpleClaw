@@ -111,8 +111,10 @@ impl Tool for DynamicSkillTool {
         _ctx: &ToolExecEnv,
         _args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
-        Ok(self.content.clone())
+    ) -> Result<crate::tools::ToolExecutionOutcome, FrameworkError> {
+        Ok(crate::tools::ToolExecutionOutcome::completed(
+            self.content.clone(),
+        ))
     }
 }
 

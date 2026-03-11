@@ -7,7 +7,7 @@ use crate::error::FrameworkError;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunParams};
 use crate::tools::{
-    AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, WorkerInvokeRequest,
+    AgentInvokeRequest, AgentInvoker, AsyncToolRunManager, InvokeOutcome, WorkerInvokeRequest,
 };
 
 /// Implements agent-to-agent invocation by looking up configs in the
@@ -17,19 +17,19 @@ use crate::tools::{
 pub(crate) struct DirectAgentInvoker {
     react_loop: Weak<ReactLoop>,
     agents: Arc<AgentDirectory>,
-    process_manager: Arc<ProcessManager>,
+    async_tool_runs: Arc<AsyncToolRunManager>,
 }
 
 impl DirectAgentInvoker {
     pub fn new(
         react_loop: Weak<ReactLoop>,
         agents: Arc<AgentDirectory>,
-        process_manager: Arc<ProcessManager>,
+        async_tool_runs: Arc<AsyncToolRunManager>,
     ) -> Self {
         Self {
             react_loop,
             agents,
-            process_manager,
+            async_tool_runs,
         }
     }
 }
@@ -67,7 +67,7 @@ impl AgentInvoker for DirectAgentInvoker {
             workspace_root: target_config.workspace_root.clone(),
             user_id: request.user_id,
             owner_ids: target_config.owner_ids.clone(),
-            process_manager: Arc::clone(&self.process_manager),
+            async_tool_runs: Arc::clone(&self.async_tool_runs),
             tool_registry: target_config.tool_registry.clone(),
             gateway: None,
             completion_tx: None,
@@ -121,7 +121,7 @@ impl AgentInvoker for DirectAgentInvoker {
             workspace_root: current_config.workspace_root.clone(),
             user_id: request.user_id,
             owner_ids: current_config.owner_ids.clone(),
-            process_manager: Arc::clone(&self.process_manager),
+            async_tool_runs: Arc::clone(&self.async_tool_runs),
             tool_registry: worker_tool_registry,
             gateway: None,
             completion_tx: None,
@@ -164,7 +164,7 @@ mod tests {
     };
     use crate::react::ReactLoop;
     use crate::tools::{
-        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, WorkerInvokeRequest,
+        AgentInvokeRequest, AgentInvoker, AsyncToolRunManager, InvokeOutcome, WorkerInvokeRequest,
         default_factory,
     };
 
@@ -406,7 +406,7 @@ mod tests {
         let invoker = DirectAgentInvoker::new(
             Arc::downgrade(&test_react_loop(provider)),
             Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
-            Arc::new(ProcessManager::new()),
+            Arc::new(AsyncToolRunManager::new()),
         );
 
         let err = invoker
@@ -429,7 +429,7 @@ mod tests {
         let invoker = DirectAgentInvoker::new(
             Arc::downgrade(&test_react_loop(provider)),
             test_directory(false),
-            Arc::new(ProcessManager::new()),
+            Arc::new(AsyncToolRunManager::new()),
         );
 
         let err = invoker
@@ -454,7 +454,7 @@ mod tests {
         let invoker = DirectAgentInvoker::new(
             Arc::downgrade(&react_loop),
             test_directory(true),
-            Arc::new(ProcessManager::new()),
+            Arc::new(AsyncToolRunManager::new()),
         );
 
         let outcome = invoker
@@ -483,7 +483,7 @@ mod tests {
         let invoker = DirectAgentInvoker::new(
             Arc::downgrade(&react_loop),
             test_directory(true),
-            Arc::new(ProcessManager::new()),
+            Arc::new(AsyncToolRunManager::new()),
         );
 
         let outcome = invoker
@@ -516,7 +516,7 @@ mod tests {
         let invoker = DirectAgentInvoker::new(
             Arc::downgrade(&react_loop),
             test_directory(true),
-            Arc::new(ProcessManager::new()),
+            Arc::new(AsyncToolRunManager::new()),
         );
 
         let outcome = invoker

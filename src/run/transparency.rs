@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::config::GatewayChannelKind;
-use crate::dispatch::ToolExecutionResult;
+use crate::dispatch::{ToolExecutionResult, ToolExecutionStatus};
 
 pub(super) fn render_tool_call_transparency(
     reply: &str,
@@ -63,6 +63,7 @@ struct MemoryTransparencySummary {
 struct ToolSummaryGroup {
     name: String,
     ok: usize,
+    accepted: usize,
     err: usize,
 }
 
@@ -89,26 +90,27 @@ fn transparency_summary(
 
 fn tool_summary_groups(tool_calls: &[ToolExecutionResult]) -> Vec<ToolSummaryGroup> {
     let mut order = Vec::new();
-    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut counts: HashMap<&str, (usize, usize, usize)> = HashMap::new();
     for call in flatten_tool_calls(tool_calls) {
         let entry = counts.entry(call.name.as_str()).or_insert_with(|| {
             order.push(call.name.as_str());
-            (0, 0)
+            (0, 0, 0)
         });
-        if call.success {
-            entry.0 += 1;
-        } else {
-            entry.1 += 1;
+        match call.status {
+            ToolExecutionStatus::Ok => entry.0 += 1,
+            ToolExecutionStatus::Accepted => entry.1 += 1,
+            ToolExecutionStatus::ToolError => entry.2 += 1,
         }
     }
 
     order
         .into_iter()
         .map(|name| {
-            let (ok, err) = counts[name];
+            let (ok, accepted, err) = counts[name];
             ToolSummaryGroup {
                 name: name.to_owned(),
                 ok,
+                accepted,
                 err,
             }
         })
@@ -125,6 +127,9 @@ fn format_tool_summary_plain(groups: &[ToolSummaryGroup]) -> String {
             let mut parts = Vec::new();
             if group.ok > 0 {
                 parts.push(format!("ok×{}", group.ok));
+            }
+            if group.accepted > 0 {
+                parts.push(format!("accepted×{}", group.accepted));
             }
             if group.err > 0 {
                 parts.push(format!("err×{}", group.err));
@@ -146,6 +151,9 @@ fn format_tool_summary_discord(groups: &[ToolSummaryGroup]) -> String {
             let mut parts = Vec::new();
             if group.ok > 0 {
                 parts.push(format!("`ok×{}`", group.ok));
+            }
+            if group.accepted > 0 {
+                parts.push(format!("`accepted×{}`", group.accepted));
             }
             if group.err > 0 {
                 parts.push(format!("`err×{}`", group.err));
@@ -223,7 +231,7 @@ mod tests {
         render_tool_call_transparency,
     };
     use crate::config::GatewayChannelKind;
-    use crate::dispatch::ToolExecutionResult;
+    use crate::dispatch::{ToolExecutionResult, ToolExecutionStatus};
 
     fn render(reply: &str, calls: &[ToolExecutionResult], tool_calls_enabled: bool) -> String {
         render_tool_call_transparency(
@@ -256,7 +264,7 @@ mod tests {
             name: "clock".to_owned(),
             args_json: "{}".to_owned(),
             output: "2026-03-08T12:00:00Z".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 4,
             tool_call_id: None,
             nested_tool_calls: Vec::new(),
@@ -273,7 +281,7 @@ mod tests {
                 name: "clock".to_owned(),
                 args_json: r#"{"timezone":"UTC"}"#.to_owned(),
                 output: "2026-03-08T12:00:00Z".to_owned(),
-                success: true,
+                status: ToolExecutionStatus::Ok,
                 elapsed_ms: 4,
                 tool_call_id: None,
                 nested_tool_calls: Vec::new(),
@@ -282,7 +290,7 @@ mod tests {
                 name: "clock".to_owned(),
                 args_json: r#"{"timezone":"Invalid/Zone"}"#.to_owned(),
                 output: "tool_error: invalid timezone".to_owned(),
-                success: false,
+                status: ToolExecutionStatus::ToolError,
                 elapsed_ms: 9,
                 tool_call_id: None,
                 nested_tool_calls: Vec::new(),
@@ -300,14 +308,14 @@ mod tests {
             name: "web_fetch".to_owned(),
             args_json: "{}".to_owned(),
             output: "ok".to_owned(),
-            success: false,
+            status: ToolExecutionStatus::ToolError,
             elapsed_ms: 11,
             tool_call_id: None,
             nested_tool_calls: vec![ToolExecutionResult {
                 name: "clock".to_owned(),
                 args_json: "{}".to_owned(),
                 output: "ok".to_owned(),
-                success: true,
+                status: ToolExecutionStatus::Ok,
                 elapsed_ms: 1,
                 tool_call_id: None,
                 nested_tool_calls: Vec::new(),
@@ -323,7 +331,7 @@ mod tests {
             name: "web_fetch".to_owned(),
             args_json: "{}".to_owned(),
             output: "ok".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 1,
             tool_call_id: None,
             nested_tool_calls: Vec::new(),
@@ -339,6 +347,7 @@ mod tests {
             tool_groups: vec![ToolSummaryGroup {
                 name: "clock".to_owned(),
                 ok: 1,
+                accepted: 0,
                 err: 0,
             }],
             memory_hits: None,
@@ -354,14 +363,14 @@ mod tests {
             name: "summon".to_owned(),
             args_json: r#"{"agent":"research"}"#.to_owned(),
             output: "delegated".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 14,
             tool_call_id: None,
             nested_tool_calls: vec![ToolExecutionResult {
                 name: "clock".to_owned(),
                 args_json: "{}".to_owned(),
                 output: "2026-03-08T12:00:00Z".to_owned(),
-                success: true,
+                status: ToolExecutionStatus::Ok,
                 elapsed_ms: 3,
                 tool_call_id: None,
                 nested_tool_calls: Vec::new(),
@@ -377,21 +386,21 @@ mod tests {
             name: "task".to_owned(),
             args_json: "{}".to_owned(),
             output: "ok".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 10,
             tool_call_id: None,
             nested_tool_calls: vec![ToolExecutionResult {
                 name: "summon".to_owned(),
                 args_json: "{}".to_owned(),
                 output: "ok".to_owned(),
-                success: true,
+                status: ToolExecutionStatus::Ok,
                 elapsed_ms: 9,
                 tool_call_id: None,
                 nested_tool_calls: vec![ToolExecutionResult {
                     name: "exec".to_owned(),
                     args_json: "{}".to_owned(),
                     output: "ok".to_owned(),
-                    success: true,
+                    status: ToolExecutionStatus::Ok,
                     elapsed_ms: 7,
                     tool_call_id: None,
                     nested_tool_calls: Vec::new(),
@@ -453,7 +462,7 @@ mod tests {
             name: "clock".to_owned(),
             args_json: "{}".to_owned(),
             output: "ok".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 1,
             tool_call_id: None,
             nested_tool_calls: Vec::new(),
