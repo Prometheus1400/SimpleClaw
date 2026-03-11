@@ -15,7 +15,7 @@ use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunOutcome, RunParams};
 use crate::reply_policy::is_no_reply;
-use crate::tools::{AgentToolRegistry, CompletionRoute, ProcessManager};
+use crate::tools::{AgentToolRegistry, AsyncToolRunManager, CompletionRoute};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
 #[derive(Debug, Clone)]
@@ -73,7 +73,7 @@ pub struct RuntimeContext {
 
 #[derive(Clone)]
 pub struct ToolRuntime {
-    pub process_manager: Arc<ProcessManager>,
+    pub async_tool_runs: Arc<AsyncToolRunManager>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
 }
 
@@ -163,7 +163,7 @@ impl AgentRuntime {
             workspace_root: self.config.workspace_root.clone(),
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.owner_ids.clone(),
-            process_manager: Arc::clone(&context.tool_runtime.process_manager),
+            async_tool_runs: Arc::clone(&context.tool_runtime.async_tool_runs),
             tool_registry: self.config.tool_registry.clone(),
             gateway: Some(Arc::clone(&context.gateway)),
             completion_tx: Some(context.tool_runtime.completion_tx.clone()),
@@ -455,7 +455,7 @@ mod tests {
     use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
     use crate::react::ReactLoop;
     use crate::tools::{
-        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory,
+        AgentInvokeRequest, AgentInvoker, AsyncToolRunManager, InvokeOutcome, default_factory,
     };
 
     use super::{
@@ -765,7 +765,7 @@ mod tests {
             gateway,
             agents: directory,
             tool_runtime: Arc::new(ToolRuntime {
-                process_manager: Arc::new(ProcessManager::new()),
+                async_tool_runs: Arc::new(AsyncToolRunManager::new()),
                 completion_tx,
             }),
         }

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::config::TaskToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv, ToolRunOutput, WorkerInvokeRequest};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome, ToolRunOutput, WorkerInvokeRequest};
 
 use super::common::parse_task_args;
 
@@ -36,10 +36,8 @@ impl Tool for TaskTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<String, FrameworkError> {
-        self.execute_with_trace(ctx, args_json, session_id)
-            .await
-            .map(|result| result.output)
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
+        self.execute_with_trace(ctx, args_json, session_id).await
     }
 
     async fn execute_with_trace(
@@ -47,7 +45,7 @@ impl Tool for TaskTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let prompt = parse_task_args(args_json);
         let outcome = ctx
             .invoker
@@ -59,9 +57,9 @@ impl Tool for TaskTool {
                 max_steps_override: self.config.worker_max_steps,
             })
             .await?;
-        Ok(ToolRunOutput {
+        Ok(ToolExecutionOutcome::Completed(ToolRunOutput {
             output: outcome.reply,
             nested_tool_calls: outcome.tool_calls,
-        })
+        }))
     }
 }

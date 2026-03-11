@@ -6,7 +6,7 @@ use tracing::{debug, info_span, warn};
 use crate::providers::{Message, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
 use crate::tools::{
     AgentToolRegistry, DefaultToolAuthorizer, DefaultToolExecutor, ToolAuthorizer, ToolExecEnv,
-    ToolExecutor,
+    ToolExecutionOutcome, ToolExecutor,
 };
 
 const TOOL_OUTPUT_LOG_PREVIEW_CHARS: usize = 500;
@@ -18,12 +18,33 @@ pub(crate) struct ParsedToolCall {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum ToolExecutionStatus {
+    Ok,
+    Accepted,
+    ToolError,
+}
+
+impl ToolExecutionStatus {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Accepted => "accepted",
+            Self::ToolError => "tool_error",
+        }
+    }
+
+    pub(crate) fn is_success(&self) -> bool {
+        matches!(self, Self::Ok | Self::Accepted)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ToolExecutionResult {
     pub name: String,
     #[allow(dead_code)]
     pub args_json: String,
     pub output: String,
-    pub success: bool,
+    pub status: ToolExecutionStatus,
     #[allow(dead_code)]
     pub elapsed_ms: u64,
     pub tool_call_id: Option<String>,
@@ -70,21 +91,36 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                             .execute(entry, tool_ctx, &args_json, session_id)
                             .await
                         {
-                            Ok(ok) => (ok.output, ok.nested_tool_calls, "ok"),
-                            Err(err) => (format!("tool_error: {err}"), Vec::new(), "tool_error"),
+                            Ok(ToolExecutionOutcome::Completed(ok)) => {
+                                (ok.output, ok.nested_tool_calls, ToolExecutionStatus::Ok)
+                            }
+                            Ok(ToolExecutionOutcome::AsyncStarted(started)) => (
+                                started.accepted_output(),
+                                Vec::new(),
+                                ToolExecutionStatus::Accepted,
+                            ),
+                            Err(err) => (
+                                format!("tool_error: {err}"),
+                                Vec::new(),
+                                ToolExecutionStatus::ToolError,
+                            ),
                         },
-                        Err(err) => (format!("tool_error: {err}"), Vec::new(), "tool_error"),
+                        Err(err) => (
+                            format!("tool_error: {err}"),
+                            Vec::new(),
+                            ToolExecutionStatus::ToolError,
+                        ),
                     },
                     None => (
                         format!("tool_error: unknown tool: {}", call.name),
                         Vec::new(),
-                        "unknown",
+                        ToolExecutionStatus::ToolError,
                     ),
                 };
             let elapsed_ms = tool_started.elapsed().as_millis() as u64;
             let output_preview = preview_for_log(&observation, TOOL_OUTPUT_LOG_PREVIEW_CHARS);
 
-            if status == "ok" {
+            if status.is_success() {
                 debug!(
                     status = "completed",
                     tool_name = %call.name,
@@ -99,7 +135,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                     tool_name = %call.name,
                     tool_args = %args_preview,
                     tool_output = %output_preview,
-                    error_kind = status,
+                    error_kind = status.as_str(),
                     elapsed_ms,
                     "tool call"
                 );
@@ -109,7 +145,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                 name: call.name.clone(),
                 args_json,
                 output: observation,
-                success: status == "ok",
+                status,
                 elapsed_ms,
                 tool_call_id: call.tool_call_id.clone(),
                 nested_tool_calls,
@@ -208,7 +244,7 @@ impl ToolDispatcher for NativeDispatcher {
                 call_id: r.tool_call_id.clone(),
                 name: r.name.clone(),
                 response: json!({
-                    "status": if r.success { "ok" } else { "tool_error" },
+                    "status": r.status.as_str(),
                     "content": r.output,
                 }),
             })
@@ -272,7 +308,11 @@ impl XmlDispatcher {
             xml.push_str("<tool_result>\n<name>");
             xml.push_str(&result.name);
             xml.push_str("</name>\n<status>");
-            xml.push_str(if result.success { "ok" } else { "error" });
+            xml.push_str(match result.status {
+                ToolExecutionStatus::Ok => "ok",
+                ToolExecutionStatus::Accepted => "accepted",
+                ToolExecutionStatus::ToolError => "error",
+            });
             xml.push_str("</status>\n<output>");
             xml.push_str(&result.output);
             xml.push_str("</output>\n</tool_result>\n");
@@ -406,7 +446,7 @@ mod tests {
             name: "clock".to_owned(),
             args_json: r#"{"timezone":"UTC"}"#.to_owned(),
             output: "2026-03-06T12:00:00Z".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 8,
             tool_call_id: Some("c1".to_owned()),
             nested_tool_calls: Vec::new(),
@@ -519,7 +559,7 @@ mod tests {
             name: "clock".to_owned(),
             args_json: "{}".to_owned(),
             output: "12:00".to_owned(),
-            success: true,
+            status: ToolExecutionStatus::Ok,
             elapsed_ms: 2,
             tool_call_id: None,
             nested_tool_calls: Vec::new(),
@@ -582,7 +622,7 @@ mod tests {
             name: "exec".to_owned(),
             args_json: r#"{"command":"fail"}"#.to_owned(),
             output: "tool_error: command failed".to_owned(),
-            success: false,
+            status: ToolExecutionStatus::ToolError,
             elapsed_ms: 3,
             tool_call_id: Some("c2".to_owned()),
             nested_tool_calls: Vec::new(),

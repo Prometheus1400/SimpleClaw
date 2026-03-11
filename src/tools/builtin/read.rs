@@ -10,7 +10,8 @@ use crate::tools::sandbox::{
     normalize_workspace_root, persona_guest_mount_path, workspace_guest_mount_path,
 };
 use crate::tools::{
-    Tool, ToolExecEnv, ToolExecutionKind, ToolRunOutput, WasmGuestRequest, WasmSandboxRuntime,
+    Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput, WasmGuestRequest,
+    WasmSandboxRuntime,
 };
 
 use super::common::parse_simple_text_arg;
@@ -55,11 +56,11 @@ impl Tool for ReadTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let plan = self.plan(ctx, args_json)?;
         self.execute_direct(ctx, plan)
             .await
-            .map(|output| output.output)
+            .map(ToolExecutionOutcome::Completed)
     }
 }
 

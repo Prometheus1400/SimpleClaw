@@ -21,7 +21,7 @@ use crate::providers::ProviderFactory;
 use crate::react::ReactLoop;
 use crate::tools::builtin::cron::{CronStore, CronTool};
 use crate::tools::skill::SkillFactory;
-use crate::tools::{ProcessManager, RegisteredTool, ToolFactory, default_factory};
+use crate::tools::{AsyncToolRunManager, RegisteredTool, ToolFactory, default_factory};
 
 #[async_trait]
 pub(crate) trait ProviderFactoryBuilder: Send + Sync {
@@ -56,8 +56,8 @@ pub(crate) trait SkillFactoryBuilder: Send + Sync {
     fn create_skill_factory(&self, app_paths: &AppPaths) -> SkillFactory;
 }
 
-pub(crate) trait ProcessManagerFactory: Send + Sync {
-    fn create_process_manager(&self) -> Arc<ProcessManager>;
+pub(crate) trait AsyncToolRunManagerFactory: Send + Sync {
+    fn create_async_tool_run_manager(&self) -> Arc<AsyncToolRunManager>;
 }
 
 pub(crate) struct RuntimeDependencies {
@@ -66,7 +66,7 @@ pub(crate) struct RuntimeDependencies {
     pub channel_factory: Arc<dyn ChannelFactory>,
     pub tool_factory_builder: Arc<dyn ToolFactoryBuilder>,
     pub skill_factory_builder: Arc<dyn SkillFactoryBuilder>,
-    pub process_manager_factory: Arc<dyn ProcessManagerFactory>,
+    pub async_tool_run_manager_factory: Arc<dyn AsyncToolRunManagerFactory>,
 }
 
 impl Default for RuntimeDependencies {
@@ -77,7 +77,7 @@ impl Default for RuntimeDependencies {
             channel_factory: Arc::new(DefaultChannelFactory),
             tool_factory_builder: Arc::new(DefaultToolFactoryBuilder),
             skill_factory_builder: Arc::new(DefaultSkillFactoryBuilder),
-            process_manager_factory: Arc::new(DefaultProcessManagerFactory),
+            async_tool_run_manager_factory: Arc::new(DefaultAsyncToolRunManagerFactory),
         }
     }
 }
@@ -172,11 +172,11 @@ impl SkillFactoryBuilder for DefaultSkillFactoryBuilder {
     }
 }
 
-struct DefaultProcessManagerFactory;
+struct DefaultAsyncToolRunManagerFactory;
 
-impl ProcessManagerFactory for DefaultProcessManagerFactory {
-    fn create_process_manager(&self) -> Arc<ProcessManager> {
-        Arc::new(ProcessManager::new())
+impl AsyncToolRunManagerFactory for DefaultAsyncToolRunManagerFactory {
+    fn create_async_tool_run_manager(&self) -> Arc<AsyncToolRunManager> {
+        Arc::new(AsyncToolRunManager::new())
     }
 }
 
@@ -284,12 +284,14 @@ pub(crate) async fn assemble_runtime_state(
         runtimes.insert(agent_id.clone(), AgentRuntime::new(config.clone()));
     }
 
-    let process_manager = deps.process_manager_factory.create_process_manager();
+    let async_tool_runs = deps
+        .async_tool_run_manager_factory
+        .create_async_tool_run_manager();
     let react_loop = Arc::new_cyclic(|react_loop: &Weak<ReactLoop>| {
         let invoker: Arc<dyn crate::tools::AgentInvoker> = Arc::new(DirectAgentInvoker::new(
             react_loop.clone(),
             Arc::clone(&directory),
-            Arc::clone(&process_manager),
+            Arc::clone(&async_tool_runs),
         ));
         ReactLoop::new(provider_factory, invoker)
     });
@@ -316,7 +318,7 @@ pub(crate) async fn assemble_runtime_state(
         gateway: Arc::clone(&gateway),
         agents: directory,
         tool_runtime: Arc::new(ToolRuntime {
-            process_manager,
+            async_tool_runs,
             completion_tx: gateway_tx.clone(),
         }),
     });

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::config::ReactToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::parse_react_args;
 
@@ -36,7 +36,7 @@ impl Tool for ReactTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let emoji = parse_react_args(args_json);
         if emoji.trim().is_empty() {
             return Err(FrameworkError::Tool(
@@ -63,6 +63,6 @@ impl Tool for ReactTool {
                 emoji.trim(),
             )
             .await?;
-        Ok("ok".to_owned())
+        Ok(ToolExecutionOutcome::completed("ok".to_owned()))
     }
 }

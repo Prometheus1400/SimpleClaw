@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::config::SummonToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{AgentInvokeRequest, Tool, ToolExecEnv, ToolRunOutput};
+use crate::tools::{AgentInvokeRequest, Tool, ToolExecEnv, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::parse_summon_args;
 
@@ -36,10 +36,8 @@ impl Tool for SummonTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<String, FrameworkError> {
-        self.execute_with_trace(ctx, args_json, session_id)
-            .await
-            .map(|result| result.output)
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
+        self.execute_with_trace(ctx, args_json, session_id).await
     }
 
     async fn execute_with_trace(
@@ -47,7 +45,7 @@ impl Tool for SummonTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let (target, summary) = parse_summon_args(args_json);
         if !self.target_allowed(&target) {
             return Err(FrameworkError::Tool(format!(
@@ -70,10 +68,10 @@ impl Tool for SummonTool {
                 prompt: handoff,
             })
             .await?;
-        Ok(ToolRunOutput {
+        Ok(ToolExecutionOutcome::Completed(ToolRunOutput {
             output: outcome.reply,
             nested_tool_calls: outcome.tool_calls,
-        })
+        }))
     }
 }
 

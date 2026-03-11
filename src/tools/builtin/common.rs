@@ -5,7 +5,7 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use crate::error::FrameworkError;
-use crate::tools::{ProcessSnapshot, ProcessStatus};
+use crate::tools::{AsyncToolRunSnapshot, AsyncToolRunStatus};
 
 pub(super) fn parse_simple_text_arg(args_json: &str) -> String {
     if let Ok(value) = serde_json::from_str::<Value>(args_json) {
@@ -247,7 +247,7 @@ pub(super) fn parse_exec_args(args_json: &str) -> ExecArgs {
 #[derive(Debug, Deserialize)]
 pub(super) struct ProcessArgs {
     pub action: String,
-    pub session_id: Option<String>,
+    pub run_id: Option<String>,
 }
 
 pub(super) fn parse_process_args(args_json: &str) -> ProcessArgs {
@@ -257,16 +257,16 @@ pub(super) fn parse_process_args(args_json: &str) -> ProcessArgs {
             .and_then(|v| v.as_str())
             .unwrap_or("list")
             .to_owned();
-        let session_id = value
-            .get("session_id")
-            .or_else(|| value.get("sessionId"))
+        let run_id = value
+            .get("run_id")
+            .or_else(|| value.get("runId"))
             .and_then(|v| v.as_str())
             .map(str::to_owned);
-        return ProcessArgs { action, session_id };
+        return ProcessArgs { action, run_id };
     }
     ProcessArgs {
         action: "list".to_owned(),
-        session_id: None,
+        run_id: None,
     }
 }
 
@@ -306,19 +306,25 @@ pub(super) fn command_output_to_json(exit_code: i32, stdout: &str, stderr: &str)
     })
 }
 
-pub(super) fn snapshot_to_json(snapshot: &ProcessSnapshot) -> Value {
+pub(super) fn snapshot_to_json(snapshot: &AsyncToolRunSnapshot) -> Value {
+    let process = snapshot
+        .process
+        .as_ref()
+        .expect("process tool only renders process-backed async tool runs");
     let mut payload = json!({
         "status": snapshot.status.as_str(),
-        "sessionId": snapshot.session_id,
-        "command": snapshot.command,
-        "pid": snapshot.pid,
+        "runId": snapshot.run_id,
+        "tool": snapshot.tool_name,
+        "kind": snapshot.kind.as_str(),
+        "command": process.command,
+        "pid": process.pid,
         "startedAt": snapshot.started_at.to_rfc3339(),
         "finishedAt": snapshot.finished_at.map(|dt| dt.to_rfc3339()),
-        "exitCode": snapshot.exit_code,
-        "stdout": truncate_for_tool_output(snapshot.stdout.trim(), 8_000),
-        "stderr": truncate_for_tool_output(snapshot.stderr.trim(), 4_000),
+        "exitCode": process.exit_code,
+        "stdout": truncate_for_tool_output(process.stdout.trim(), 8_000),
+        "stderr": truncate_for_tool_output(process.stderr.trim(), 4_000),
     });
-    if snapshot.status == ProcessStatus::Running {
+    if snapshot.status == AsyncToolRunStatus::Running {
         payload["status"] = Value::String("running".to_owned());
     }
     payload
@@ -349,10 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_process_args_accepts_session_id_camel_case() {
-        let args = parse_process_args(r#"{"action":"poll","sessionId":"abc"}"#);
+    fn parse_process_args_accepts_run_id_camel_case() {
+        let args = parse_process_args(r#"{"action":"poll","runId":"abc"}"#);
         assert_eq!(args.action, "poll");
-        assert_eq!(args.session_id.as_deref(), Some("abc"));
+        assert_eq!(args.run_id.as_deref(), Some("abc"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{AsyncToolRunKind, Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::{parse_process_args, snapshot_to_json};
 
@@ -30,40 +30,54 @@ impl Tool for ProcessTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let args = parse_process_args(args_json);
         match args.action.as_str() {
             "list" => {
-                let items = ctx.process_manager.list().await;
+                let items = ctx
+                    .async_tool_runs
+                    .list()
+                    .await
+                    .into_iter()
+                    .filter(|snapshot| snapshot.kind == AsyncToolRunKind::Process)
+                    .collect::<Vec<_>>();
                 let payload = items
                     .into_iter()
                     .map(|snapshot| snapshot_to_json(&snapshot))
                     .collect::<Vec<_>>();
-                Ok(json!({"status":"ok","processes": payload}).to_string())
+                Ok(ToolExecutionOutcome::completed(
+                    json!({"status":"ok","processes": payload}).to_string(),
+                ))
             }
             "poll" => {
-                let session_id = args.session_id.ok_or_else(|| {
-                    FrameworkError::Tool("process poll requires session_id".to_owned())
+                let run_id = args.run_id.ok_or_else(|| {
+                    FrameworkError::Tool("process poll requires run_id".to_owned())
                 })?;
-                let snapshot = ctx.process_manager.update(&session_id).await?;
-                Ok(snapshot_to_json(&snapshot).to_string())
+                let snapshot = ctx.async_tool_runs.get(&run_id).await?;
+                Ok(ToolExecutionOutcome::completed(
+                    snapshot_to_json(&snapshot).to_string(),
+                ))
             }
-            "kill" => {
-                let session_id = args.session_id.ok_or_else(|| {
-                    FrameworkError::Tool("process kill requires session_id".to_owned())
+            "cancel" | "kill" => {
+                let run_id = args.run_id.ok_or_else(|| {
+                    FrameworkError::Tool("process cancel requires run_id".to_owned())
                 })?;
-                let snapshot = ctx.process_manager.kill(&session_id).await?;
-                Ok(snapshot_to_json(&snapshot).to_string())
+                let snapshot = ctx.async_tool_runs.cancel(&run_id).await?;
+                Ok(ToolExecutionOutcome::completed(
+                    snapshot_to_json(&snapshot).to_string(),
+                ))
             }
             "forget" => {
-                let session_id = args.session_id.ok_or_else(|| {
-                    FrameworkError::Tool("process forget requires session_id".to_owned())
+                let run_id = args.run_id.ok_or_else(|| {
+                    FrameworkError::Tool("process forget requires run_id".to_owned())
                 })?;
-                let snapshot = ctx.process_manager.forget(&session_id).await?;
-                Ok(snapshot_to_json(&snapshot).to_string())
+                let snapshot = ctx.async_tool_runs.forget(&run_id).await?;
+                Ok(ToolExecutionOutcome::completed(
+                    snapshot_to_json(&snapshot).to_string(),
+                ))
             }
             other => Err(FrameworkError::Tool(format!(
-                "process action must be one of list|poll|kill|forget, got: {other}"
+                "process action must be one of list|poll|cancel|kill|forget, got: {other}"
             ))),
         }
     }

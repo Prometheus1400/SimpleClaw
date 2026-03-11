@@ -7,7 +7,8 @@ use std::time::Duration;
 use crate::config::EditToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::{
-    Tool, ToolExecEnv, ToolExecutionKind, ToolRunOutput, WasmGuestRequest, WasmSandboxRuntime,
+    Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput, WasmGuestRequest,
+    WasmSandboxRuntime,
 };
 
 use super::read::{host_path_to_guest_path, resolve_path_for_read};
@@ -53,11 +54,11 @@ impl Tool for EditTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let plan = self.plan(ctx, args_json)?;
         self.execute_direct(ctx, plan)
             .await
-            .map(|output| output.output)
+            .map(ToolExecutionOutcome::Completed)
     }
 }
 

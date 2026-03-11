@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde_json::json;
 use std::path::Path;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
@@ -9,7 +8,7 @@ use crate::config::{ExecToolConfig, ToolSandboxConfig};
 use crate::error::FrameworkError;
 use crate::tools::{
     HostSandboxCommandRequest, HostSandboxRuntime, Tool, ToolExecEnv, ToolExecutionKind,
-    ToolRunOutput, sandbox_runtime,
+    ToolExecutionOutcome, ToolRunOutput, sandbox_runtime,
 };
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
@@ -59,11 +58,9 @@ impl Tool for ExecTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let plan = self.plan(ctx, args_json)?;
-        self.execute_direct(ctx, plan)
-            .await
-            .map(|output| output.output)
+        self.execute_direct(ctx, plan).await
     }
 }
 
@@ -93,21 +90,20 @@ impl ExecTool {
         &self,
         ctx: &ToolExecEnv,
         plan: ExecPlan,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         if plan.background {
-            let (session_id, handle) = ctx
-                .process_manager
-                .spawn(&plan.command, Some(&plan.workspace_root), &plan.env)
+            let started = ctx
+                .async_tool_runs
+                .start_process(
+                    "exec",
+                    &plan.command,
+                    Some(&plan.workspace_root),
+                    &plan.env,
+                    ctx.completion_tx.clone(),
+                    ctx.completion_route.clone(),
+                )
                 .await?;
-            ctx.process_manager.spawn_completion_watcher(
-                session_id.clone(),
-                handle,
-                ctx.completion_tx.clone(),
-                ctx.completion_route.clone(),
-            );
-            return Ok(ToolRunOutput::plain(
-                json!({"status":"backgrounded","sessionId": session_id}).to_string(),
-            ));
+            return Ok(ToolExecutionOutcome::AsyncStarted(started));
         }
 
         let result = exec_shell_command(
@@ -117,7 +113,9 @@ impl ExecTool {
             plan.timeout_seconds,
         )
         .await?;
-        Ok(ToolRunOutput::plain(result.to_string()))
+        Ok(ToolExecutionOutcome::Completed(ToolRunOutput::plain(
+            result.to_string(),
+        )))
     }
 
     pub async fn execute_host_sandboxed(
@@ -125,7 +123,7 @@ impl ExecTool {
         ctx: &ToolExecEnv,
         plan: ExecPlan,
         runtime: &dyn HostSandboxRuntime,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         runtime
             .run_command(
                 ctx,
@@ -229,8 +227,8 @@ mod tests {
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
     use crate::tools::{
-        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, Tool, ToolExecEnv,
-        WorkerInvokeRequest,
+        AgentInvokeRequest, AgentInvoker, AsyncToolRunManager, InvokeOutcome, Tool, ToolExecEnv,
+        ToolExecutionOutcome, WorkerInvokeRequest,
     };
 
     struct NoopInvoker;
@@ -279,7 +277,7 @@ mod tests {
             workspace_root: PathBuf::from(&root),
             user_id: "user-1".to_owned(),
             owner_ids: vec!["user-1".to_owned()],
-            process_manager: Arc::new(ProcessManager::new()),
+            async_tool_runs: Arc::new(AsyncToolRunManager::new()),
             invoker: Arc::new(NoopInvoker),
             gateway: None,
             completion_tx: None,
@@ -341,7 +339,11 @@ mod tests {
             .execute(&ctx, r#"{"command":"printf hello"}"#, "sess-1")
             .await
             .expect("foreground exec should succeed");
-        let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
+        let ToolExecutionOutcome::Completed(output) = output else {
+            panic!("foreground exec should complete immediately");
+        };
+        let parsed: Value =
+            serde_json::from_str(&output.output).expect("exec output should be json");
 
         assert_eq!(parsed["status"], "completed");
         assert_eq!(parsed["exitCode"], 0);
@@ -368,7 +370,11 @@ mod tests {
             )
             .await
             .expect("foreground exec should succeed");
-        let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
+        let ToolExecutionOutcome::Completed(output) = output else {
+            panic!("foreground exec should complete immediately");
+        };
+        let parsed: Value =
+            serde_json::from_str(&output.output).expect("exec output should be json");
 
         assert_eq!(parsed["stdout"], "from-config");
     }
@@ -391,17 +397,21 @@ mod tests {
             )
             .await
             .expect("background exec should succeed");
-        let parsed: Value = serde_json::from_str(&output).expect("exec output should be json");
+        let ToolExecutionOutcome::AsyncStarted(output) = output else {
+            panic!("background exec should start async tool run");
+        };
+        let parsed: Value = serde_json::from_str(&output.accepted_output())
+            .expect("exec output should be json");
 
-        assert_eq!(parsed["status"], "backgrounded");
-        let session_id = parsed["sessionId"]
+        assert_eq!(parsed["status"], "accepted");
+        let run_id = parsed["runId"]
             .as_str()
-            .expect("backgrounded response should include session id");
-        let sessions = ctx.process_manager.list().await;
+            .expect("accepted response should include run id");
+        let sessions = ctx.async_tool_runs.list().await;
         assert!(
             sessions
                 .iter()
-                .any(|snapshot| snapshot.session_id == session_id)
+                .any(|snapshot| snapshot.run_id == run_id)
         );
     }
 

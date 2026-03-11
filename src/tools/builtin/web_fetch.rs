@@ -6,7 +6,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::WebFetchToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::parse_simple_text_arg;
 
@@ -44,7 +44,7 @@ impl Tool for WebFetchTool {
         _ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let url = parse_simple_text_arg(args_json);
         let timeout_seconds = self
             .config
@@ -55,7 +55,9 @@ impl Tool for WebFetchTool {
             .max_chars
             .map(|value| value as usize)
             .unwrap_or(DEFAULT_WEB_FETCH_MAX_CHARS);
-        fetch_url_markdown(&url, timeout_seconds, max_chars).await
+        fetch_url_markdown(&url, timeout_seconds, max_chars)
+            .await
+            .map(ToolExecutionOutcome::completed)
     }
 }
 

@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::config::{WebSearchProvider, WebSearchToolRuntimeConfig};
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::parse_simple_text_arg;
 
@@ -47,7 +47,7 @@ impl Tool for WebSearchTool {
         _ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let query = parse_simple_text_arg(args_json).trim().to_owned();
         if query.is_empty() {
             return Err(FrameworkError::Tool(
@@ -80,6 +80,7 @@ impl Tool for WebSearchTool {
         };
 
         serde_json::to_string(&output)
+            .map(ToolExecutionOutcome::completed)
             .map_err(|e| FrameworkError::Tool(format!("search serialization failed: {e}")))
     }
 }

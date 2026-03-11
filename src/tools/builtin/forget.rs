@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::parse_forget_args;
 
@@ -30,7 +30,7 @@ impl Tool for ForgetTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
-    ) -> Result<String, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let args = parse_forget_args(args_json);
         let result = ctx
             .memory
@@ -57,7 +57,7 @@ impl Tool for ForgetTool {
             })
             .collect::<Vec<_>>();
 
-        Ok(json!({
+        Ok(ToolExecutionOutcome::completed(json!({
             "status": if args.commit { "deleted" } else { "preview" },
             "query": args.query,
             "similarity_threshold": result.similarity_threshold,
@@ -67,7 +67,7 @@ impl Tool for ForgetTool {
             "deleted_count": result.deleted_count,
             "matches": matches,
         })
-        .to_string())
+        .to_string()))
     }
 }
 

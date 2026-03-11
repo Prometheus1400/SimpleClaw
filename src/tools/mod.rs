@@ -79,6 +79,37 @@ impl ToolRunOutput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum ToolExecutionOutcome {
+    Completed(ToolRunOutput),
+    AsyncStarted(StartedAsyncToolRun),
+}
+
+impl ToolExecutionOutcome {
+    pub(crate) fn completed(output: String) -> Self {
+        Self::Completed(ToolRunOutput::plain(output))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StartedAsyncToolRun {
+    pub run_id: String,
+    pub tool_name: String,
+    pub kind: AsyncToolRunKind,
+}
+
+impl StartedAsyncToolRun {
+    pub(crate) fn accepted_output(&self) -> String {
+        serde_json::json!({
+            "status": "accepted",
+            "runId": self.run_id,
+            "tool": self.tool_name,
+            "kind": self.kind.as_str(),
+        })
+        .to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CompletionRoute {
     pub trace_id: String,
     pub source_channel: GatewayChannelKind,
@@ -100,7 +131,7 @@ pub(crate) struct ToolExecEnv {
     pub workspace_root: PathBuf,
     pub user_id: String,
     pub owner_ids: Vec<String>,
-    pub process_manager: Arc<ProcessManager>,
+    pub async_tool_runs: Arc<AsyncToolRunManager>,
     pub invoker: Arc<dyn AgentInvoker>,
     pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
@@ -157,17 +188,15 @@ pub(crate) trait Tool: Send + Sync + ToolClone {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<String, FrameworkError>;
+    ) -> Result<ToolExecutionOutcome, FrameworkError>;
 
     async fn execute_with_trace(
         &self,
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<ToolRunOutput, FrameworkError> {
-        self.execute(ctx, args_json, session_id)
-            .await
-            .map(ToolRunOutput::plain)
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
+        self.execute(ctx, args_json, session_id).await
     }
 }
 
@@ -262,7 +291,7 @@ impl RegisteredTool {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         match self {
             Self::Read(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Edit(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
@@ -553,7 +582,7 @@ pub(crate) trait HostSandboxRuntime: Send + Sync {
         &self,
         ctx: &ToolExecEnv,
         request: HostSandboxCommandRequest,
-    ) -> Result<ToolRunOutput, FrameworkError>;
+    ) -> Result<ToolExecutionOutcome, FrameworkError>;
 }
 
 pub(crate) struct DefaultHostSandboxRuntime;
@@ -564,26 +593,21 @@ impl HostSandboxRuntime for DefaultHostSandboxRuntime {
         &self,
         ctx: &ToolExecEnv,
         request: HostSandboxCommandRequest,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         if request.background {
-            let (session_id, handle) = ctx
-                .process_manager
-                .spawn_sandboxed(
+            let started = ctx
+                .async_tool_runs
+                .start_sandboxed_process(
+                    "exec",
                     &request.command,
                     &request.workspace_root,
                     &request.sandbox,
                     &request.env,
+                    ctx.completion_tx.clone(),
+                    ctx.completion_route.clone(),
                 )
                 .await?;
-            ctx.process_manager.spawn_completion_watcher(
-                session_id.clone(),
-                handle,
-                ctx.completion_tx.clone(),
-                ctx.completion_route.clone(),
-            );
-            return Ok(ToolRunOutput::plain(
-                serde_json::json!({"status":"backgrounded","sessionId": session_id}).to_string(),
-            ));
+            return Ok(ToolExecutionOutcome::AsyncStarted(started));
         }
 
         let result = builtin::exec::exec_with_sandbox_runtime(
@@ -594,7 +618,7 @@ impl HostSandboxRuntime for DefaultHostSandboxRuntime {
             &request.env,
         )
         .await?;
-        Ok(ToolRunOutput::plain(result.to_string()))
+        Ok(ToolExecutionOutcome::completed(result.to_string()))
     }
 }
 
@@ -606,7 +630,7 @@ pub(crate) trait ToolExecutor: Send + Sync {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<ToolRunOutput, FrameworkError>;
+    ) -> Result<ToolExecutionOutcome, FrameworkError>;
 }
 
 pub(crate) struct DefaultToolExecutor {
@@ -631,25 +655,31 @@ impl ToolExecutor for DefaultToolExecutor {
         ctx: &ToolExecEnv,
         args_json: &str,
         session_id: &str,
-    ) -> Result<ToolRunOutput, FrameworkError> {
+    ) -> Result<ToolExecutionOutcome, FrameworkError> {
         match (&*entry.tool, entry.execution_kind) {
             (RegisteredTool::Read(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_direct(ctx, plan).await
+                tool.execute_direct(ctx, plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
             }
             (RegisteredTool::Read(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
                 tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
                     .await
+                    .map(ToolExecutionOutcome::Completed)
             }
             (RegisteredTool::Edit(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_direct(ctx, plan).await
+                tool.execute_direct(ctx, plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
             }
             (RegisteredTool::Edit(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
                 tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
                     .await
+                    .map(ToolExecutionOutcome::Completed)
             }
             (RegisteredTool::Exec(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
@@ -672,14 +702,27 @@ impl ToolExecutor for DefaultToolExecutor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncToolRunKind {
+    Process,
+}
+
+impl AsyncToolRunKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Process => "process",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProcessStatus {
+pub enum AsyncToolRunStatus {
     Running,
     Completed,
     Killed,
 }
 
-impl ProcessStatus {
+impl AsyncToolRunStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -690,45 +733,56 @@ impl ProcessStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProcessSnapshot {
-    pub session_id: String,
-    pub command: String,
-    pub status: ProcessStatus,
-    pub pid: Option<u32>,
+pub struct AsyncToolRunSnapshot {
+    pub run_id: String,
+    pub tool_name: String,
+    pub kind: AsyncToolRunKind,
+    pub status: AsyncToolRunStatus,
+    pub summary: String,
+    pub process: Option<ProcessAsyncToolRunDetails>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessAsyncToolRunDetails {
+    pub command: String,
+    pub pid: Option<u32>,
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
 }
 
 #[derive(Debug)]
-pub struct ProcessManager {
-    sessions: Mutex<HashMap<String, ProcessEntry>>,
+pub struct AsyncToolRunManager {
+    runs: Mutex<HashMap<String, AsyncToolRunEntry>>,
     counter: AtomicU64,
 }
 
-impl ProcessManager {
+impl AsyncToolRunManager {
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            runs: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(1),
         }
     }
 
-    pub async fn spawn(
-        &self,
+    pub async fn start_process(
+        self: &Arc<Self>,
+        tool_name: &str,
         command: &str,
         workspace_root: Option<&std::path::Path>,
         env: &BTreeMap<String, String>,
-    ) -> Result<(String, CompletionHandle), FrameworkError> {
+        completion_tx: Option<mpsc::Sender<InboundMessage>>,
+        route: Option<CompletionRoute>,
+    ) -> Result<StartedAsyncToolRun, FrameworkError> {
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-        let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
+        let run_id = format!("async-tool-run-{}-{seq}", Utc::now().timestamp_millis());
         let base = std::env::temp_dir().join("simpleclaw_process");
         std::fs::create_dir_all(&base)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create temp dir: {e}")))?;
-        let stdout_path = base.join(format!("{session_id}.stdout.log"));
-        let stderr_path = base.join(format!("{session_id}.stderr.log"));
+        let stdout_path = base.join(format!("{run_id}.stdout.log"));
+        let stderr_path = base.join(format!("{run_id}.stderr.log"));
         let stdout_file = File::create(&stdout_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stdout log: {e}")))?;
         let stderr_file = File::create(&stderr_path)
@@ -749,9 +803,12 @@ impl ProcessManager {
         let started_at = Utc::now();
         let pid = Some(child.id());
         let handle = CompletionHandle::Host(child);
-        let entry = ProcessEntry {
+        let entry = AsyncToolRunEntry {
+            tool_name: tool_name.to_owned(),
+            kind: AsyncToolRunKind::Process,
+            summary: command.to_owned(),
             command: command.to_owned(),
-            status: ProcessStatus::Running,
+            status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
             pid,
@@ -760,55 +817,63 @@ impl ProcessManager {
             exit_code: None,
         };
 
-        let mut sessions = self.sessions.lock().await;
-        sessions.insert(session_id.clone(), entry);
-        Self::auto_evict(&mut sessions);
-        drop(sessions);
-        debug!(status = "started", "process session");
-        Ok((session_id, handle))
+        let mut runs = self.runs.lock().await;
+        runs.insert(run_id.clone(), entry);
+        Self::auto_evict(&mut runs);
+        drop(runs);
+        debug!(status = "started", "async tool run");
+        self.spawn_completion_watcher(run_id.clone(), handle, completion_tx, route);
+        Ok(StartedAsyncToolRun {
+            run_id,
+            tool_name: tool_name.to_owned(),
+            kind: AsyncToolRunKind::Process,
+        })
     }
 
-    fn auto_evict(sessions: &mut HashMap<String, ProcessEntry>) {
+    fn auto_evict(runs: &mut HashMap<String, AsyncToolRunEntry>) {
         const MAX_COMPLETED: usize = 64;
-        let completed_count = sessions
+        let completed_count = runs
             .values()
-            .filter(|e| e.status != ProcessStatus::Running)
+            .filter(|e| e.status != AsyncToolRunStatus::Running)
             .count();
         if completed_count <= MAX_COMPLETED {
             return;
         }
-        let mut completed: Vec<(String, DateTime<Utc>)> = sessions
+        let mut completed: Vec<(String, DateTime<Utc>)> = runs
             .iter()
-            .filter(|(_, e)| e.status != ProcessStatus::Running)
+            .filter(|(_, e)| e.status != AsyncToolRunStatus::Running)
             .map(|(id, e)| (id.clone(), e.finished_at.unwrap_or(e.started_at)))
             .collect();
         completed.sort_by_key(|(_, t)| *t);
         let to_evict = completed_count - MAX_COMPLETED;
         for (id, _) in completed.into_iter().take(to_evict) {
-            if let Some(entry) = sessions.remove(&id) {
+            if let Some(entry) = runs.remove(&id) {
                 entry.cleanup_files();
             }
         }
     }
 
-    pub async fn spawn_sandboxed(
-        &self,
+    pub async fn start_sandboxed_process(
+        self: &Arc<Self>,
+        tool_name: &str,
         command: &str,
         workspace_root: &std::path::Path,
         sandbox: &ToolSandboxConfig,
         env: &BTreeMap<String, String>,
-    ) -> Result<(String, CompletionHandle), FrameworkError> {
+        completion_tx: Option<mpsc::Sender<InboundMessage>>,
+        route: Option<CompletionRoute>,
+    ) -> Result<StartedAsyncToolRun, FrameworkError> {
         let prepared =
             sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
         let (wrapped, manager) = prepared.into_parts();
 
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-        let session_id = format!("proc-{}-{seq}", Utc::now().timestamp_millis());
+        let run_id = format!("async-tool-run-{}-{seq}", Utc::now().timestamp_millis());
         let base = std::env::temp_dir().join("simpleclaw_process");
         std::fs::create_dir_all(&base)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create temp dir: {e}")))?;
-        let stdout_path = base.join(format!("{session_id}.stdout.log"));
-        let stderr_path = base.join(format!("{session_id}.stderr.log"));
+        let stdout_path = base.join(format!("{run_id}.stdout.log"));
+        let stderr_path = base.join(format!("{run_id}.stderr.log"));
         let stdout_file = File::create(&stdout_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stdout log: {e}")))?;
         let stderr_file = File::create(&stderr_path)
@@ -829,9 +894,12 @@ impl ProcessManager {
         let started_at = Utc::now();
         let pid = Some(child.id());
         let handle = CompletionHandle::HostSandboxed { child, manager };
-        let entry = ProcessEntry {
+        let entry = AsyncToolRunEntry {
+            tool_name: tool_name.to_owned(),
+            kind: AsyncToolRunKind::Process,
+            summary: command.to_owned(),
             command: command.to_owned(),
-            status: ProcessStatus::Running,
+            status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
             pid,
@@ -840,70 +908,57 @@ impl ProcessManager {
             exit_code: None,
         };
 
-        let mut sessions = self.sessions.lock().await;
-        sessions.insert(session_id.clone(), entry);
-        Self::auto_evict(&mut sessions);
-        drop(sessions);
-        debug!(status = "started", "process session");
-        Ok((session_id, handle))
+        let mut runs = self.runs.lock().await;
+        runs.insert(run_id.clone(), entry);
+        Self::auto_evict(&mut runs);
+        drop(runs);
+        debug!(status = "started", "async tool run");
+        self.spawn_completion_watcher(run_id.clone(), handle, completion_tx, route);
+        Ok(StartedAsyncToolRun {
+            run_id,
+            tool_name: tool_name.to_owned(),
+            kind: AsyncToolRunKind::Process,
+        })
     }
 
-    pub async fn update(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
-        let mut sessions = self.sessions.lock().await;
-        let entry = sessions.get_mut(session_id).ok_or_else(|| {
-            FrameworkError::Tool(format!("unknown process session_id: {session_id}"))
+    pub async fn get(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
+        let mut runs = self.runs.lock().await;
+        let entry = runs.get_mut(run_id).ok_or_else(|| {
+            FrameworkError::Tool(format!("unknown async tool run_id: {run_id}"))
         })?;
         entry.poll_completion();
-        Ok(entry.snapshot(session_id.to_owned()))
+        Ok(entry.snapshot(run_id.to_owned()))
     }
 
-    pub async fn list(&self) -> Vec<ProcessSnapshot> {
-        // Phase 1: poll and collect metadata under lock.
-        let metadata: Vec<ProcessEntryMeta> = {
-            let mut sessions = self.sessions.lock().await;
-            for entry in sessions.values_mut() {
+    pub async fn list(&self) -> Vec<AsyncToolRunSnapshot> {
+        let metadata: Vec<AsyncToolRunEntryMeta> = {
+            let mut runs = self.runs.lock().await;
+            for entry in runs.values_mut() {
                 entry.poll_completion();
             }
-            sessions
+            runs
                 .iter()
                 .map(|(id, entry)| entry.metadata(id.clone()))
                 .collect()
         };
-        // Phase 2: read output files without holding the lock.
-        let mut items: Vec<ProcessSnapshot> = metadata
-            .into_iter()
-            .map(|meta| {
-                let stdout = read_process_output_tail(&meta.stdout_path, 32_768);
-                let stderr = read_process_output_tail(&meta.stderr_path, 16_384);
-                ProcessSnapshot {
-                    session_id: meta.session_id,
-                    command: meta.command,
-                    status: meta.status,
-                    pid: meta.pid,
-                    started_at: meta.started_at,
-                    finished_at: meta.finished_at,
-                    exit_code: meta.exit_code,
-                    stdout,
-                    stderr,
-                }
-            })
-            .collect();
+        let mut items: Vec<AsyncToolRunSnapshot> =
+            metadata.into_iter().map(AsyncToolRunEntryMeta::into_snapshot).collect();
         items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         items
     }
 
-    pub async fn kill(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
-        let mut sessions = self.sessions.lock().await;
-        let entry = sessions.get_mut(session_id).ok_or_else(|| {
-            FrameworkError::Tool(format!("unknown process session_id: {session_id}"))
+    pub async fn cancel(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
+        let mut runs = self.runs.lock().await;
+        let entry = runs.get_mut(run_id).ok_or_else(|| {
+            FrameworkError::Tool(format!("unknown async tool run_id: {run_id}"))
         })?;
         entry.kill().await?;
-        Ok(entry.snapshot(session_id.to_owned()))
+        Ok(entry.snapshot(run_id.to_owned()))
     }
 
     pub fn spawn_completion_watcher(
         self: &Arc<Self>,
-        session_id: String,
+        run_id: String,
         handle: CompletionHandle,
         completion_tx: Option<mpsc::Sender<InboundMessage>>,
         route: Option<CompletionRoute>,
@@ -916,9 +971,9 @@ impl ProcessManager {
         let route_session = route
             .as_ref()
             .map(|r| r.session_key.clone())
-            .unwrap_or_else(|| session_id.clone());
+            .unwrap_or_else(|| run_id.clone());
         let span = info_span!(
-            "process.completion_watcher",
+            "async_tool_run.completion_watcher",
             trace_id = %trace_id,
             session_id = %route_session
         );
@@ -945,17 +1000,17 @@ impl ProcessManager {
                     manager.reset().await;
                 }
 
-                pm.mark_completed(&session_id, exit_code).await;
+                pm.mark_completed(&run_id, exit_code).await;
 
-                let snapshot = pm.update(&session_id).await;
-                let command = snapshot
+                let snapshot = pm.get(&run_id).await;
+                let summary = snapshot
                     .as_ref()
-                    .map(|s| s.command.as_str())
+                    .map(|s| s.summary.as_str())
                     .unwrap_or("unknown");
                 let code = exit_code.unwrap_or(-1);
                 let content = format!(
-                    "[background process completed] session_id={} exit_code={} command={}",
-                    session_id, code, command
+                    "[async tool run completed] run_id={} tool=exec kind=process exit_code={} summary={}",
+                    run_id, code, summary
                 );
                 if let (Some(tx), Some(route)) = (completion_tx, route) {
                     let msg = InboundMessage {
@@ -978,48 +1033,48 @@ impl ProcessManager {
                             status = "failed",
                             error_kind = "completion_send",
                             error = %err,
-                            "failed to send background process completion message"
+                            "failed to send async tool run completion message"
                         );
                     } else {
-                        debug!(status = "completed", "process completion watcher");
+                        debug!(status = "completed", "async tool run completion watcher");
                     }
                 } else {
-                    debug!(status = "completed_no_route", "process completion watcher");
+                    debug!(status = "completed_no_route", "async tool run completion watcher");
                 }
             }
             .instrument(span),
         );
     }
 
-    async fn mark_completed(&self, session_id: &str, exit_code: Option<i32>) {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(session_id)
-            && entry.status == ProcessStatus::Running
+    async fn mark_completed(&self, run_id: &str, exit_code: Option<i32>) {
+        let mut runs = self.runs.lock().await;
+        if let Some(entry) = runs.get_mut(run_id)
+            && entry.status == AsyncToolRunStatus::Running
         {
-            entry.status = ProcessStatus::Completed;
+            entry.status = AsyncToolRunStatus::Completed;
             entry.exit_code = exit_code;
             entry.finished_at = Some(Utc::now());
         }
     }
 
-    pub async fn forget(&self, session_id: &str) -> Result<ProcessSnapshot, FrameworkError> {
-        let mut sessions = self.sessions.lock().await;
-        let entry = sessions.get(session_id).ok_or_else(|| {
-            FrameworkError::Tool(format!("unknown process session_id: {session_id}"))
+    pub async fn forget(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
+        let mut runs = self.runs.lock().await;
+        let entry = runs.get(run_id).ok_or_else(|| {
+            FrameworkError::Tool(format!("unknown async tool run_id: {run_id}"))
         })?;
-        if entry.status == ProcessStatus::Running {
+        if entry.status == AsyncToolRunStatus::Running {
             return Err(FrameworkError::Tool(
-                "cannot forget a running process — kill it first".to_owned(),
+                "cannot forget a running async tool run; cancel it first".to_owned(),
             ));
         }
-        let entry = sessions.remove(session_id).unwrap();
-        let snapshot = entry.snapshot(session_id.to_owned());
+        let entry = runs.remove(run_id).unwrap();
+        let snapshot = entry.snapshot(run_id.to_owned());
         entry.cleanup_files();
         Ok(snapshot)
     }
 }
 
-impl Default for ProcessManager {
+impl Default for AsyncToolRunManager {
     fn default() -> Self {
         Self::new()
     }
@@ -1035,9 +1090,12 @@ pub enum CompletionHandle {
 }
 
 #[derive(Debug)]
-struct ProcessEntry {
+struct AsyncToolRunEntry {
+    tool_name: String,
+    kind: AsyncToolRunKind,
+    summary: String,
     command: String,
-    status: ProcessStatus,
+    status: AsyncToolRunStatus,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     pid: Option<u32>,
@@ -1046,10 +1104,13 @@ struct ProcessEntry {
     exit_code: Option<i32>,
 }
 
-struct ProcessEntryMeta {
-    session_id: String,
+struct AsyncToolRunEntryMeta {
+    run_id: String,
+    tool_name: String,
+    kind: AsyncToolRunKind,
+    summary: String,
     command: String,
-    status: ProcessStatus,
+    status: AsyncToolRunStatus,
     pid: Option<u32>,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
@@ -1058,14 +1119,14 @@ struct ProcessEntryMeta {
     stderr_path: PathBuf,
 }
 
-impl ProcessEntry {
+impl AsyncToolRunEntry {
     fn poll_completion(&mut self) {
         // Host processes are tracked by the completion watcher which owns the Child.
         // No on-demand poll is possible here.
     }
 
     async fn kill(&mut self) -> Result<(), FrameworkError> {
-        if self.status != ProcessStatus::Running {
+        if self.status != AsyncToolRunStatus::Running {
             return Ok(());
         }
         if let Some(pid) = self.pid {
@@ -1082,15 +1143,18 @@ impl ProcessEntry {
                 );
             }
         }
-        self.status = ProcessStatus::Killed;
+        self.status = AsyncToolRunStatus::Killed;
         self.finished_at = Some(Utc::now());
         self.exit_code = Some(-1);
         Ok(())
     }
 
-    fn metadata(&self, session_id: String) -> ProcessEntryMeta {
-        ProcessEntryMeta {
-            session_id,
+    fn metadata(&self, run_id: String) -> AsyncToolRunEntryMeta {
+        AsyncToolRunEntryMeta {
+            run_id,
+            tool_name: self.tool_name.clone(),
+            kind: self.kind,
+            summary: self.summary.clone(),
             command: self.command.clone(),
             status: self.status.clone(),
             pid: self.pid,
@@ -1102,17 +1166,22 @@ impl ProcessEntry {
         }
     }
 
-    fn snapshot(&self, session_id: String) -> ProcessSnapshot {
-        ProcessSnapshot {
-            session_id,
-            command: self.command.clone(),
+    fn snapshot(&self, run_id: String) -> AsyncToolRunSnapshot {
+        AsyncToolRunSnapshot {
+            run_id,
+            tool_name: self.tool_name.clone(),
+            kind: self.kind,
             status: self.status.clone(),
-            pid: self.pid,
+            summary: self.summary.clone(),
+            process: Some(ProcessAsyncToolRunDetails {
+                command: self.command.clone(),
+                pid: self.pid,
+                exit_code: self.exit_code,
+                stdout: read_process_output_tail(&self.stdout_path, 32_768),
+                stderr: read_process_output_tail(&self.stderr_path, 16_384),
+            }),
             started_at: self.started_at,
             finished_at: self.finished_at,
-            exit_code: self.exit_code,
-            stdout: read_process_output_tail(&self.stdout_path, 32_768),
-            stderr: read_process_output_tail(&self.stderr_path, 16_384),
         }
     }
 
@@ -1123,7 +1192,28 @@ impl ProcessEntry {
     }
 }
 
-impl Drop for ProcessManager {
+impl AsyncToolRunEntryMeta {
+    fn into_snapshot(self) -> AsyncToolRunSnapshot {
+        AsyncToolRunSnapshot {
+            run_id: self.run_id,
+            tool_name: self.tool_name,
+            kind: self.kind,
+            status: self.status,
+            summary: self.summary,
+            process: Some(ProcessAsyncToolRunDetails {
+                command: self.command,
+                pid: self.pid,
+                exit_code: self.exit_code,
+                stdout: read_process_output_tail(&self.stdout_path, 32_768),
+                stderr: read_process_output_tail(&self.stderr_path, 16_384),
+            }),
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+        }
+    }
+}
+
+impl Drop for AsyncToolRunManager {
     fn drop(&mut self) {}
 }
 
@@ -1172,8 +1262,8 @@ mod tests {
             _ctx: &ToolExecEnv,
             _args_json: &str,
             _session_id: &str,
-        ) -> Result<String, FrameworkError> {
-            Ok("ok".to_owned())
+        ) -> Result<ToolExecutionOutcome, FrameworkError> {
+            Ok(ToolExecutionOutcome::completed("ok".to_owned()))
         }
     }
 
@@ -1201,8 +1291,8 @@ mod tests {
             _ctx: &ToolExecEnv,
             _args_json: &str,
             _session_id: &str,
-        ) -> Result<String, FrameworkError> {
-            Ok("ok".to_owned())
+        ) -> Result<ToolExecutionOutcome, FrameworkError> {
+            Ok(ToolExecutionOutcome::completed("ok".to_owned()))
         }
     }
 
@@ -1232,8 +1322,8 @@ mod tests {
             _ctx: &ToolExecEnv,
             _args_json: &str,
             _session_id: &str,
-        ) -> Result<String, FrameworkError> {
-            Ok("ok".to_owned())
+        ) -> Result<ToolExecutionOutcome, FrameworkError> {
+            Ok(ToolExecutionOutcome::completed("ok".to_owned()))
         }
     }
 
@@ -1436,20 +1526,19 @@ mod tests {
 
     #[tokio::test]
     async fn completion_watcher_marks_background_process_complete_without_route() {
-        let manager = Arc::new(ProcessManager::new());
-        let (session_id, handle) = manager
-            .spawn("echo hello", None, &BTreeMap::new())
+        let manager = Arc::new(AsyncToolRunManager::new());
+        let started = manager
+            .start_process("exec", "echo hello", None, &BTreeMap::new(), None, None)
             .await
             .expect("spawn should succeed");
-        manager.spawn_completion_watcher(session_id.clone(), handle, None, None);
 
         for _ in 0..20 {
             let snapshot = manager
-                .update(&session_id)
+                .get(&started.run_id)
                 .await
-                .expect("update should succeed");
-            if snapshot.status != ProcessStatus::Running {
-                assert_eq!(snapshot.status, ProcessStatus::Completed);
+                .expect("get should succeed");
+            if snapshot.status != AsyncToolRunStatus::Running {
+                assert_eq!(snapshot.status, AsyncToolRunStatus::Completed);
                 return;
             }
             sleep(Duration::from_millis(50)).await;

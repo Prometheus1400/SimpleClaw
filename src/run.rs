@@ -931,7 +931,7 @@ mod tests {
     use crate::run::session::{SessionHandler, SessionWorkerCoordinator};
     use crate::telemetry::next_trace_id;
     use crate::tools::{
-        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory,
+        AgentInvokeRequest, AgentInvoker, AsyncToolRunManager, InvokeOutcome, default_factory,
     };
 
     use super::composition::RuntimeState;
@@ -1596,7 +1596,7 @@ mod tests {
             gateway: Arc::clone(&gateway),
             agents,
             tool_runtime: Arc::new(ToolRuntime {
-                process_manager: Arc::new(ProcessManager::new()),
+                async_tool_runs: Arc::new(AsyncToolRunManager::new()),
                 completion_tx: gateway_tx.clone(),
             }),
         });
@@ -1721,7 +1721,7 @@ mod tests {
             gateway: Arc::clone(&gateway),
             agents: Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
             tool_runtime: Arc::new(ToolRuntime {
-                process_manager: Arc::new(ProcessManager::new()),
+                async_tool_runs: Arc::new(AsyncToolRunManager::new()),
                 completion_tx: gateway_tx.clone(),
             }),
         });
