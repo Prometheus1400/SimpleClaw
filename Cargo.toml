@@ -46,4 +46,4 @@ sha2 = "0.10"
 fs2 = "0.4"
 
 [patch.crates-io]
-sandbox-runtime = { path = "third_party/sandbox-runtime-rs" }
+sandbox-runtime = { git = "https://github.com/Prometheus1400/sandbox-runtime-rs", rev = "fa51f051e53b4ea1121eb7f864697710099821b6" }
