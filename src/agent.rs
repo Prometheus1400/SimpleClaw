@@ -15,7 +15,7 @@ use crate::prompt::PromptAssembler;
 use crate::providers::{Message, Role};
 use crate::react::{ReactLoop, RunOutcome, RunParams};
 use crate::reply_policy::is_no_reply;
-use crate::tools::{CompletionRoute, ProcessManager};
+use crate::tools::{AgentToolRegistry, CompletionRoute, ProcessManager};
 
 /// Groups declarative parameters needed for an `AgentRuntime`.
 #[derive(Debug, Clone)]
@@ -25,6 +25,7 @@ pub struct AgentRuntimeConfig {
     pub effective_execution: ExecutionDefaultsConfig,
     pub owner_ids: Vec<String>,
     pub agent_config: AgentInnerConfig,
+    pub tool_registry: AgentToolRegistry,
     pub persona_root: PathBuf,
     pub workspace_root: PathBuf,
     #[allow(dead_code)]
@@ -151,7 +152,6 @@ impl AgentRuntime {
 
         let params = RunParams {
             provider_key: &self.config.provider_key,
-            agent_config: &self.config.agent_config,
             system_prompt: &system_prompt,
             agent_id: &self.config.agent_id,
             session_id: memory_session_id,
@@ -164,6 +164,7 @@ impl AgentRuntime {
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.owner_ids.clone(),
             process_manager: Arc::clone(&context.tool_runtime.process_manager),
+            tool_registry: self.config.tool_registry.clone(),
             gateway: Some(Arc::clone(&context.gateway)),
             completion_tx: Some(context.tool_runtime.completion_tx.clone()),
             completion_route: Some(CompletionRoute {
@@ -422,7 +423,9 @@ fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
     )
 }
 
-pub(crate) fn load_system_prompt_for_persona(persona_root: &Path) -> Result<String, FrameworkError> {
+pub(crate) fn load_system_prompt_for_persona(
+    persona_root: &Path,
+) -> Result<String, FrameworkError> {
     PromptAssembler::from_persona(persona_root)
 }
 
@@ -451,7 +454,6 @@ mod tests {
     };
     use crate::providers::{Message, Provider, ProviderFactory, ProviderResponse, ToolDefinition};
     use crate::react::ReactLoop;
-    use crate::tools::skill::SkillFactory;
     use crate::tools::{
         AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory,
     };
@@ -708,6 +710,9 @@ mod tests {
     fn test_runtime_config() -> AgentRuntimeConfig {
         let mut agent_config = AgentInnerConfig::default();
         agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
+        let tool_registry = default_factory()
+            .build_registry(&agent_config.tools, &[])
+            .expect("tool registry should build");
         AgentRuntimeConfig {
             agent_id: "agent-1".to_owned(),
             provider_key: "default".to_owned(),
@@ -717,6 +722,7 @@ mod tests {
             },
             owner_ids: vec!["user-123".to_owned()],
             agent_config,
+            tool_registry,
             persona_root: PathBuf::from("/tmp/simpleclaw-agent-persona"),
             workspace_root: PathBuf::from("/tmp/simpleclaw-agent-test"),
             app_base_dir: PathBuf::from("/tmp/simpleclaw-agent-app"),
@@ -743,8 +749,6 @@ mod tests {
                     true,
                 ),
             )])),
-            default_factory(),
-            SkillFactory::new(PathBuf::from("/tmp/simpleclaw-skill-test")),
             Arc::new(NoopInvoker),
         ))
     }

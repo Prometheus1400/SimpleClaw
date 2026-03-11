@@ -5,8 +5,7 @@ use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, ProviderResponse, Role, StreamEvent};
 use crate::reply_policy::no_reply_prompt_instruction;
 use crate::tools::ProcessManager;
-use crate::tools::skill::SkillFactory;
-use crate::tools::{AgentInvoker, CompletionRoute, ToolExecEnv, ToolFactory};
+use crate::tools::{AgentInvoker, AgentToolRegistry, CompletionRoute, ToolExecEnv};
 use crate::{channels::InboundMessage, memory::DynMemory};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,14 +19,11 @@ const REDACTED: &str = "***REDACTED***";
 
 pub struct ReactLoop {
     provider_factory: ProviderFactory,
-    tool_factory: ToolFactory,
-    skill_factory: SkillFactory,
     invoker: Arc<dyn AgentInvoker>,
 }
 
 pub struct RunParams<'a> {
     pub provider_key: &'a str,
-    pub agent_config: &'a crate::config::AgentInnerConfig,
     pub system_prompt: &'a str,
     pub agent_id: &'a str,
     pub session_id: &'a str,
@@ -40,6 +36,7 @@ pub struct RunParams<'a> {
     pub user_id: String,
     pub owner_ids: Vec<String>,
     pub process_manager: Arc<ProcessManager>,
+    pub tool_registry: AgentToolRegistry,
     pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
@@ -57,16 +54,9 @@ pub struct RunOutcome {
 }
 
 impl ReactLoop {
-    pub fn new(
-        provider_factory: ProviderFactory,
-        tool_factory: ToolFactory,
-        skill_factory: SkillFactory,
-        invoker: Arc<dyn AgentInvoker>,
-    ) -> Self {
+    pub fn new(provider_factory: ProviderFactory, invoker: Arc<dyn AgentInvoker>) -> Self {
         Self {
             provider_factory,
-            tool_factory,
-            skill_factory,
             invoker,
         }
     }
@@ -86,7 +76,6 @@ impl ReactLoop {
             .provider_factory
             .supports_native_tools(params.provider_key);
         let dispatcher = resolve_dispatcher(supports_native);
-        let skills = self.skill_factory.tools_for_agent(params.agent_id);
         let invoker = Arc::clone(&self.invoker);
         let tool_env = ToolExecEnv {
             agent_id: params.agent_id.to_owned(),
@@ -103,15 +92,13 @@ impl ReactLoop {
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
         };
-        let active_tools = self
-            .tool_factory
-            .resolve_active(&params.agent_config.tools, skills)?;
+        let tool_registry = params.tool_registry.clone();
         run_loop(
             provider,
             dispatcher,
             params,
             &tool_env,
-            &active_tools,
+            &tool_registry,
             &mut history,
         )
         .await
@@ -123,7 +110,7 @@ async fn run_loop(
     dispatcher: &dyn ToolDispatcher,
     params: RunParams<'_>,
     tool_env: &ToolExecEnv,
-    active_tools: &crate::tools::ActiveTools,
+    active_tools: &AgentToolRegistry,
     history: &mut Vec<Message>,
 ) -> Result<RunOutcome, FrameworkError> {
     let turn_tools = if params.source_message_id.is_some() {
@@ -353,7 +340,7 @@ mod tests {
     fn tool_definitions_only_include_enabled_tools() {
         let factory = default_factory();
         let active_tools = factory
-            .resolve_active(&tools_enabled(&["memory", "summon", "clock", "read"]), &[])
+            .build_registry(&tools_enabled(&["memory", "summon", "clock", "read"]), &[])
             .expect("enabled tools should resolve");
 
         let names: Vec<String> = active_tools
@@ -377,7 +364,7 @@ mod tests {
     fn tool_status_reports_unknown_tool_name() {
         let factory = default_factory();
         let active_tools = factory
-            .resolve_active(&tools_enabled(&["memory"]), &[])
+            .build_registry(&tools_enabled(&["memory"]), &[])
             .expect("enabled tools should resolve");
 
         assert!(active_tools.get("memory").is_some());

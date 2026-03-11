@@ -6,14 +6,22 @@ use std::time::Duration;
 
 use crate::config::EditToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::sandbox::run_wasm_guest;
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{
+    Tool, ToolExecEnv, ToolExecutionKind, ToolRunOutput, WasmGuestRequest, WasmSandboxRuntime,
+};
 
 use super::read::{host_path_to_guest_path, resolve_path_for_read};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditTool {
     config: EditToolConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditPlan {
+    pub args: EditArgs,
+    pub host_path: std::path::PathBuf,
+    pub guest_path: Option<String>,
 }
 
 #[async_trait]
@@ -30,6 +38,10 @@ impl Tool for EditTool {
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\",\"insert\",\"delete\",\"append\"]},\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},\"new_text\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\",\"minimum\":1},\"replace_all\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"dry_run\":{\"type\":\"boolean\"}},\"required\":[\"command\",\"path\"]}"
     }
 
+    fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
+        &[ToolExecutionKind::Direct, ToolExecutionKind::WasmSandbox]
+    }
+
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
         self.config = serde_json::from_value(config)
             .map_err(|e| FrameworkError::Config(format!("tools.edit config is invalid: {e}")))?;
@@ -42,47 +54,69 @@ impl Tool for EditTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
+        let plan = self.plan(ctx, args_json)?;
+        self.execute_direct(ctx, plan)
+            .await
+            .map(|output| output.output)
+    }
+}
+
+impl EditTool {
+    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<EditPlan, FrameworkError> {
         let args: EditArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
+        let host_path = resolve_path_for_read(&args.path, &ctx.workspace_root)?;
+        let guest_path =
+            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        Ok(EditPlan {
+            args,
+            host_path,
+            guest_path,
+        })
+    }
 
-        let path = resolve_path_for_read(
-            &args.path,
-            &ctx.persona_root,
-            &ctx.workspace_root,
-            self.config.sandbox.enabled,
-            &self.config.sandbox.extra_writable_paths,
-        )?;
+    pub async fn execute_direct(
+        &self,
+        _ctx: &ToolExecEnv,
+        plan: EditPlan,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        let output = apply_edit_command_at_path(&plan.args, &plan.host_path)
+            .map_err(|e| FrameworkError::Tool(e.to_string()))?;
+        Ok(ToolRunOutput::plain(output))
+    }
 
-        if self.config.sandbox.enabled {
-            if let Ok(guest_path) =
-                host_path_to_guest_path(&path, &ctx.workspace_root, &ctx.persona_root)
-            {
-                let mut guest_args = args.clone();
-                guest_args.path = guest_path;
-                let guest_args_json = serde_json::to_string(&guest_args).map_err(|e| {
-                    FrameworkError::Tool(format!("failed to serialize edit args: {e}"))
-                })?;
-                let output = run_wasm_guest(
-                    &ctx.workspace_root,
-                    &ctx.persona_root,
-                    "edit_tool.wasm",
-                    &[],
-                    guest_args_json.as_bytes(),
-                    Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
-                )
-                .await?;
-                if output.exit_code != 0 {
-                    return Err(FrameworkError::Tool(format!(
-                        "edit tool failed: exit_code={} stderr={}",
-                        output.exit_code,
-                        output.stderr.trim()
-                    )));
-                }
-                return Ok(output.stdout);
-            }
+    pub async fn execute_wasm(
+        &self,
+        ctx: &ToolExecEnv,
+        plan: EditPlan,
+        runtime: &dyn WasmSandboxRuntime,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        let guest_path = plan.guest_path.ok_or_else(|| {
+            FrameworkError::Tool("edit path is not representable inside wasm sandbox".to_owned())
+        })?;
+        let mut guest_args = plan.args.clone();
+        guest_args.path = guest_path;
+        let stdin = serde_json::to_vec(&guest_args)
+            .map_err(|e| FrameworkError::Tool(format!("failed to serialize edit args: {e}")))?;
+        let output = runtime
+            .run_guest(
+                ctx,
+                WasmGuestRequest {
+                    artifact_name: "edit_tool.wasm",
+                    args: Vec::new(),
+                    stdin,
+                    timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
+                },
+            )
+            .await?;
+        if output.exit_code != 0 {
+            return Err(FrameworkError::Tool(format!(
+                "edit tool failed: exit_code={} stderr={}",
+                output.exit_code,
+                output.stderr.trim()
+            )));
         }
-
-        apply_edit_command_at_path(&args, &path).map_err(|e| FrameworkError::Tool(e.to_string()))
+        Ok(ToolRunOutput::plain(output.stdout))
     }
 }
 
@@ -207,22 +241,19 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_denies_outside_workspace_path() {
+    fn resolve_path_normalizes_outside_workspace_path() {
         let workspace = unique_test_dir("sandbox_workspace");
         let outside = unique_test_dir("sandbox_outside");
         fs::create_dir_all(&workspace).expect("should create workspace");
         fs::create_dir_all(&outside).expect("should create outside dir");
         fs::write(outside.join("secrets.txt"), "secret").expect("should write secret");
 
-        let err = resolve_path_for_read(
+        let resolved = resolve_path_for_read(
             outside.join("secrets.txt").to_string_lossy().as_ref(),
             &workspace,
-            &workspace,
-            true,
-            &[],
         )
-        .expect_err("outside path should be denied");
-        assert!(err.to_string().contains("path denied by sandbox"));
+        .expect("outside path should normalize");
+        assert_eq!(resolved, outside.join("secrets.txt"));
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(outside);
@@ -253,21 +284,21 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_denies_persona_simpleclaw_path() {
+    fn resolve_path_normalizes_persona_simpleclaw_path() {
         let workspace = unique_test_dir("persona_workspace");
         let persona = unique_test_dir("persona_root");
         fs::create_dir_all(&workspace).expect("should create workspace");
         fs::create_dir_all(persona.join(".simpleclaw")).expect("should create persona state");
 
-        let err = resolve_path_for_read(
-            persona.join(".simpleclaw/secret.db").to_string_lossy().as_ref(),
-            &persona,
+        let resolved = resolve_path_for_read(
+            persona
+                .join(".simpleclaw/secret.db")
+                .to_string_lossy()
+                .as_ref(),
             &workspace,
-            true,
-            &[],
         )
-        .expect_err("persona state should be denied");
-        assert!(err.to_string().contains("path denied by sandbox"));
+        .expect("persona path should normalize");
+        assert_eq!(resolved, persona.join(".simpleclaw/secret.db"));
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(persona);

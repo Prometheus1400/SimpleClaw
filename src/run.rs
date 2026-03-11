@@ -767,8 +767,7 @@ pub async fn show_agent_memory(
     let loaded = LoadedConfig::load(cli.workspace.as_deref())
         .wrap_err("failed to load configuration for agent memory command")?;
     let agent = resolve_agent(&loaded.global.agents.list, agent_id)?;
-    let (_memory_dir, short_term_path, long_term_path) =
-        agent_persona_memory_paths(&agent.persona);
+    let (_memory_dir, short_term_path, long_term_path) = agent_persona_memory_paths(&agent.persona);
 
     let short = if matches!(memory, MemoryMode::Short | MemoryMode::Both) {
         Some(query_short_memory(&short_term_path, limit)?)
@@ -931,7 +930,6 @@ mod tests {
     use crate::react::ReactLoop;
     use crate::run::session::{SessionHandler, SessionWorkerCoordinator};
     use crate::telemetry::next_trace_id;
-    use crate::tools::skill::SkillFactory;
     use crate::tools::{
         AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, default_factory,
     };
@@ -1558,12 +1556,16 @@ mod tests {
         ));
         let mut agent_config = AgentInnerConfig::default();
         agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
+        let tool_registry = default_factory()
+            .build_registry(&agent_config.tools, &[])
+            .expect("tool registry should build");
         let runtime_config = AgentRuntimeConfig {
             agent_id: "default".to_owned(),
             provider_key: "default".to_owned(),
             effective_execution: ExecutionDefaultsConfig::default(),
             owner_ids: vec!["user-1".to_owned()],
             agent_config,
+            tool_registry,
             persona_root: PathBuf::from("/tmp/simpleclaw-run-test-persona"),
             workspace_root: PathBuf::from("/tmp/simpleclaw-run-test"),
             app_base_dir: PathBuf::from("/tmp/simpleclaw-run-test-app"),
@@ -1577,8 +1579,6 @@ mod tests {
                     true,
                 ),
             )])),
-            default_factory(),
-            SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
             Arc::new(NoopInvoker),
         ));
 
@@ -1716,8 +1716,6 @@ mod tests {
         let context = Arc::new(RuntimeContext {
             react_loop: Arc::new(ReactLoop::new(
                 ProviderFactory::from_parts(HashMap::new()),
-                default_factory(),
-                SkillFactory::new(PathBuf::from("/tmp/simpleclaw-run-skill-test")),
                 Arc::new(NoopInvoker),
             )),
             gateway: Arc::clone(&gateway),

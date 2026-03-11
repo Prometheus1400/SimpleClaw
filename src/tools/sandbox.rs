@@ -13,8 +13,6 @@ use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 use crate::error::FrameworkError;
 
-use super::{Tool, ToolExecEnv, ToolRunOutput};
-
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
 const WASM_PERSONA_MOUNT: &str = "/persona";
@@ -25,15 +23,6 @@ pub struct WasmGuestOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
-}
-
-pub async fn execute_tool_with_sandbox(
-    tool: &dyn Tool,
-    ctx: &ToolExecEnv,
-    args_json: &str,
-    session_id: &str,
-) -> Result<ToolRunOutput, FrameworkError> {
-    tool.execute_with_trace(ctx, args_json, session_id).await
 }
 
 pub async fn run_wasm_guest(
@@ -50,10 +39,9 @@ pub async fn run_wasm_guest(
     let args = args.to_vec();
     let stdin = stdin.to_vec();
 
-    let join =
-        spawn_blocking(move || {
-            run_wasm_guest_blocking(&workspace, &persona, &artifact_path, &args, &stdin)
-        });
+    let join = spawn_blocking(move || {
+        run_wasm_guest_blocking(&workspace, &persona, &artifact_path, &args, &stdin)
+    });
 
     let joined = timeout(time_limit, join)
         .await
@@ -270,18 +258,8 @@ impl Drop for IsolatedTmpDir {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_tool_with_sandbox, resolve_guest_artifact_path};
-    use crate::config::DatabaseConfig;
-    use crate::error::FrameworkError;
-    use crate::memory::MemoryStore;
-    use crate::tools::{
-        AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, Tool, ToolExecEnv,
-        WorkerInvokeRequest,
-    };
-    use async_trait::async_trait;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use super::resolve_guest_artifact_path;
+    use std::path::Path;
 
     #[test]
     fn resolve_guest_artifact_path_errors_for_missing_module() {
@@ -289,98 +267,5 @@ mod tests {
         let err = resolve_guest_artifact_path("definitely_missing.wasm", workspace)
             .expect_err("missing artifact should return error");
         assert!(err.to_string().contains("missing wasm artifact"));
-    }
-
-    #[derive(Clone)]
-    struct DummyTool {
-        name: &'static str,
-    }
-
-    struct NoopInvoker;
-
-    #[async_trait]
-    impl AgentInvoker for NoopInvoker {
-        async fn invoke_agent(
-            &self,
-            _request: AgentInvokeRequest,
-        ) -> Result<InvokeOutcome, FrameworkError> {
-            Ok(InvokeOutcome {
-                reply: String::new(),
-                tool_calls: Vec::new(),
-            })
-        }
-
-        async fn invoke_worker(
-            &self,
-            _request: WorkerInvokeRequest,
-        ) -> Result<InvokeOutcome, FrameworkError> {
-            Ok(InvokeOutcome {
-                reply: String::new(),
-                tool_calls: Vec::new(),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl Tool for DummyTool {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-
-        fn description(&self) -> &'static str {
-            "dummy"
-        }
-
-        fn input_schema_json(&self) -> &'static str {
-            "{}"
-        }
-
-        async fn execute(
-            &self,
-            _ctx: &ToolExecEnv,
-            _args_json: &str,
-            _session_id: &str,
-        ) -> Result<String, FrameworkError> {
-            Ok("ok".to_owned())
-        }
-    }
-
-    async fn test_ctx() -> ToolExecEnv {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("simpleclaw_sandbox_test_{nanos}"));
-        std::fs::create_dir_all(&root).expect("temp test dir should be created");
-        let short = root.join("short.db");
-        let long = root.join("long.db");
-        let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
-            .await
-            .expect("memory should initialize");
-        ToolExecEnv {
-            agent_id: "test-agent".to_owned(),
-            memory: Arc::new(memory),
-            history_messages: 10,
-            env: std::collections::BTreeMap::new(),
-            persona_root: PathBuf::from("."),
-            workspace_root: PathBuf::from("."),
-            user_id: "u".to_owned(),
-            owner_ids: vec![],
-            process_manager: Arc::new(ProcessManager::new()),
-            invoker: Arc::new(NoopInvoker),
-            gateway: None,
-            completion_tx: None,
-            completion_route: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn execute_tool_proxies_calls() {
-        let ctx = test_ctx().await;
-        let result = execute_tool_with_sandbox(&DummyTool { name: "clock" }, &ctx, "{}", "s")
-            .await
-            .expect("tool execution should succeed");
-        assert_eq!(result.output, "ok");
-        assert!(result.nested_tool_calls.is_empty());
     }
 }

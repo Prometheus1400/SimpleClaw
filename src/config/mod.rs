@@ -976,7 +976,9 @@ routing:
             .expect("web search config should serialize")
             .expect("web search config should exist");
         assert_eq!(
-            web_search_config.get("api_key").and_then(|value| value.as_str()),
+            web_search_config
+                .get("api_key")
+                .and_then(|value| value.as_str()),
             Some("web-search-secret")
         );
 

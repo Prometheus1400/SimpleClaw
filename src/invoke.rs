@@ -56,7 +56,6 @@ impl AgentInvoker for DirectAgentInvoker {
         let effective_max_steps = target_config.effective_execution.max_steps;
         let params = RunParams {
             provider_key: &target_config.provider_key,
-            agent_config: &target_config.agent_config,
             system_prompt: &target_config.system_prompt,
             agent_id: &request.target_agent_id,
             session_id: &request.session_id,
@@ -69,6 +68,7 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: target_config.owner_ids.clone(),
             process_manager: Arc::clone(&self.process_manager),
+            tool_registry: target_config.tool_registry.clone(),
             gateway: None,
             completion_tx: None,
             completion_route: None,
@@ -103,9 +103,11 @@ impl AgentInvoker for DirectAgentInvoker {
         worker_agent_config.tools = worker_agent_config
             .tools
             .with_disabled(&["summon", "task", "memorize", "forget"]);
+        let worker_tool_registry = current_config
+            .tool_registry
+            .without_names(&["summon", "task", "memorize", "forget"]);
         let params = RunParams {
             provider_key: &current_config.provider_key,
-            agent_config: &worker_agent_config,
             system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
             agent_id: "task-worker",
             session_id: &request.session_id,
@@ -120,6 +122,7 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: current_config.owner_ids.clone(),
             process_manager: Arc::clone(&self.process_manager),
+            tool_registry: worker_tool_registry,
             gateway: None,
             completion_tx: None,
             completion_route: None,
@@ -160,7 +163,6 @@ mod tests {
         Message, Provider, ProviderFactory, ProviderResponse, Role, ToolDefinition,
     };
     use crate::react::ReactLoop;
-    use crate::tools::skill::SkillFactory;
     use crate::tools::{
         AgentInvokeRequest, AgentInvoker, InvokeOutcome, ProcessManager, WorkerInvokeRequest,
         default_factory,
@@ -351,6 +353,9 @@ mod tests {
     fn test_agent_config() -> AgentRuntimeConfig {
         let mut agent_config = AgentInnerConfig::default();
         agent_config.tools = agent_config.tools.with_disabled(&["cron"]);
+        let tool_registry = default_factory()
+            .build_registry(&agent_config.tools, &[])
+            .expect("tool registry should build");
         AgentRuntimeConfig {
             agent_id: "default".to_owned(),
             provider_key: "default".to_owned(),
@@ -361,6 +366,7 @@ mod tests {
             },
             owner_ids: vec!["owner-1".to_owned()],
             agent_config,
+            tool_registry,
             persona_root: PathBuf::from("/tmp/simpleclaw-invoke-persona"),
             workspace_root: PathBuf::from("/tmp/simpleclaw-invoke-workspace"),
             app_base_dir: PathBuf::from("/tmp/simpleclaw-invoke-app"),
@@ -377,8 +383,6 @@ mod tests {
                     true,
                 ),
             )])),
-            default_factory(),
-            SkillFactory::new(PathBuf::from("/tmp/simpleclaw-invoke-skills")),
             Arc::new(NoopInvoker),
         ))
     }

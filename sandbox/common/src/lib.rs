@@ -6,13 +6,7 @@ use std::path::{Component, Path, PathBuf};
 const PREVIEW_CHARS: usize = 1_000;
 pub const WORKSPACE_ROOT: &str = "/workspace";
 pub const PERSONA_ROOT: &str = "/persona";
-const PROMPT_FILES: &[&str] = &[
-    "IDENTITY.md",
-    "AGENT.md",
-    "USER.md",
-    "MEMORY.md",
-    "SOUL.md",
-];
+const PROMPT_FILES: &[&str] = &["IDENTITY.md", "AGENT.md", "USER.md", "MEMORY.md", "SOUL.md"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditArgs {
@@ -399,8 +393,12 @@ mod tests {
     #[test]
     fn persona_relative_path_allowed_matches_expected_surface() {
         assert!(persona_relative_path_allowed(Path::new("AGENT.md")));
-        assert!(persona_relative_path_allowed(Path::new("skills/reviewer/SKILL.md")));
-        assert!(!persona_relative_path_allowed(Path::new(".simpleclaw/memory/short.db")));
+        assert!(persona_relative_path_allowed(Path::new(
+            "skills/reviewer/SKILL.md"
+        )));
+        assert!(!persona_relative_path_allowed(Path::new(
+            ".simpleclaw/memory/short.db"
+        )));
         assert!(!persona_relative_path_allowed(Path::new("notes.txt")));
         assert!(!persona_relative_path_allowed(Path::new("nested/AGENT.md")));
     }
