@@ -1,4 +1,0 @@
-upstream: https://github.com/anthropic-experimental/sandbox-runtime
-agent: null
-target_language: null
-verify_command: null
