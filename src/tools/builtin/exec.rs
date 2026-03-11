@@ -7,7 +7,10 @@ use tracing::debug;
 
 use crate::config::{ExecToolConfig, ToolSandboxConfig};
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv, sandbox_runtime};
+use crate::tools::{
+    HostSandboxCommandRequest, HostSandboxRuntime, Tool, ToolExecEnv, ToolExecutionKind,
+    ToolRunOutput, sandbox_runtime,
+};
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
 
@@ -16,6 +19,15 @@ const DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS: u64 = 120;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecTool {
     config: ExecToolConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecPlan {
+    pub command: String,
+    pub background: bool,
+    pub timeout_seconds: u64,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub workspace_root: std::path::PathBuf,
 }
 
 #[async_trait]
@@ -32,6 +44,10 @@ impl Tool for ExecTool {
         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
     }
 
+    fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
+        &[ToolExecutionKind::Direct, ToolExecutionKind::HostSandbox]
+    }
+
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
         self.config = serde_json::from_value(config)
             .map_err(|e| FrameworkError::Config(format!("tools.exec config is invalid: {e}")))?;
@@ -44,6 +60,15 @@ impl Tool for ExecTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
+        let plan = self.plan(ctx, args_json)?;
+        self.execute_direct(ctx, plan)
+            .await
+            .map(|output| output.output)
+    }
+}
+
+impl ExecTool {
+    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ExecPlan, FrameworkError> {
         let args = parse_exec_args(args_json);
         if args.command.trim().is_empty() {
             return Err(FrameworkError::Tool(
@@ -55,56 +80,72 @@ impl Tool for ExecTool {
                 "exec background mode is disabled by tools.exec.allow_background".to_owned(),
             ));
         }
+        Ok(ExecPlan {
+            command: args.command.trim().to_owned(),
+            background: args.background,
+            timeout_seconds: self.config.timeout_seconds.unwrap_or(20),
+            env: ctx.env.clone(),
+            workspace_root: ctx.workspace_root.clone(),
+        })
+    }
 
-        if args.background {
-            let (session_id, handle) = if self.config.sandbox.enabled {
-                ctx.process_manager
-                    .spawn_sandboxed(
-                        args.command.trim(),
-                        &ctx.workspace_root,
-                        &self.config.sandbox,
-                        &ctx.env,
-                    )
-                    .await?
-            } else {
-                ctx.process_manager
-                    .spawn(args.command.trim(), Some(&ctx.workspace_root), &ctx.env)
-                    .await?
-            };
+    pub async fn execute_direct(
+        &self,
+        ctx: &ToolExecEnv,
+        plan: ExecPlan,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        if plan.background {
+            let (session_id, handle) = ctx
+                .process_manager
+                .spawn(&plan.command, Some(&plan.workspace_root), &plan.env)
+                .await?;
             ctx.process_manager.spawn_completion_watcher(
                 session_id.clone(),
                 handle,
                 ctx.completion_tx.clone(),
                 ctx.completion_route.clone(),
             );
-            return Ok(json!({"status":"backgrounded","sessionId": session_id}).to_string());
+            return Ok(ToolRunOutput::plain(
+                json!({"status":"backgrounded","sessionId": session_id}).to_string(),
+            ));
         }
 
-        let result = if self.config.sandbox.enabled {
-            exec_with_sandbox_runtime(
-                args.command.trim(),
-                &ctx.workspace_root,
-                &self.config.sandbox,
-                self.config
-                    .timeout_seconds
-                    .unwrap_or(DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS),
-                &ctx.env,
+        let result = exec_shell_command(
+            &plan.command,
+            Some(&plan.workspace_root),
+            &plan.env,
+            plan.timeout_seconds,
+        )
+        .await?;
+        Ok(ToolRunOutput::plain(result.to_string()))
+    }
+
+    pub async fn execute_host_sandboxed(
+        &self,
+        ctx: &ToolExecEnv,
+        plan: ExecPlan,
+        runtime: &dyn HostSandboxRuntime,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        runtime
+            .run_command(
+                ctx,
+                HostSandboxCommandRequest {
+                    command: plan.command,
+                    workspace_root: plan.workspace_root,
+                    sandbox: self.config.sandbox.clone(),
+                    env: plan.env,
+                    timeout_seconds: self
+                        .config
+                        .timeout_seconds
+                        .unwrap_or(DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS),
+                    background: plan.background,
+                },
             )
-            .await?
-        } else {
-            exec_shell_command(
-                args.command.trim(),
-                Some(&ctx.workspace_root),
-                &ctx.env,
-                self.config.timeout_seconds.unwrap_or(20),
-            )
-            .await?
-        };
-        Ok(result.to_string())
+            .await
     }
 }
 
-async fn exec_with_sandbox_runtime(
+pub(crate) async fn exec_with_sandbox_runtime(
     command: &str,
     workspace_root: &Path,
     sandbox: &ToolSandboxConfig,

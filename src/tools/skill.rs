@@ -64,13 +64,6 @@ impl SkillFactory {
     ) {
         self.tools_by_agent.insert(agent_id.into(), tools);
     }
-
-    pub(crate) fn tools_for_agent(&self, agent_id: &str) -> &[Arc<dyn Tool>] {
-        self.tools_by_agent
-            .get(agent_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -199,10 +192,7 @@ fn resolve_skill_path(
     base_dir: &Path,
     skill_id: &str,
 ) -> Option<(PathBuf, &'static str)> {
-    let agent_path = persona_root
-        .join("skills")
-        .join(skill_id)
-        .join("SKILL.md");
+    let agent_path = persona_root.join("skills").join(skill_id).join("SKILL.md");
     if agent_path.exists() {
         return Some((agent_path, "agent"));
     }
@@ -251,10 +241,7 @@ fn normalized_disabled_skill_ids(
     Ok(seen)
 }
 
-fn discover_skill_ids(
-    persona_root: &Path,
-    base_dir: &Path,
-) -> Result<Vec<String>, FrameworkError> {
+fn discover_skill_ids(persona_root: &Path, base_dir: &Path) -> Result<Vec<String>, FrameworkError> {
     let mut discovered = BTreeSet::new();
     collect_skill_ids_from_root(&persona_root.join("skills"), &mut discovered)?;
     collect_skill_ids_from_root(&base_dir.join("skills"), &mut discovered)?;

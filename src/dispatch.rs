@@ -3,10 +3,11 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tracing::{debug, info_span, warn};
 
-use crate::error::FrameworkError;
 use crate::providers::{Message, ProviderResponse, Role, ToolCall, ToolDefinition, ToolResult};
-use crate::tools::sandbox::execute_tool_with_sandbox;
-use crate::tools::{ActiveTools, ToolExecEnv};
+use crate::tools::{
+    AgentToolRegistry, DefaultToolAuthorizer, DefaultToolExecutor, ToolAuthorizer, ToolExecEnv,
+    ToolExecutor,
+};
 
 const TOOL_OUTPUT_LOG_PREVIEW_CHARS: usize = 500;
 
@@ -42,10 +43,12 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     async fn execute_tool_calls(
         &self,
         calls: &[ParsedToolCall],
-        active_tools: &ActiveTools,
+        active_tools: &AgentToolRegistry,
         tool_ctx: &ToolExecEnv,
         session_id: &str,
     ) -> Vec<ToolExecutionResult> {
+        let authorizer = DefaultToolAuthorizer;
+        let executor = DefaultToolExecutor::new();
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
             let args_json = call.arguments.to_string();
@@ -62,17 +65,10 @@ pub(crate) trait ToolDispatcher: Send + Sync {
 
             let (observation, nested_tool_calls, status) =
                 match active_tools.get(call.name.as_str()) {
-                    Some(tool) => match enforce_tool_authorization(
-                        active_tools.owner_restricted(call.name.as_str()),
-                        tool_ctx,
-                    ) {
-                        Ok(()) => match execute_tool_with_sandbox(
-                            tool.as_ref(),
-                            tool_ctx,
-                            &args_json,
-                            session_id,
-                        )
-                        .await
+                    Some(entry) => match authorizer.authorize(entry, tool_ctx) {
+                        Ok(()) => match executor
+                            .execute(entry, tool_ctx, &args_json, session_id)
+                            .await
                         {
                             Ok(ok) => (ok.output, ok.nested_tool_calls, "ok"),
                             Err(err) => (format!("tool_error: {err}"), Vec::new(), "tool_error"),
@@ -137,45 +133,24 @@ fn preview_for_log(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-fn enforce_tool_authorization(
-    owner_restricted: bool,
-    tool_ctx: &ToolExecEnv,
-) -> Result<(), FrameworkError> {
-    if !owner_restricted {
-        return Ok(());
-    }
-    if tool_ctx.owner_ids.is_empty() {
-        return Err(FrameworkError::Tool(
-            "owner restriction misconfigured: runtime.owner_ids is empty".to_owned(),
-        ));
-    }
-    if tool_ctx.is_owner() {
-        Ok(())
-    } else {
-        Err(FrameworkError::Tool(
-            "permission denied: this tool is restricted to the owner".to_owned(),
-        ))
-    }
-}
-
 #[cfg(test)]
 fn enforce_tool_authorization_for_identity(
     owner_restricted: bool,
     user_id: &str,
     owner_ids: &[String],
-) -> Result<(), FrameworkError> {
+) -> Result<(), crate::error::FrameworkError> {
     if !owner_restricted {
         return Ok(());
     }
     if owner_ids.is_empty() {
-        return Err(FrameworkError::Tool(
+        return Err(crate::error::FrameworkError::Tool(
             "owner restriction misconfigured: runtime.owner_ids is empty".to_owned(),
         ));
     }
     if crate::tools::ToolExecEnv::owner_allowed(user_id, owner_ids) {
         Ok(())
     } else {
-        Err(FrameworkError::Tool(
+        Err(crate::error::FrameworkError::Tool(
             "permission denied: this tool is restricted to the owner".to_owned(),
         ))
     }

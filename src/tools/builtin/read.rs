@@ -7,15 +7,23 @@ use std::time::Duration;
 use crate::config::ReadToolConfig;
 use crate::error::FrameworkError;
 use crate::tools::sandbox::{
-    normalize_workspace_root, persona_guest_mount_path, run_wasm_guest, workspace_guest_mount_path,
+    normalize_workspace_root, persona_guest_mount_path, workspace_guest_mount_path,
 };
-use crate::tools::{Tool, ToolExecEnv};
+use crate::tools::{
+    Tool, ToolExecEnv, ToolExecutionKind, ToolRunOutput, WasmGuestRequest, WasmSandboxRuntime,
+};
 
 use super::common::parse_simple_text_arg;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadTool {
     config: ReadToolConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadPlan {
+    pub host_path: PathBuf,
+    pub guest_path: Option<String>,
 }
 
 #[async_trait]
@@ -32,6 +40,10 @@ impl Tool for ReadTool {
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
     }
 
+    fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
+        &[ToolExecutionKind::Direct, ToolExecutionKind::WasmSandbox]
+    }
+
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
         self.config = serde_json::from_value(config)
             .map_err(|e| FrameworkError::Config(format!("tools.read config is invalid: {e}")))?;
@@ -44,40 +56,62 @@ impl Tool for ReadTool {
         args_json: &str,
         _session_id: &str,
     ) -> Result<String, FrameworkError> {
+        let plan = self.plan(ctx, args_json)?;
+        self.execute_direct(ctx, plan)
+            .await
+            .map(|output| output.output)
+    }
+}
+
+impl ReadTool {
+    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ReadPlan, FrameworkError> {
         let raw_path = parse_simple_text_arg(args_json);
-        let sandbox_enabled = self.config.sandbox.enabled;
-        let path = resolve_path_for_read(
-            &raw_path,
-            &ctx.persona_root,
-            &ctx.workspace_root,
-            sandbox_enabled,
-            &self.config.sandbox.extra_readable_paths,
-        )?;
-        if sandbox_enabled {
-            if let Ok(guest_path) =
-                host_path_to_guest_path(&path, &ctx.workspace_root, &ctx.persona_root)
-            {
-                let output = run_wasm_guest(
-                    &ctx.workspace_root,
-                    &ctx.persona_root,
-                    "read_tool.wasm",
-                    &[guest_path],
-                    &[],
-                    Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
-                )
-                .await?;
-                if output.exit_code != 0 {
-                    return Err(FrameworkError::Tool(format!(
-                        "read tool failed: exit_code={} stderr={}",
-                        output.exit_code,
-                        output.stderr.trim()
-                    )));
-                }
-                return Ok(output.stdout);
-            }
+        let host_path = resolve_path_for_read(&raw_path, &ctx.workspace_root)?;
+        let guest_path =
+            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        Ok(ReadPlan {
+            host_path,
+            guest_path,
+        })
+    }
+
+    pub async fn execute_direct(
+        &self,
+        _ctx: &ToolExecEnv,
+        plan: ReadPlan,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        let content = std::fs::read_to_string(plan.host_path)?;
+        Ok(ToolRunOutput::plain(content))
+    }
+
+    pub async fn execute_wasm(
+        &self,
+        ctx: &ToolExecEnv,
+        plan: ReadPlan,
+        runtime: &dyn WasmSandboxRuntime,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        let guest_path = plan.guest_path.ok_or_else(|| {
+            FrameworkError::Tool("read path is not representable inside wasm sandbox".to_owned())
+        })?;
+        let output = runtime
+            .run_guest(
+                ctx,
+                WasmGuestRequest {
+                    artifact_name: "read_tool.wasm",
+                    args: vec![guest_path],
+                    stdin: Vec::new(),
+                    timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
+                },
+            )
+            .await?;
+        if output.exit_code != 0 {
+            return Err(FrameworkError::Tool(format!(
+                "read tool failed: exit_code={} stderr={}",
+                output.exit_code,
+                output.stderr.trim()
+            )));
         }
-        let content = std::fs::read_to_string(path)?;
-        Ok(content)
+        Ok(ToolRunOutput::plain(output.stdout))
     }
 }
 
@@ -122,10 +156,7 @@ pub(super) fn host_path_to_guest_path(
 
 pub(super) fn resolve_path_for_read(
     raw_path: &str,
-    persona_root: &Path,
     workspace_root: &Path,
-    sandbox_enabled: bool,
-    extra_readable_paths: &[String],
 ) -> Result<PathBuf, FrameworkError> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
@@ -142,21 +173,7 @@ pub(super) fn resolve_path_for_read(
     } else {
         workspace_root.join(expanded)
     };
-    let normalized_path = normalize_absolute_path(&absolute);
-
-    if sandbox_enabled {
-        if !sandbox_path_allowed(&normalized_path, persona_root, workspace_root, extra_readable_paths)?
-        {
-            return Err(FrameworkError::Tool(format!(
-                "read path denied by sandbox: path={} workspace={} persona={}",
-                normalized_path.display(),
-                workspace_root.display(),
-                persona_root.display()
-            )));
-        }
-    }
-
-    Ok(normalized_path)
+    Ok(normalize_absolute_path(&absolute))
 }
 
 fn expand_home_dir(value: &str) -> Option<PathBuf> {
@@ -187,56 +204,6 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-}
-
-fn sandbox_path_allowed(
-    normalized_path: &Path,
-    persona_root: &Path,
-    workspace_root: &Path,
-    extra_readable_paths: &[String],
-) -> Result<bool, FrameworkError> {
-    let workspace_absolute = if workspace_root.is_absolute() {
-        workspace_root.to_path_buf()
-    } else {
-        env::current_dir()
-            .map_err(FrameworkError::Io)?
-            .join(workspace_root)
-    };
-    let normalized_workspace = normalize_absolute_path(&workspace_absolute);
-    if normalized_path.starts_with(&normalized_workspace) {
-        return Ok(true);
-    }
-
-    for extra in extra_readable_paths {
-        let extra = extra.trim();
-        if extra.is_empty() {
-            continue;
-        }
-        let expanded_input = expand_env_vars(extra);
-        let expanded =
-            expand_home_dir(&expanded_input).unwrap_or_else(|| PathBuf::from(expanded_input));
-        let absolute = if expanded.is_absolute() {
-            expanded
-        } else {
-            normalized_workspace.join(expanded)
-        };
-        if normalized_path.starts_with(normalize_absolute_path(&absolute)) {
-            return Ok(true);
-        }
-    }
-
-    let persona_absolute = if persona_root.is_absolute() {
-        persona_root.to_path_buf()
-    } else {
-        env::current_dir()
-            .map_err(FrameworkError::Io)?
-            .join(persona_root)
-    };
-    let normalized_persona = normalize_absolute_path(&persona_absolute);
-    let Ok(relative) = normalized_path.strip_prefix(&normalized_persona) else {
-        return Ok(false);
-    };
-    Ok(persona_relative_path_allowed(relative))
 }
 
 fn expand_env_vars(input: &str) -> String {
@@ -338,70 +305,52 @@ mod tests {
         let workspace = unique_test_dir("workspace_relative");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let resolved = resolve_path_for_read("docs/file.txt", &workspace, &workspace, true, &[])
-            .expect("path should resolve");
+        let resolved =
+            resolve_path_for_read("docs/file.txt", &workspace).expect("path should resolve");
         assert_eq!(resolved, workspace.join("docs/file.txt"));
 
         let _ = fs::remove_dir_all(&workspace);
     }
 
     #[test]
-    fn resolve_path_in_wasm_sandbox_denies_absolute_outside_workspace() {
+    fn resolve_path_normalizes_absolute_outside_workspace() {
         let workspace = unique_test_dir("workspace_deny_absolute");
         fs::create_dir_all(&workspace).expect("should create workspace");
         let outside = unique_test_dir("outside_absolute").join("secrets.txt");
 
-        let err =
-            resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, &workspace, true, &[])
-                .expect_err("outside path should be denied");
-        assert!(err.to_string().contains("read path denied by sandbox"));
+        let resolved = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace)
+            .expect("outside path should normalize");
+        assert_eq!(resolved, outside);
 
         let _ = fs::remove_dir_all(&workspace);
     }
 
     #[test]
-    fn resolve_path_in_wasm_sandbox_denies_parent_traversal_escape() {
+    fn resolve_path_normalizes_parent_traversal_escape() {
         let workspace = unique_test_dir("workspace_traversal");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let err = resolve_path_for_read("../outside.txt", &workspace, &workspace, true, &[])
-            .expect_err("parent traversal should be denied");
-        assert!(err.to_string().contains("read path denied by sandbox"));
+        let resolved = resolve_path_for_read("../outside.txt", &workspace)
+            .expect("parent traversal should normalize");
+        assert_eq!(
+            resolved,
+            workspace
+                .parent()
+                .expect("workspace parent")
+                .join("outside.txt")
+        );
 
         let _ = fs::remove_dir_all(&workspace);
     }
 
     #[test]
-    fn resolve_path_in_wasm_sandbox_allows_extra_readable_path() {
-        let workspace = unique_test_dir("workspace_extra_read");
-        let outside = unique_test_dir("outside_extra_read");
-        fs::create_dir_all(&workspace).expect("should create workspace");
-        fs::create_dir_all(&outside).expect("should create outside");
-        let target = outside.join("notes.txt");
-
-        let resolved = resolve_path_for_read(
-            target.to_string_lossy().as_ref(),
-            &workspace,
-            &workspace,
-            true,
-            &[outside.to_string_lossy().to_string()],
-        )
-        .expect("extra readable path should be allowed");
-        assert_eq!(resolved, target);
-
-        let _ = fs::remove_dir_all(&workspace);
-        let _ = fs::remove_dir_all(&outside);
-    }
-
-    #[test]
-    fn resolve_path_with_sandbox_off_allows_absolute_outside_workspace() {
+    fn resolve_path_allows_absolute_outside_workspace() {
         let workspace = unique_test_dir("workspace_off");
         fs::create_dir_all(&workspace).expect("should create workspace");
         let outside = unique_test_dir("outside_off").join("secrets.txt");
 
-        let resolved =
-            resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace, &workspace, false, &[])
-                .expect("outside path should resolve with sandbox off");
+        let resolved = resolve_path_for_read(outside.to_string_lossy().as_ref(), &workspace)
+            .expect("outside path should resolve");
         assert_eq!(resolved, outside);
 
         let _ = fs::remove_dir_all(&workspace);
@@ -417,8 +366,8 @@ mod tests {
             std::env::set_var("HOME", &fake_home);
         }
 
-        let resolved = resolve_path_for_read("~/keys.txt", &workspace, &workspace, false, &[])
-            .expect("home path should resolve");
+        let resolved =
+            resolve_path_for_read("~/keys.txt", &workspace).expect("home path should resolve");
         assert_eq!(resolved, fake_home.join("keys.txt"));
 
         let _ = fs::remove_dir_all(&workspace);
@@ -435,14 +384,8 @@ mod tests {
             std::env::set_var("SIMPLECLAW_READ_TEST_DIR", &env_root);
         }
 
-        let resolved = resolve_path_for_read(
-            "$SIMPLECLAW_READ_TEST_DIR/token.txt",
-            &workspace,
-            &workspace,
-            false,
-            &[],
-        )
-        .expect("env path should resolve");
+        let resolved = resolve_path_for_read("$SIMPLECLAW_READ_TEST_DIR/token.txt", &workspace)
+            .expect("env path should resolve");
         assert_eq!(resolved, env_root.join("token.txt"));
 
         let _ = fs::remove_dir_all(&workspace);
@@ -459,36 +402,30 @@ mod tests {
     }
 
     #[test]
-    fn resolve_path_in_wasm_sandbox_allows_persona_prompt_file() {
+    fn host_path_to_guest_path_allows_persona_prompt_file() {
         let persona = unique_test_dir("persona_prompt");
         let workspace = unique_test_dir("workspace_persona_prompt");
         fs::create_dir_all(&workspace).expect("should create workspace");
         fs::create_dir_all(&persona).expect("should create persona");
 
-        let resolved =
-            resolve_path_for_read(persona.join("AGENT.md").to_string_lossy().as_ref(), &persona, &workspace, true, &[])
-                .expect("persona prompt should resolve");
-        assert_eq!(resolved, persona.join("AGENT.md"));
+        let guest_path = host_path_to_guest_path(&persona.join("AGENT.md"), &workspace, &persona)
+            .expect("persona prompt should map");
+        assert_eq!(guest_path, "/persona/AGENT.md");
 
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&persona);
     }
 
     #[test]
-    fn resolve_path_in_wasm_sandbox_denies_persona_simpleclaw() {
+    fn host_path_to_guest_path_denies_persona_simpleclaw() {
         let persona = unique_test_dir("persona_state");
         let workspace = unique_test_dir("workspace_persona_state");
         fs::create_dir_all(persona.join(".simpleclaw")).expect("should create persona state");
         fs::create_dir_all(&workspace).expect("should create workspace");
 
-        let err = resolve_path_for_read(
-            persona.join(".simpleclaw/memory.db").to_string_lossy().as_ref(),
-            &persona,
-            &workspace,
-            true,
-            &[],
-        )
-        .expect_err("persona state should be denied");
+        let err =
+            host_path_to_guest_path(&persona.join(".simpleclaw/memory.db"), &workspace, &persona)
+                .expect_err("persona state should not be representable");
         assert!(err.to_string().contains("read path denied by sandbox"));
 
         let _ = fs::remove_dir_all(&workspace);

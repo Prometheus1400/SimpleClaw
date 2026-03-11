@@ -117,11 +117,37 @@ impl ToolExecEnv {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionKind {
+    Direct,
+    WasmSandbox,
+    HostSandbox,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolMetadata<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub input_schema_json: &'a str,
+    pub supported_execution_kinds: &'static [ToolExecutionKind],
+}
+
 #[async_trait]
 pub(crate) trait Tool: Send + Sync + ToolClone {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema_json(&self) -> &str;
+    fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
+        &[ToolExecutionKind::Direct]
+    }
+    fn metadata(&self) -> ToolMetadata<'_> {
+        ToolMetadata {
+            name: self.name(),
+            description: self.description(),
+            input_schema_json: self.input_schema_json(),
+            supported_execution_kinds: self.supported_execution_kinds(),
+        }
+    }
     fn configure(&mut self, _config: Value) -> Result<(), FrameworkError> {
         Ok(())
     }
@@ -143,14 +169,6 @@ pub(crate) trait Tool: Send + Sync + ToolClone {
             .await
             .map(ToolRunOutput::plain)
     }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_owned(),
-            description: self.description().to_owned(),
-            input_schema_json: self.input_schema_json().to_owned(),
-        }
-    }
 }
 
 pub(crate) trait ToolClone {
@@ -166,10 +184,163 @@ where
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum RegisteredTool {
+    Read(Arc<builtin::read::ReadTool>),
+    Edit(Arc<builtin::edit::EditTool>),
+    Exec(Arc<builtin::exec::ExecTool>),
+    Direct(Arc<dyn Tool>),
+}
+
+impl RegisteredTool {
+    fn name(&self) -> &str {
+        match self {
+            Self::Read(tool) => tool.name(),
+            Self::Edit(tool) => tool.name(),
+            Self::Exec(tool) => tool.name(),
+            Self::Direct(tool) => tool.name(),
+        }
+    }
+
+    fn metadata(&self) -> ToolMetadata<'_> {
+        match self {
+            Self::Read(tool) => tool.metadata(),
+            Self::Edit(tool) => tool.metadata(),
+            Self::Exec(tool) => tool.metadata(),
+            Self::Direct(tool) => tool.metadata(),
+        }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        let metadata = self.metadata();
+        ToolDefinition {
+            name: metadata.name.to_owned(),
+            description: metadata.description.to_owned(),
+            input_schema_json: metadata.input_schema_json.to_owned(),
+        }
+    }
+
+    fn configure_clone(&self, config: Option<Value>) -> Result<Self, FrameworkError> {
+        match self {
+            Self::Read(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Read(Arc::new(next)))
+            }
+            Self::Edit(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Edit(Arc::new(next)))
+            }
+            Self::Exec(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Exec(Arc::new(next)))
+            }
+            Self::Direct(tool) => {
+                let mut next = tool.box_clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Direct(Arc::from(next)))
+            }
+        }
+    }
+
+    fn supports_execution_kind(&self, kind: ToolExecutionKind) -> bool {
+        self.metadata().supported_execution_kinds.contains(&kind)
+    }
+
+    async fn execute_direct(
+        &self,
+        ctx: &ToolExecEnv,
+        args_json: &str,
+        session_id: &str,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        match self {
+            Self::Read(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Edit(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Exec(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Direct(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentToolEntry {
+    pub tool: Arc<RegisteredTool>,
+    pub execution_kind: ToolExecutionKind,
+    pub owner_restricted: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentToolRegistry {
+    ordered: Vec<AgentToolEntry>,
+    by_name: HashMap<String, AgentToolEntry>,
+}
+
+impl std::fmt::Debug for AgentToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entries: Vec<_> = self
+            .ordered
+            .iter()
+            .map(|entry| {
+                (
+                    entry.tool.name().to_owned(),
+                    entry.execution_kind,
+                    entry.owner_restricted,
+                )
+            })
+            .collect();
+        f.debug_struct("AgentToolRegistry")
+            .field("entries", &entries)
+            .finish()
+    }
+}
+
+impl AgentToolRegistry {
+    pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
+        self.ordered
+            .iter()
+            .map(|entry| entry.tool.definition())
+            .collect()
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&AgentToolEntry> {
+        self.by_name.get(name)
+    }
+
+    pub(crate) fn without(&self, name: &str) -> Self {
+        let ordered: Vec<AgentToolEntry> = self
+            .ordered
+            .iter()
+            .filter(|entry| entry.tool.name() != name)
+            .cloned()
+            .collect();
+        let by_name = ordered
+            .iter()
+            .map(|entry| (entry.tool.name().to_owned(), entry.clone()))
+            .collect();
+        Self { ordered, by_name }
+    }
+
+    pub(crate) fn without_names(&self, names: &[&str]) -> Self {
+        names
+            .iter()
+            .fold(self.clone(), |registry, name| registry.without(name))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ToolFactory {
-    builtins: Vec<Box<dyn Tool>>,
-    by_name: HashMap<String, Box<dyn Tool>>,
+    builtins: Vec<RegisteredTool>,
+    by_name: HashMap<String, RegisteredTool>,
 }
 
 impl ToolFactory {
@@ -177,28 +348,27 @@ impl ToolFactory {
         Self::default()
     }
 
-    pub(crate) fn register_builtin(&mut self, tool: Box<dyn Tool>) {
+    pub(crate) fn register_builtin(&mut self, tool: RegisteredTool) {
         let name = tool.name().to_owned();
         if let Some(existing_idx) = self
             .builtins
             .iter()
             .position(|candidate| candidate.name() == name)
         {
-            self.builtins[existing_idx] = tool.box_clone();
+            self.builtins[existing_idx] = tool.clone();
         } else {
-            self.builtins.push(tool.box_clone());
+            self.builtins.push(tool.clone());
         }
         self.by_name.insert(name, tool);
     }
 
-    pub(crate) fn resolve_active(
+    pub(crate) fn build_registry(
         &self,
         tools_config: &ToolsConfig,
         skill_tools: &[Arc<dyn Tool>],
-    ) -> Result<ActiveTools, FrameworkError> {
+    ) -> Result<AgentToolRegistry, FrameworkError> {
         let mut ordered = Vec::new();
         let mut by_name = HashMap::new();
-        let mut owner_restricted_by_name = HashMap::new();
         let mut seen = HashSet::new();
 
         for name in tools_config.enabled_tool_names() {
@@ -210,17 +380,25 @@ impl ToolFactory {
                     "unknown tool in tools map: {name}"
                 )));
             };
-            let mut tool = tool_template.box_clone();
-            if let Some(config) = tools_config.config_for_tool(&name)? {
-                tool.configure(config)?;
-            }
-            let tool: Arc<dyn Tool> = Arc::from(tool);
-            ordered.push(Arc::clone(&tool));
-            by_name.insert(name.clone(), tool);
+            let tool =
+                Arc::new(tool_template.configure_clone(tools_config.config_for_tool(&name)?)?);
             let owner_restricted = tools_config
                 .owner_restricted_for_tool(&name)
                 .unwrap_or(true);
-            owner_restricted_by_name.insert(name, owner_restricted);
+            let execution_kind = select_execution_kind(&name, tools_config)?;
+            if !tool.supports_execution_kind(execution_kind) {
+                return Err(FrameworkError::Config(format!(
+                    "tool '{name}' does not support execution kind {:?}",
+                    execution_kind
+                )));
+            }
+            let entry = AgentToolEntry {
+                tool,
+                execution_kind,
+                owner_restricted,
+            };
+            ordered.push(entry.clone());
+            by_name.insert(name, entry);
         }
 
         for tool in skill_tools {
@@ -228,66 +406,16 @@ impl ToolFactory {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            ordered.push(Arc::clone(tool));
-            by_name.insert(name, Arc::clone(tool));
-            owner_restricted_by_name.insert(tool.name().to_owned(), false);
+            let entry = AgentToolEntry {
+                tool: Arc::new(RegisteredTool::Direct(Arc::clone(tool))),
+                execution_kind: ToolExecutionKind::Direct,
+                owner_restricted: false,
+            };
+            ordered.push(entry.clone());
+            by_name.insert(name, entry);
         }
 
-        Ok(ActiveTools {
-            ordered,
-            by_name,
-            owner_restricted_by_name,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ActiveTools {
-    ordered: Vec<Arc<dyn Tool>>,
-    by_name: HashMap<String, Arc<dyn Tool>>,
-    owner_restricted_by_name: HashMap<String, bool>,
-}
-
-impl ActiveTools {
-    pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
-        self.ordered.iter().map(|tool| tool.definition()).collect()
-    }
-
-    pub(crate) fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.by_name.get(name)
-    }
-
-    pub(crate) fn owner_restricted(&self, name: &str) -> bool {
-        self.owner_restricted_by_name
-            .get(name)
-            .copied()
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn without(&self, name: &str) -> Self {
-        let ordered = self
-            .ordered
-            .iter()
-            .filter(|tool| tool.name() != name)
-            .cloned()
-            .collect();
-        let by_name = self
-            .by_name
-            .iter()
-            .filter(|(tool_name, _)| tool_name.as_str() != name)
-            .map(|(tool_name, tool)| (tool_name.clone(), Arc::clone(tool)))
-            .collect();
-        let owner_restricted_by_name = self
-            .owner_restricted_by_name
-            .iter()
-            .filter(|(tool_name, _)| tool_name.as_str() != name)
-            .map(|(tool_name, restricted)| (tool_name.clone(), *restricted))
-            .collect();
-        Self {
-            ordered,
-            by_name,
-            owner_restricted_by_name,
-        }
+        Ok(AgentToolRegistry { ordered, by_name })
     }
 }
 
@@ -297,6 +425,251 @@ pub(crate) fn default_factory() -> ToolFactory {
         factory.register_builtin(tool);
     }
     factory
+}
+
+fn select_execution_kind(
+    name: &str,
+    tools_config: &ToolsConfig,
+) -> Result<ToolExecutionKind, FrameworkError> {
+    let kind = match name {
+        "read" => {
+            if tools_config
+                .read
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        "edit" => {
+            if tools_config
+                .edit
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        "exec" => {
+            if tools_config
+                .exec
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::HostSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        _ => ToolExecutionKind::Direct,
+    };
+    Ok(kind)
+}
+
+pub(crate) trait ToolAuthorizer: Send + Sync {
+    fn authorize(&self, entry: &AgentToolEntry, ctx: &ToolExecEnv) -> Result<(), FrameworkError>;
+}
+
+pub(crate) struct DefaultToolAuthorizer;
+
+impl ToolAuthorizer for DefaultToolAuthorizer {
+    fn authorize(&self, entry: &AgentToolEntry, ctx: &ToolExecEnv) -> Result<(), FrameworkError> {
+        if !entry.owner_restricted {
+            return Ok(());
+        }
+        if ctx.owner_ids.is_empty() {
+            return Err(FrameworkError::Tool(
+                "owner restriction misconfigured: runtime.owner_ids is empty".to_owned(),
+            ));
+        }
+        if ctx.is_owner() {
+            return Ok(());
+        }
+        Err(FrameworkError::Tool(
+            "permission denied: this tool is restricted to the owner".to_owned(),
+        ))
+    }
+}
+
+pub(crate) struct WasmGuestRequest {
+    pub artifact_name: &'static str,
+    pub args: Vec<String>,
+    pub stdin: Vec<u8>,
+    pub timeout: std::time::Duration,
+}
+
+pub(crate) struct HostSandboxCommandRequest {
+    pub command: String,
+    pub workspace_root: PathBuf,
+    pub sandbox: ToolSandboxConfig,
+    pub env: BTreeMap<String, String>,
+    pub timeout_seconds: u64,
+    pub background: bool,
+}
+
+#[async_trait]
+pub(crate) trait WasmSandboxRuntime: Send + Sync {
+    async fn run_guest(
+        &self,
+        ctx: &ToolExecEnv,
+        request: WasmGuestRequest,
+    ) -> Result<sandbox::WasmGuestOutput, FrameworkError>;
+}
+
+pub(crate) struct DefaultWasmSandboxRuntime;
+
+#[async_trait]
+impl WasmSandboxRuntime for DefaultWasmSandboxRuntime {
+    async fn run_guest(
+        &self,
+        ctx: &ToolExecEnv,
+        request: WasmGuestRequest,
+    ) -> Result<sandbox::WasmGuestOutput, FrameworkError> {
+        sandbox::run_wasm_guest(
+            &ctx.workspace_root,
+            &ctx.persona_root,
+            request.artifact_name,
+            &request.args,
+            &request.stdin,
+            request.timeout,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+pub(crate) trait HostSandboxRuntime: Send + Sync {
+    async fn run_command(
+        &self,
+        ctx: &ToolExecEnv,
+        request: HostSandboxCommandRequest,
+    ) -> Result<ToolRunOutput, FrameworkError>;
+}
+
+pub(crate) struct DefaultHostSandboxRuntime;
+
+#[async_trait]
+impl HostSandboxRuntime for DefaultHostSandboxRuntime {
+    async fn run_command(
+        &self,
+        ctx: &ToolExecEnv,
+        request: HostSandboxCommandRequest,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        if request.background {
+            let (session_id, handle) = ctx
+                .process_manager
+                .spawn_sandboxed(
+                    &request.command,
+                    &request.workspace_root,
+                    &request.sandbox,
+                    &request.env,
+                )
+                .await?;
+            ctx.process_manager.spawn_completion_watcher(
+                session_id.clone(),
+                handle,
+                ctx.completion_tx.clone(),
+                ctx.completion_route.clone(),
+            );
+            return Ok(ToolRunOutput::plain(
+                serde_json::json!({"status":"backgrounded","sessionId": session_id}).to_string(),
+            ));
+        }
+
+        let result = builtin::exec::exec_with_sandbox_runtime(
+            &request.command,
+            &request.workspace_root,
+            &request.sandbox,
+            request.timeout_seconds,
+            &request.env,
+        )
+        .await?;
+        Ok(ToolRunOutput::plain(result.to_string()))
+    }
+}
+
+#[async_trait]
+pub(crate) trait ToolExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        entry: &AgentToolEntry,
+        ctx: &ToolExecEnv,
+        args_json: &str,
+        session_id: &str,
+    ) -> Result<ToolRunOutput, FrameworkError>;
+}
+
+pub(crate) struct DefaultToolExecutor {
+    wasm_runtime: Arc<dyn WasmSandboxRuntime>,
+    host_sandbox_runtime: Arc<dyn HostSandboxRuntime>,
+}
+
+impl DefaultToolExecutor {
+    pub(crate) fn new() -> Self {
+        Self {
+            wasm_runtime: Arc::new(DefaultWasmSandboxRuntime),
+            host_sandbox_runtime: Arc::new(DefaultHostSandboxRuntime),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DefaultToolExecutor {
+    async fn execute(
+        &self,
+        entry: &AgentToolEntry,
+        ctx: &ToolExecEnv,
+        args_json: &str,
+        session_id: &str,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        match (&*entry.tool, entry.execution_kind) {
+            (RegisteredTool::Read(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_direct(ctx, plan).await
+            }
+            (RegisteredTool::Read(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+            }
+            (RegisteredTool::Edit(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_direct(ctx, plan).await
+            }
+            (RegisteredTool::Edit(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+            }
+            (RegisteredTool::Exec(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_direct(ctx, plan).await
+            }
+            (RegisteredTool::Exec(tool), ToolExecutionKind::HostSandbox) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_host_sandboxed(ctx, plan, self.host_sandbox_runtime.as_ref())
+                    .await
+            }
+            (tool, ToolExecutionKind::Direct) => {
+                tool.execute_direct(ctx, args_json, session_id).await
+            }
+            (tool, kind) => Err(FrameworkError::Tool(format!(
+                "unsupported execution kind {:?} for tool '{}'",
+                kind,
+                tool.name()
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -833,6 +1206,37 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct OwnedMetadataTool {
+        name: String,
+        description: String,
+        input_schema_json: String,
+    }
+
+    #[async_trait]
+    impl Tool for OwnedMetadataTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn input_schema_json(&self) -> &str {
+            &self.input_schema_json
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &ToolExecEnv,
+            _args_json: &str,
+            _session_id: &str,
+        ) -> Result<String, FrameworkError> {
+            Ok("ok".to_owned())
+        }
+    }
+
     fn only_process_enabled() -> ToolsConfig {
         ToolsConfig {
             read: Some(crate::config::ReadToolConfig {
@@ -901,11 +1305,15 @@ mod tests {
     #[test]
     fn register_overwrites_existing_tool_by_name() {
         let mut factory = ToolFactory::new();
-        factory.register_builtin(Box::new(FakeTool { desc: "fake-a" }));
-        factory.register_builtin(Box::new(FakeTool { desc: "fake-b" }));
+        factory.register_builtin(RegisteredTool::Direct(Arc::new(FakeTool {
+            desc: "fake-a",
+        })));
+        factory.register_builtin(RegisteredTool::Direct(Arc::new(FakeTool {
+            desc: "fake-b",
+        })));
 
         let active = factory
-            .resolve_active(&only_process_enabled(), &[])
+            .build_registry(&only_process_enabled(), &[])
             .expect("fake tool should resolve");
         let definitions = active.definitions();
         assert_eq!(definitions.len(), 1);
@@ -932,7 +1340,9 @@ mod tests {
     #[test]
     fn resolve_active_uses_owner_restricted_flag_from_config() {
         let mut factory = ToolFactory::new();
-        factory.register_builtin(Box::new(NamedTool { name: "clock" }));
+        factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
+            name: "clock",
+        })));
         let mut config = only_process_enabled();
         config.process = Some(crate::config::ProcessToolConfig {
             enabled: false,
@@ -943,14 +1353,16 @@ mod tests {
             owner_restricted: false,
         });
 
-        let active = factory.resolve_active(&config, &[]).expect("resolve tools");
-        assert!(!active.owner_restricted("clock"));
+        let active = factory.build_registry(&config, &[]).expect("resolve tools");
+        assert!(!active.get("clock").expect("clock entry").owner_restricted);
     }
 
     #[test]
     fn resolve_active_marks_skill_tools_unrestricted() {
         let mut factory = ToolFactory::new();
-        factory.register_builtin(Box::new(NamedTool { name: "clock" }));
+        factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
+            name: "clock",
+        })));
         let mut config = only_process_enabled();
         config.process = Some(crate::config::ProcessToolConfig {
             enabled: false,
@@ -963,17 +1375,26 @@ mod tests {
         let skill_tool: Arc<dyn Tool> = Arc::new(NamedTool { name: "skill_demo" });
 
         let active = factory
-            .resolve_active(&config, &[skill_tool])
+            .build_registry(&config, &[skill_tool])
             .expect("resolve tools");
-        assert!(active.owner_restricted("clock"));
-        assert!(!active.owner_restricted("skill_demo"));
+        assert!(active.get("clock").expect("clock entry").owner_restricted);
+        assert!(
+            !active
+                .get("skill_demo")
+                .expect("skill entry")
+                .owner_restricted
+        );
     }
 
     #[test]
     fn active_tools_without_removes_target_tool() {
         let mut factory = ToolFactory::new();
-        factory.register_builtin(Box::new(NamedTool { name: "clock" }));
-        factory.register_builtin(Box::new(NamedTool { name: "react" }));
+        factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
+            name: "clock",
+        })));
+        factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
+            name: "react",
+        })));
         let mut config = only_process_enabled();
         config.process = Some(crate::config::ProcessToolConfig {
             enabled: false,
@@ -987,11 +1408,30 @@ mod tests {
             enabled: true,
             owner_restricted: false,
         });
-        let active = factory.resolve_active(&config, &[]).expect("resolve tools");
+        let active = factory.build_registry(&config, &[]).expect("resolve tools");
         let filtered = active.without("react");
         assert!(active.get("react").is_some());
         assert!(filtered.get("react").is_none());
         assert!(filtered.get("clock").is_some());
+    }
+
+    #[test]
+    fn registered_tool_definition_supports_owned_metadata_fields() {
+        let tool = RegisteredTool::Direct(Arc::new(OwnedMetadataTool {
+            name: "dynamic_tool".to_owned(),
+            description: "metadata from owned strings".to_owned(),
+            input_schema_json: "{\"type\":\"object\"}".to_owned(),
+        }));
+
+        let metadata = tool.metadata();
+        assert_eq!(metadata.name, "dynamic_tool");
+        assert_eq!(metadata.description, "metadata from owned strings");
+        assert_eq!(metadata.input_schema_json, "{\"type\":\"object\"}");
+
+        let definition = tool.definition();
+        assert_eq!(definition.name, "dynamic_tool");
+        assert_eq!(definition.description, "metadata from owned strings");
+        assert_eq!(definition.input_schema_json, "{\"type\":\"object\"}");
     }
 
     #[tokio::test]

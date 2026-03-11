@@ -590,8 +590,9 @@ mod tests {
         let err = config
             .to_runtime()
             .expect_err("unresolved secret should fail runtime assembly");
-        assert!(err
-            .to_string()
-            .contains("web_search api_key was not resolved before runtime assembly"));
+        assert!(
+            err.to_string()
+                .contains("web_search api_key was not resolved before runtime assembly")
+        );
     }
 }

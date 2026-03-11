@@ -21,7 +21,7 @@ use crate::providers::ProviderFactory;
 use crate::react::ReactLoop;
 use crate::tools::builtin::cron::{CronStore, CronTool};
 use crate::tools::skill::SkillFactory;
-use crate::tools::{ProcessManager, ToolFactory, default_factory};
+use crate::tools::{ProcessManager, RegisteredTool, ToolFactory, default_factory};
 
 #[async_trait]
 pub(crate) trait ProviderFactoryBuilder: Send + Sync {
@@ -211,6 +211,13 @@ pub(crate) async fn assemble_runtime_state(
 
     let mut agent_configs_map: HashMap<String, AgentRuntimeConfig> = HashMap::new();
     let mut skill_factory = deps.skill_factory_builder.create_skill_factory(app_paths);
+    let cron_store = Arc::new(std::sync::Mutex::new(CronStore::open(
+        &app_paths.cron_db_path,
+    )?));
+    let mut tool_factory = deps.tool_factory_builder.create_tool_factory();
+    tool_factory.register_builtin(RegisteredTool::Direct(Arc::new(CronTool::new(Arc::clone(
+        &cron_store,
+    )))));
 
     for agent in &loaded.global.agents.list {
         let agent_config = agent.config.clone();
@@ -235,13 +242,12 @@ pub(crate) async fn assemble_runtime_state(
             .get(&provider_key)
             .map_err(color_eyre::Report::from)?;
 
-        let system_prompt =
-            load_system_prompt_for_persona(&agent.persona).wrap_err_with(|| {
-                format!(
-                    "failed to assemble layered system prompt for agent '{}'",
-                    agent.id
-                )
-            })?;
+        let system_prompt = load_system_prompt_for_persona(&agent.persona).wrap_err_with(|| {
+            format!(
+                "failed to assemble layered system prompt for agent '{}'",
+                agent.id
+            )
+        })?;
         let skill_tools = skill_factory
             .load_for_agent(&agent.id, &agent_config, &agent.persona)
             .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
@@ -252,6 +258,9 @@ pub(crate) async fn assemble_runtime_state(
             "agent skill tools loaded"
         );
 
+        let tool_registry = tool_factory
+            .build_registry(&agent_config.tools, &skill_tools)
+            .wrap_err_with(|| format!("failed to build tool registry for agent '{}'", agent.id))?;
         skill_factory.insert_agent_tools(agent.id.clone(), skill_tools);
         agent_configs_map.insert(
             agent.id.clone(),
@@ -261,6 +270,7 @@ pub(crate) async fn assemble_runtime_state(
                 effective_execution,
                 owner_ids: loaded.global.execution.owner_ids.clone(),
                 agent_config,
+                tool_registry,
                 persona_root: agent.persona.clone(),
                 workspace_root: agent.workspace.clone(),
                 app_base_dir: app_paths.base_dir.clone(),
@@ -268,13 +278,6 @@ pub(crate) async fn assemble_runtime_state(
             },
         );
     }
-
-    let cron_store = Arc::new(std::sync::Mutex::new(CronStore::open(
-        &app_paths.cron_db_path,
-    )?));
-
-    let mut tool_factory = deps.tool_factory_builder.create_tool_factory();
-    tool_factory.register_builtin(Box::new(CronTool::new(Arc::clone(&cron_store))));
     let directory = Arc::new(AgentDirectory::new(agent_configs_map, memories_map));
     let mut runtimes: HashMap<String, AgentRuntime> = HashMap::new();
     for (agent_id, config) in directory.iter_configs() {
@@ -288,7 +291,7 @@ pub(crate) async fn assemble_runtime_state(
             Arc::clone(&directory),
             Arc::clone(&process_manager),
         ));
-        ReactLoop::new(provider_factory, tool_factory, skill_factory, invoker)
+        ReactLoop::new(provider_factory, invoker)
     });
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
@@ -580,8 +583,7 @@ mod tests {
     #[test]
     fn agent_persona_memory_paths_uses_simpleclaw_memory_layout() {
         let persona = PathBuf::from("/tmp/persona");
-        let (memory_dir, short_term_path, long_term_path) =
-            agent_persona_memory_paths(&persona);
+        let (memory_dir, short_term_path, long_term_path) = agent_persona_memory_paths(&persona);
 
         assert_eq!(memory_dir, persona.join(".simpleclaw").join("memory"));
         assert_eq!(short_term_path, memory_dir.join("short_term_memory.db"));
