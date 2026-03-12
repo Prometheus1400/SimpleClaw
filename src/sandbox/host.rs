@@ -176,10 +176,7 @@ async fn run_manager_wrap_with_timeout(
         .map_err(|e| FrameworkError::Tool(format!("sandbox runtime join failed: {e}")))?
 }
 
-fn build_runtime_config(
-    workspace_root: &Path,
-    sandbox: &SandboxPolicy,
-) -> SandboxRuntimeConfig {
+fn build_runtime_config(workspace_root: &Path, sandbox: &SandboxPolicy) -> SandboxRuntimeConfig {
     let network = if sandbox.network_enabled {
         NetworkConfig::default()
     } else {
