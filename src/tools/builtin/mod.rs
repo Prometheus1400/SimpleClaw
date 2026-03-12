@@ -4,6 +4,7 @@ mod common;
 pub(crate) mod cron;
 pub(crate) mod edit;
 pub(crate) mod exec;
+pub(crate) mod file_access;
 mod forget;
 pub(crate) mod glob;
 pub(crate) mod grep;

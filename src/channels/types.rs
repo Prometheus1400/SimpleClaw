@@ -1,3 +1,4 @@
+use crate::approval::ApprovalDecision;
 use crate::config::GatewayChannelKind;
 
 #[derive(Debug, Clone)]
@@ -28,4 +29,12 @@ pub struct InboundMessage {
     pub mentioned_bot: bool,
     pub invoke: bool,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalResolution {
+    pub approval_id: String,
+    pub decision: ApprovalDecision,
+    pub channel_id: String,
+    pub user_id: String,
 }

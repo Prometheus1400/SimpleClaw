@@ -805,6 +805,7 @@ impl ChannelFactory for StaticChannelFactory {
     async fn create_channels(
         &self,
         _loaded: &LoadedConfig,
+        _approval_registry: Arc<crate::approval::ApprovalRegistry>,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, self.channel.clone());

@@ -6,6 +6,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::approval::{ApprovalRegistry, GatewayApprovalRequester};
 use crate::channels::InboundMessage;
 use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, TransparencyConfig};
 use crate::error::FrameworkError;
@@ -75,6 +76,7 @@ pub struct RuntimeContext {
 pub struct ToolRuntime {
     pub async_tool_runs: Arc<AsyncToolRunManager>,
     pub completion_tx: mpsc::Sender<InboundMessage>,
+    pub approval_registry: Arc<ApprovalRegistry>,
 }
 
 pub struct AgentRuntime {
@@ -164,6 +166,12 @@ impl AgentRuntime {
             user_id: inbound.user_id.clone(),
             owner_ids: self.config.owner_ids.clone(),
             async_tool_runs: Arc::clone(&context.tool_runtime.async_tool_runs),
+            approval_requester: Arc::new(GatewayApprovalRequester::new(
+                Arc::clone(&context.tool_runtime.approval_registry),
+                Arc::clone(&context.gateway),
+                inbound.clone(),
+                std::time::Duration::from_secs(300),
+            )),
             tool_registry: self.config.tool_registry.clone(),
             gateway: Some(Arc::clone(&context.gateway)),
             completion_tx: Some(context.tool_runtime.completion_tx.clone()),
@@ -441,6 +449,7 @@ mod tests {
     use async_trait::async_trait;
     use tokio::sync::{Mutex, mpsc};
 
+    use crate::approval::ApprovalRegistry;
     use crate::channels::InboundMessage;
     use crate::channels::{Channel, ChannelInbound};
     use crate::config::{
@@ -768,6 +777,7 @@ mod tests {
             tool_runtime: Arc::new(ToolRuntime {
                 async_tool_runs: Arc::new(AsyncToolRunManager::new()),
                 completion_tx,
+                approval_registry: Arc::new(ApprovalRegistry::new()),
             }),
         }
     }

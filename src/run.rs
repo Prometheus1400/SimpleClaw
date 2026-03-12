@@ -912,6 +912,7 @@ mod tests {
     use crate::agent::{
         AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
     };
+    use crate::approval::ApprovalRegistry;
     use crate::channels::{Channel, ChannelInbound, InboundMessage};
     use crate::config::{
         AgentInnerConfig, ChannelOutputMode, ExecutionDefaultsConfig, GatewayChannelKind,
@@ -1598,6 +1599,7 @@ mod tests {
             tool_runtime: Arc::new(ToolRuntime {
                 async_tool_runs: Arc::new(AsyncToolRunManager::new()),
                 completion_tx: gateway_tx.clone(),
+                approval_registry: Arc::new(ApprovalRegistry::new()),
             }),
         });
 
@@ -1723,6 +1725,7 @@ mod tests {
             tool_runtime: Arc::new(ToolRuntime {
                 async_tool_runs: Arc::new(AsyncToolRunManager::new()),
                 completion_tx: gateway_tx.clone(),
+                approval_registry: Arc::new(ApprovalRegistry::new()),
             }),
         });
         let state = RuntimeState {

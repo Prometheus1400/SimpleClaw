@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serenity::all::{
+    ButtonStyle, ComponentInteraction, CreateActionRow, CreateButton, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, Interaction,
+};
 use serenity::builder::EditMessage;
 use serenity::http::Http;
 use serenity::model::channel::Message as DiscordMessage;
@@ -12,17 +16,22 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
-use crate::channels::{Channel, ChannelInbound};
+use crate::approval::{ApprovalDecision, ApprovalRegistry, PendingApprovalRequest};
+use crate::channels::{ApprovalResolution, Channel, ChannelInbound};
 use crate::config::ChannelConfig;
 use crate::error::FrameworkError;
 
 pub struct DiscordChannel {
     http: Arc<Http>,
     inbound_rx: Mutex<mpsc::Receiver<ChannelInbound>>,
+    approval_rx: Mutex<mpsc::Receiver<ApprovalResolution>>,
 }
 
 impl DiscordChannel {
-    pub async fn from_config(config: &ChannelConfig) -> Result<Self, FrameworkError> {
+    pub async fn from_config(
+        config: &ChannelConfig,
+        approval_registry: Arc<ApprovalRegistry>,
+    ) -> Result<Self, FrameworkError> {
         let token = match config.token.clone() {
             Some(token)
                 if token
@@ -42,13 +51,17 @@ impl DiscordChannel {
         };
 
         let (inbound_tx, inbound_rx) = mpsc::channel(1_024);
+        let (approval_tx, approval_rx) = mpsc::channel(1_024);
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
-            | GatewayIntents::MESSAGE_CONTENT;
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
         let mut client = Client::builder(token.clone(), intents)
             .event_handler(DiscordHandler {
                 inbound_tx,
+                approval_tx,
+                approval_registry,
                 bot_user_id: Arc::new(RwLock::new(None)),
             })
             .await
@@ -72,12 +85,15 @@ impl DiscordChannel {
         Ok(Self {
             http,
             inbound_rx: Mutex::new(inbound_rx),
+            approval_rx: Mutex::new(approval_rx),
         })
     }
 }
 
 struct DiscordHandler {
     inbound_tx: mpsc::Sender<ChannelInbound>,
+    approval_tx: mpsc::Sender<ApprovalResolution>,
+    approval_registry: Arc<ApprovalRegistry>,
     bot_user_id: Arc<RwLock<Option<u64>>>,
 }
 
@@ -117,6 +133,106 @@ impl EventHandler for DiscordHandler {
             tracing::warn!(status = "dropped", error_kind = "queue_closed", error = %err, "discord inbound queue closed");
         }
     }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let Interaction::Component(component) = interaction else {
+            return;
+        };
+        let Some((approval_id, decision)) = parse_approval_custom_id(&component) else {
+            return;
+        };
+        let actor_user_id = component.user.id.get().to_string();
+        let pending = self.approval_registry.pending_request(&approval_id).await;
+
+        match evaluate_approval_interaction(
+            pending,
+            actor_user_id.clone(),
+            component.channel_id.get().to_string(),
+            approval_id,
+            decision,
+        ) {
+            ApprovalInteractionResult::Inactive { message } => {
+                if let Err(err) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                {
+                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord inactive approval interaction ack failed");
+                }
+            }
+            ApprovalInteractionResult::Unauthorized {
+                message,
+                approval_id,
+                channel_id,
+                user_id,
+            } => {
+                tracing::warn!(
+                    status = "ignored",
+                    reason = "requesting_user_mismatch",
+                    approval_id,
+                    channel_id,
+                    user_id,
+                    "discord approval interaction ignored"
+                );
+                if let Err(err) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                {
+                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord unauthorized approval interaction ack failed");
+                }
+            }
+            ApprovalInteractionResult::Authorized {
+                resolution,
+                success_message,
+            } => {
+                if let Err(err) = self.approval_tx.send(resolution).await {
+                    tracing::warn!(status = "dropped", error_kind = "approval_queue_closed", error = %err, "discord approval queue closed");
+                    if let Err(ack_err) = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content(
+                                        "Failed to record the approval response. Please try again.",
+                                    )
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await
+                    {
+                        tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %ack_err, "discord approval queue failure ack failed");
+                    }
+                    return;
+                }
+                if let Err(err) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new()
+                                .content(success_message)
+                                .components(Vec::new()),
+                        ),
+                    )
+                    .await
+                {
+                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord approval interaction ack failed");
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -127,6 +243,10 @@ impl Channel for DiscordChannel {
 
     fn message_char_limit(&self) -> Option<usize> {
         Some(2_000)
+    }
+
+    fn supports_approval_resolution(&self) -> bool {
+        true
     }
 
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
@@ -153,6 +273,32 @@ impl Channel for DiscordChannel {
             .map_err(|e| FrameworkError::Config(format!("discord send failed: {e}")))?;
         tracing::debug!(status = "completed", message_id = %message.id.get(), "discord send");
         Ok(Some(message.id.get().to_string()))
+    }
+
+    async fn send_approval_request(
+        &self,
+        channel_id: &str,
+        request: &PendingApprovalRequest,
+    ) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        let message = CreateMessage::new()
+            .content(render_approval_request(request))
+            .components(vec![CreateActionRow::Buttons(vec![
+                CreateButton::new(format!(
+                    "simpleclaw:approval:{}:approve",
+                    request.approval_id
+                ))
+                .label("Approve")
+                .style(ButtonStyle::Success),
+                CreateButton::new(format!("simpleclaw:approval:{}:deny", request.approval_id))
+                    .label("Deny")
+                    .style(ButtonStyle::Danger),
+            ])]);
+        channel_id
+            .send_message(&self.http, message)
+            .await
+            .map_err(|e| FrameworkError::Config(format!("discord approval send failed: {e}")))?;
+        Ok(())
     }
 
     async fn edit_message(
@@ -225,6 +371,180 @@ impl Channel for DiscordChannel {
         rx.recv()
             .await
             .ok_or_else(|| FrameworkError::Config("discord inbound channel closed".to_owned()))
+    }
+
+    async fn listen_for_approval(&self) -> Result<ApprovalResolution, FrameworkError> {
+        let mut rx = self.approval_rx.lock().await;
+        rx.recv()
+            .await
+            .ok_or_else(|| FrameworkError::Config("discord approval channel closed".to_owned()))
+    }
+}
+
+fn render_approval_request(request: &PendingApprovalRequest) -> String {
+    format!(
+        "Approval required.\nRequesting user: {}\nTool: {}\nReason: {}\nAction: {}\nCapability: {}\nExecution: {}\nDiagnostic: {}\nOnly the requesting user may approve or deny this request.",
+        request.requesting_user_id,
+        request.tool_name,
+        request.reason,
+        request.action_summary,
+        request.capability,
+        request.execution_kind,
+        request.diagnostic
+    )
+}
+
+enum ApprovalInteractionResult {
+    Inactive {
+        message: &'static str,
+    },
+    Unauthorized {
+        message: &'static str,
+        approval_id: String,
+        channel_id: String,
+        user_id: String,
+    },
+    Authorized {
+        resolution: ApprovalResolution,
+        success_message: &'static str,
+    },
+}
+
+fn evaluate_approval_interaction(
+    pending: Option<PendingApprovalRequest>,
+    actor_user_id: String,
+    channel_id: String,
+    approval_id: String,
+    decision: ApprovalDecision,
+) -> ApprovalInteractionResult {
+    let Some(request) = pending else {
+        return ApprovalInteractionResult::Inactive {
+            message: "This approval request is no longer active.",
+        };
+    };
+
+    if request.requesting_user_id != actor_user_id {
+        return ApprovalInteractionResult::Unauthorized {
+            message: "Only the requesting user can approve or deny this request.",
+            approval_id,
+            channel_id,
+            user_id: actor_user_id,
+        };
+    }
+
+    let success_message = match decision {
+        ApprovalDecision::Approved => "Approved.",
+        ApprovalDecision::Denied => "Denied.",
+        ApprovalDecision::TimedOut => "Approval timed out.",
+    };
+    ApprovalInteractionResult::Authorized {
+        resolution: ApprovalResolution {
+            approval_id,
+            decision,
+            channel_id,
+            user_id: actor_user_id,
+        },
+        success_message,
+    }
+}
+
+fn parse_approval_custom_id(
+    component: &ComponentInteraction,
+) -> Option<(String, ApprovalDecision)> {
+    let mut parts = component.data.custom_id.split(':');
+    let prefix = parts.next()?;
+    let kind = parts.next()?;
+    let approval_id = parts.next()?.to_owned();
+    let decision = parts.next()?;
+    if prefix != "simpleclaw" || kind != "approval" || parts.next().is_some() {
+        return None;
+    }
+    let decision = match decision {
+        "approve" => ApprovalDecision::Approved,
+        "deny" => ApprovalDecision::Denied,
+        _ => return None,
+    };
+    Some((approval_id, decision))
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::{ApprovalInteractionResult, evaluate_approval_interaction};
+    use crate::approval::{ApprovalDecision, PendingApprovalRequest};
+
+    fn pending_request() -> PendingApprovalRequest {
+        PendingApprovalRequest {
+            approval_id: "approval-1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            session_id: "sess-1".to_owned(),
+            requesting_user_id: "user-1".to_owned(),
+            tool_name: "read".to_owned(),
+            execution_kind: "preflight_escalation".to_owned(),
+            capability: "read".to_owned(),
+            reason: "outside sandbox".to_owned(),
+            action_summary: "/tmp/secret.txt".to_owned(),
+            diagnostic: "blocked".to_owned(),
+        }
+    }
+
+    #[test]
+    fn approval_interaction_rejects_non_requesting_user() {
+        let outcome = evaluate_approval_interaction(
+            Some(pending_request()),
+            "user-2".to_owned(),
+            "chan-1".to_owned(),
+            "approval-1".to_owned(),
+            ApprovalDecision::Approved,
+        );
+
+        match outcome {
+            ApprovalInteractionResult::Unauthorized { approval_id, user_id, .. } => {
+                assert_eq!(approval_id, "approval-1");
+                assert_eq!(user_id, "user-2");
+            }
+            _ => panic!("expected unauthorized interaction"),
+        }
+    }
+
+    #[test]
+    fn approval_interaction_accepts_requesting_user() {
+        let outcome = evaluate_approval_interaction(
+            Some(pending_request()),
+            "user-1".to_owned(),
+            "chan-1".to_owned(),
+            "approval-1".to_owned(),
+            ApprovalDecision::Denied,
+        );
+
+        match outcome {
+            ApprovalInteractionResult::Authorized {
+                resolution,
+                success_message,
+            } => {
+                assert_eq!(resolution.approval_id, "approval-1");
+                assert_eq!(resolution.user_id, "user-1");
+                assert_eq!(success_message, "Denied.");
+            }
+            _ => panic!("expected authorized interaction"),
+        }
+    }
+
+    #[test]
+    fn approval_interaction_marks_missing_request_inactive() {
+        let outcome = evaluate_approval_interaction(
+            None,
+            "user-1".to_owned(),
+            "chan-1".to_owned(),
+            "approval-1".to_owned(),
+            ApprovalDecision::Approved,
+        );
+
+        match outcome {
+            ApprovalInteractionResult::Inactive { message } => {
+                assert_eq!(message, "This approval request is no longer active.");
+            }
+            _ => panic!("expected inactive interaction"),
+        }
     }
 }
 

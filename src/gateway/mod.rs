@@ -6,7 +6,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
-use crate::channels::{Channel, InboundMessage};
+use crate::approval::{ApprovalRegistry, PendingApprovalRequest};
+use crate::channels::{ApprovalResolution, Channel, InboundMessage};
 use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
 use crate::error::FrameworkError;
 
@@ -52,18 +53,24 @@ impl Gateway {
         }
     }
 
-    pub fn start(&self, inbound_tx: mpsc::Sender<InboundMessage>) -> GatewayListeners {
-        let mut tasks = Vec::with_capacity(self.channels.len());
+    pub fn start(
+        &self,
+        inbound_tx: mpsc::Sender<InboundMessage>,
+        approvals: Arc<ApprovalRegistry>,
+    ) -> GatewayListeners {
+        let mut tasks = Vec::with_capacity(self.channels.len() * 2);
         for (kind, channel) in &self.channels {
             let kind = *kind;
+            let supports_approval_resolution = channel.supports_approval_resolution();
             let channel = Arc::clone(channel);
+            let inbound_channel = Arc::clone(&channel);
             let inbound_tx = inbound_tx.clone();
             let inbound_policy = self.inbound_policy.clone();
             let listener_span = info_span!("gateway.listen");
             tasks.push(tokio::spawn(
                 async move {
                     loop {
-                        match channel.listen().await {
+                        match inbound_channel.listen().await {
                             Ok(inbound) => {
                                 let Some(inbound) =
                                     router::route_inbound(kind, inbound, &inbound_policy)
@@ -106,6 +113,70 @@ impl Gateway {
                 }
                 .instrument(listener_span),
             ));
+
+            if supports_approval_resolution {
+                let channel = Arc::clone(&channel);
+                let approvals = Arc::clone(&approvals);
+                let listener_span = info_span!("gateway.listen.approval");
+                tasks.push(tokio::spawn(
+                    async move {
+                        loop {
+                            match channel.listen_for_approval().await {
+                                Ok(ApprovalResolution {
+                                    approval_id,
+                                    decision,
+                                    channel_id,
+                                    user_id,
+                                }) => {
+                                    let resolved =
+                                        approvals.resolve(&approval_id, &user_id, decision).await;
+                                    if !resolved {
+                                        let known =
+                                            approvals.pending_request(&approval_id).await.is_some();
+                                        if known {
+                                            tracing::warn!(
+                                                status = "ignored",
+                                                reason = "requesting_user_mismatch",
+                                                approval_id,
+                                                channel_id,
+                                                user_id,
+                                                "approval resolution ignored"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                status = "dropped",
+                                                reason = "unknown_approval_id",
+                                                approval_id,
+                                                channel_id,
+                                                user_id,
+                                                "approval resolution dropped"
+                                            );
+                                        }
+                                    } else {
+                                        tracing::debug!(
+                                            status = "resolved",
+                                            approval_id,
+                                            channel_id,
+                                            user_id,
+                                            "approval resolution accepted"
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::error!(
+                                        status = "retrying",
+                                        error_kind = "approval_listen",
+                                        error = %err,
+                                        "approval listener failed"
+                                    );
+                                    sleep(Duration::from_secs(1)).await;
+                                }
+                            }
+                        }
+                    }
+                    .instrument(listener_span),
+                ));
+            }
         }
 
         GatewayListeners { tasks }
@@ -118,6 +189,17 @@ impl Gateway {
     ) -> Result<(), FrameworkError> {
         let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
         channel.send_message(&inbound.channel_id, content).await
+    }
+
+    pub async fn send_approval_request(
+        &self,
+        inbound: &InboundMessage,
+        request: &PendingApprovalRequest,
+    ) -> Result<(), FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel
+            .send_approval_request(&inbound.channel_id, request)
+            .await
     }
 
     pub async fn send_message_with_id(
@@ -194,6 +276,8 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::Duration;
 
+    use crate::approval::ApprovalRegistry;
+
     use super::Gateway;
     use crate::channels::{Channel, ChannelInbound};
     use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
@@ -257,7 +341,7 @@ mod tests {
             HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
             RoutingConfig::default(),
         );
-        let _listeners = gateway.start(tx);
+        let _listeners = gateway.start(tx, Arc::new(ApprovalRegistry::new()));
         let next = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("gateway should emit normalized inbound")
@@ -323,7 +407,7 @@ mod tests {
             HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
             RoutingConfig::default(),
         );
-        let _listeners = gateway.start(mpsc::channel(1).0);
+        let _listeners = gateway.start(mpsc::channel(1).0, Arc::new(ApprovalRegistry::new()));
         let routed = crate::gateway::router::route_inbound(
             GatewayChannelKind::Discord,
             inbound,

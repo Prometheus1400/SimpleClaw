@@ -5,11 +5,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::EditToolConfig;
-use crate::error::FrameworkError;
+use crate::error::{FrameworkError, SandboxCapability};
 use crate::sandbox::{RunWasmRequest, WasmSandbox};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
-use super::read::{host_path_to_guest_path, resolve_path_for_read};
+use super::file_access::{
+    FileToolRoute, classify_file_tool_access, classify_wasm_tool_error, resolve_path_for_read,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditTool {
@@ -20,7 +22,7 @@ pub struct EditTool {
 pub struct EditPlan {
     pub args: EditArgs,
     pub host_path: std::path::PathBuf,
-    pub guest_path: Option<String>,
+    pub route: FileToolRoute,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -87,12 +89,17 @@ impl EditTool {
             ));
         }
         let host_path = resolve_path_for_read(&args.file_path, &ctx.workspace_root)?;
-        let guest_path =
-            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        let route = classify_file_tool_access(
+            &host_path,
+            &ctx.workspace_root,
+            &ctx.persona_root,
+            &self.config.sandbox,
+            SandboxCapability::Write,
+        )?;
         Ok(EditPlan {
             args,
             host_path,
-            guest_path,
+            route,
         })
     }
 
@@ -111,11 +118,11 @@ impl EditTool {
         plan: EditPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
-        let guest_path = plan.guest_path.ok_or_else(|| {
-            FrameworkError::Tool("edit path is not representable inside wasm sandbox".to_owned())
-        })?;
         let stdin = serde_json::to_vec(&serde_json::json!({
-            "filePath": guest_path,
+            "filePath": plan
+                .route
+                .guest_path()
+                .ok_or_else(|| FrameworkError::Tool("edit plan is not sandbox-runnable".to_owned()))?,
             "oldString": plan.args.old_string,
             "newString": plan.args.new_string,
             "replaceAll": plan.args.replace_all,
@@ -125,6 +132,7 @@ impl EditTool {
             .run(RunWasmRequest {
                 workspace_root: ctx.workspace_root.clone(),
                 persona_root: ctx.persona_root.clone(),
+                preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "edit_tool.wasm",
                 args: Vec::new(),
                 stdin,
@@ -132,11 +140,13 @@ impl EditTool {
             })
             .await?;
         if output.exit_code != 0 {
-            return Err(FrameworkError::Tool(format!(
-                "edit tool failed: exit_code={} stderr={}",
+            return Err(classify_wasm_tool_error(
+                "edit",
+                plan.route.guest_path().unwrap_or(""),
+                SandboxCapability::Write,
                 output.exit_code,
-                output.stderr.trim()
-            )));
+                output.stderr.trim(),
+            ));
         }
         Ok(ToolRunOutput::plain(output.stdout))
     }

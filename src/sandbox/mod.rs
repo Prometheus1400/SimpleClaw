@@ -17,10 +17,17 @@ pub(crate) use wasm::{
     workspace_guest_mount_path,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WasmPreopenedDir {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+}
+
 /// Request for executing a WASM guest tool.
 pub(crate) struct RunWasmRequest {
     pub workspace_root: PathBuf,
     pub persona_root: PathBuf,
+    pub preopened_dirs: Vec<WasmPreopenedDir>,
     pub artifact_name: &'static str,
     pub args: Vec<String>,
     pub stdin: Vec<u8>,

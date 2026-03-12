@@ -99,6 +99,7 @@ impl Tool for SummonTool {
                 session_id: session_id.to_owned(),
                 user_id: ctx.user_id.clone(),
                 prompt: handoff.clone(),
+                approval_requester: Arc::clone(&ctx.approval_requester),
             };
             let started = ctx
                 .async_tool_runs
@@ -127,6 +128,7 @@ impl Tool for SummonTool {
                 session_id: session_id.to_owned(),
                 user_id: ctx.user_id.clone(),
                 prompt: handoff,
+                approval_requester: Arc::clone(&ctx.approval_requester),
             })
             .await?;
         Ok(ToolExecutionOutcome::Completed(ToolRunOutput {
@@ -157,6 +159,7 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     use super::SummonTool;
+    use crate::approval::UnavailableApprovalRequester;
     use crate::config::DatabaseConfig;
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
@@ -214,6 +217,7 @@ mod tests {
             completion_tx: None,
             completion_route: None,
             allow_async_tools: true,
+            approval_requester: Arc::new(UnavailableApprovalRequester),
         }
     }
 
