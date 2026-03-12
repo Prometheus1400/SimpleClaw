@@ -1,15 +1,9 @@
 use async_trait::async_trait;
-use std::path::Path;
-use tokio::process::Command;
-use tokio::time::{Duration, timeout};
-use tracing::debug;
 
-use crate::config::{ExecToolConfig, ToolSandboxConfig};
+use crate::config::ExecToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{
-    HostSandboxCommandRequest, HostSandboxRuntime, Tool, ToolExecEnv, ToolExecutionKind,
-    ToolExecutionOutcome, ToolRunOutput, sandbox_runtime,
-};
+use crate::sandbox::{HostSandbox, RunHostCommandRequest, SpawnHostCommandRequest};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
 
@@ -122,95 +116,46 @@ impl ExecTool {
         &self,
         ctx: &ToolExecEnv,
         plan: ExecPlan,
-        runtime: &dyn HostSandboxRuntime,
+        runtime: &dyn HostSandbox,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
-        runtime
-            .run_command(
-                ctx,
-                HostSandboxCommandRequest {
-                    command: plan.command,
-                    workspace_root: plan.workspace_root,
+        if plan.background {
+            let prepared = runtime
+                .prepare_spawn(SpawnHostCommandRequest {
+                    command: plan.command.clone(),
+                    workspace_root: plan.workspace_root.clone(),
                     sandbox: self.config.sandbox.clone(),
-                    env: plan.env,
-                    timeout_seconds: self
-                        .config
-                        .timeout_seconds
-                        .unwrap_or(DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS),
-                    background: plan.background,
-                },
-            )
-            .await
+                })
+                .await?;
+            let started = ctx
+                .async_tool_runs
+                .start_prepared_process(
+                    "exec",
+                    &plan.command,
+                    prepared,
+                    &plan.env,
+                    ctx.completion_tx.clone(),
+                    ctx.completion_route.clone(),
+                )
+                .await?;
+            return Ok(ToolExecutionOutcome::AsyncStarted(started));
+        }
+
+        let output = runtime
+            .run(RunHostCommandRequest {
+                command: plan.command,
+                workspace_root: plan.workspace_root,
+                sandbox: self.config.sandbox.clone(),
+                env: plan.env,
+                timeout_seconds: self
+                    .config
+                    .timeout_seconds
+                    .unwrap_or(DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS),
+            })
+            .await?;
+        Ok(ToolExecutionOutcome::Completed(ToolRunOutput::plain(
+            command_output_to_json(output.exit_code, &output.stdout, &output.stderr).to_string(),
+        )))
     }
-}
-
-pub(crate) async fn exec_with_sandbox_runtime(
-    command: &str,
-    workspace_root: &Path,
-    sandbox: &ToolSandboxConfig,
-    timeout_seconds: u64,
-    env: &std::collections::BTreeMap<String, String>,
-) -> Result<serde_json::Value, FrameworkError> {
-    debug!(
-        status = "started",
-        tool = "exec",
-        phase = "sandbox_exec",
-        "sandbox.exec"
-    );
-    let prepared =
-        sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
-    let mut runner = Command::new("bash");
-    runner.arg("-lc").arg(prepared.wrapped_command());
-    runner.envs(env);
-    runner.current_dir(crate::tools::sandbox::normalize_workspace_root(
-        workspace_root,
-    )?);
-    runner.kill_on_drop(true);
-
-    let output_result = timeout(Duration::from_secs(timeout_seconds), runner.output()).await;
-    prepared.cleanup().await;
-    let output = match output_result {
-        Ok(Ok(output)) => {
-            debug!(
-                status = "completed",
-                tool = "exec",
-                phase = "sandbox_exec",
-                "sandbox.exec"
-            );
-            output
-        }
-        Ok(Err(e)) => {
-            debug!(
-                status = "failed",
-                tool = "exec",
-                phase = "sandbox_exec",
-                error = %e,
-                "sandbox.exec"
-            );
-            return Err(FrameworkError::Tool(format!(
-                "exec failed to start sandbox runtime: {e}"
-            )));
-        }
-        Err(_) => {
-            debug!(
-                status = "timed_out",
-                tool = "exec",
-                phase = "sandbox_exec",
-                timeout_seconds,
-                "sandbox.exec"
-            );
-            return Err(FrameworkError::Tool(format!(
-                "exec timed out after {timeout_seconds}s in sandbox runtime"
-            )));
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(command_output_to_json(
-        output.status.code().unwrap_or(-1),
-        stdout.trim(),
-        stderr.trim(),
-    ))
 }
 
 #[cfg(test)]
@@ -400,19 +345,15 @@ mod tests {
         let ToolExecutionOutcome::AsyncStarted(output) = output else {
             panic!("background exec should start async tool run");
         };
-        let parsed: Value = serde_json::from_str(&output.accepted_output())
-            .expect("exec output should be json");
+        let parsed: Value =
+            serde_json::from_str(&output.accepted_output()).expect("exec output should be json");
 
         assert_eq!(parsed["status"], "accepted");
         let run_id = parsed["runId"]
             .as_str()
             .expect("accepted response should include run id");
         let sessions = ctx.async_tool_runs.list().await;
-        assert!(
-            sessions
-                .iter()
-                .any(|snapshot| snapshot.run_id == run_id)
-        );
+        assert!(sessions.iter().any(|snapshot| snapshot.run_id == run_id));
     }
 
     #[tokio::test]

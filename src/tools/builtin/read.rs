@@ -6,13 +6,11 @@ use std::time::Duration;
 
 use crate::config::ReadToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::sandbox::{
-    normalize_workspace_root, persona_guest_mount_path, workspace_guest_mount_path,
+use crate::sandbox::{
+    RunWasmRequest, WasmSandbox, normalize_workspace_root, persona_guest_mount_path,
+    workspace_guest_mount_path,
 };
-use crate::tools::{
-    Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput, WasmGuestRequest,
-    WasmSandboxRuntime,
-};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::parse_simple_text_arg;
 
@@ -89,21 +87,20 @@ impl ReadTool {
         &self,
         ctx: &ToolExecEnv,
         plan: ReadPlan,
-        runtime: &dyn WasmSandboxRuntime,
+        runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let guest_path = plan.guest_path.ok_or_else(|| {
             FrameworkError::Tool("read path is not representable inside wasm sandbox".to_owned())
         })?;
         let output = runtime
-            .run_guest(
-                ctx,
-                WasmGuestRequest {
-                    artifact_name: "read_tool.wasm",
-                    args: vec![guest_path],
-                    stdin: Vec::new(),
-                    timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
-                },
-            )
+            .run(RunWasmRequest {
+                workspace_root: ctx.workspace_root.clone(),
+                persona_root: ctx.persona_root.clone(),
+                artifact_name: "read_tool.wasm",
+                args: vec![guest_path],
+                stdin: Vec::new(),
+                timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
+            })
             .await?;
         if output.exit_code != 0 {
             return Err(FrameworkError::Tool(format!(

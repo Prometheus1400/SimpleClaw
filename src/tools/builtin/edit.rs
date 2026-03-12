@@ -6,10 +6,8 @@ use std::time::Duration;
 
 use crate::config::EditToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{
-    Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput, WasmGuestRequest,
-    WasmSandboxRuntime,
-};
+use crate::sandbox::{RunWasmRequest, WasmSandbox};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::read::{host_path_to_guest_path, resolve_path_for_read};
 
@@ -90,7 +88,7 @@ impl EditTool {
         &self,
         ctx: &ToolExecEnv,
         plan: EditPlan,
-        runtime: &dyn WasmSandboxRuntime,
+        runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let guest_path = plan.guest_path.ok_or_else(|| {
             FrameworkError::Tool("edit path is not representable inside wasm sandbox".to_owned())
@@ -100,15 +98,14 @@ impl EditTool {
         let stdin = serde_json::to_vec(&guest_args)
             .map_err(|e| FrameworkError::Tool(format!("failed to serialize edit args: {e}")))?;
         let output = runtime
-            .run_guest(
-                ctx,
-                WasmGuestRequest {
-                    artifact_name: "edit_tool.wasm",
-                    args: Vec::new(),
-                    stdin,
-                    timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
-                },
-            )
+            .run(RunWasmRequest {
+                workspace_root: ctx.workspace_root.clone(),
+                persona_root: ctx.persona_root.clone(),
+                artifact_name: "edit_tool.wasm",
+                args: Vec::new(),
+                stdin,
+                timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(15)),
+            })
             .await?;
         if output.exit_code != 0 {
             return Err(FrameworkError::Tool(format!(

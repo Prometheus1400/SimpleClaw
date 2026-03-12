@@ -1,7 +1,7 @@
+use async_trait::async_trait;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::task::spawn_blocking;
@@ -12,6 +12,7 @@ use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 use crate::error::FrameworkError;
+use crate::sandbox::{RunWasmRequest, WasmRunResult, WasmSandbox};
 
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
@@ -19,33 +20,29 @@ const WASM_PERSONA_MOUNT: &str = "/persona";
 const WASM_TMP_MOUNT: &str = "/tmp";
 static WASM_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-pub struct WasmGuestOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
+pub(crate) struct DefaultWasmSandbox;
+
+#[async_trait]
+impl WasmSandbox for DefaultWasmSandbox {
+    async fn run(&self, request: RunWasmRequest) -> Result<WasmRunResult, FrameworkError> {
+        run_wasm_guest(request).await
+    }
 }
 
-pub async fn run_wasm_guest(
-    workspace_root: &Path,
-    persona_root: &Path,
-    artifact_name: &str,
-    args: &[String],
-    stdin: &[u8],
-    time_limit: Duration,
-) -> Result<WasmGuestOutput, FrameworkError> {
-    let workspace = normalize_workspace_root(workspace_root)?;
-    let persona = normalize_workspace_root(persona_root)?;
-    let artifact_path = resolve_guest_artifact_path(artifact_name, &workspace)?;
-    let args = args.to_vec();
-    let stdin = stdin.to_vec();
+async fn run_wasm_guest(request: RunWasmRequest) -> Result<WasmRunResult, FrameworkError> {
+    let workspace = normalize_workspace_root(&request.workspace_root)?;
+    let persona = normalize_workspace_root(&request.persona_root)?;
+    let artifact_path = resolve_guest_artifact_path(request.artifact_name, &workspace)?;
+    let args = request.args;
+    let stdin = request.stdin;
 
     let join = spawn_blocking(move || {
         run_wasm_guest_blocking(&workspace, &persona, &artifact_path, &args, &stdin)
     });
 
-    let joined = timeout(time_limit, join)
-        .await
-        .map_err(|_| FrameworkError::Tool(format!("wasm guest timed out after {time_limit:?}")))?;
+    let joined = timeout(request.timeout, join).await.map_err(|_| {
+        FrameworkError::Tool(format!("wasm guest timed out after {:?}", request.timeout))
+    })?;
     joined.map_err(|e| FrameworkError::Tool(format!("wasm guest failed to join: {e}")))?
 }
 
@@ -55,7 +52,7 @@ fn run_wasm_guest_blocking(
     artifact_path: &Path,
     args: &[String],
     stdin: &[u8],
-) -> Result<WasmGuestOutput, FrameworkError> {
+) -> Result<WasmRunResult, FrameworkError> {
     let isolated_tmp = IsolatedTmpDir::create()?;
 
     let engine = Engine::default();
@@ -149,14 +146,14 @@ fn run_wasm_guest_blocking(
 
     let stdout = String::from_utf8_lossy(&stdout_pipe.contents()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).into_owned();
-    Ok(WasmGuestOutput {
+    Ok(WasmRunResult {
         stdout,
         stderr,
         exit_code,
     })
 }
 
-pub fn normalize_workspace_root(workspace_root: &Path) -> Result<PathBuf, FrameworkError> {
+pub(crate) fn normalize_workspace_root(workspace_root: &Path) -> Result<PathBuf, FrameworkError> {
     if workspace_root.is_absolute() {
         return Ok(workspace_root.to_path_buf());
     }
@@ -164,11 +161,11 @@ pub fn normalize_workspace_root(workspace_root: &Path) -> Result<PathBuf, Framew
     Ok(cwd.join(workspace_root))
 }
 
-pub fn workspace_guest_mount_path() -> &'static str {
+pub(crate) fn workspace_guest_mount_path() -> &'static str {
     WASM_WORKSPACE_MOUNT
 }
 
-pub fn persona_guest_mount_path() -> &'static str {
+pub(crate) fn persona_guest_mount_path() -> &'static str {
     WASM_PERSONA_MOUNT
 }
 

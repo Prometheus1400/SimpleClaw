@@ -1,44 +1,97 @@
+use async_trait::async_trait;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use sandbox_runtime::{FilesystemConfig, NetworkConfig, SandboxManager, SandboxRuntimeConfig};
+use tokio::process::Command;
 use tokio::runtime::Builder;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
 
 use crate::config::ToolSandboxConfig;
 use crate::error::FrameworkError;
+use crate::sandbox::{
+    HostRunResult, HostSandbox, PreparedHostCommand, RunHostCommandRequest,
+    SpawnHostCommandRequest, normalize_workspace_root,
+};
 
 const SANDBOX_INIT_TIMEOUT_SECS: u64 = 15;
 const SANDBOX_WRAP_TIMEOUT_SECS: u64 = 15;
 
-pub(crate) struct PreparedSandboxCommand {
-    wrapped_command: String,
-    manager: Arc<SandboxManager>,
+pub(crate) struct DefaultHostSandbox;
+
+#[async_trait]
+impl HostSandbox for DefaultHostSandbox {
+    async fn run(&self, request: RunHostCommandRequest) -> Result<HostRunResult, FrameworkError> {
+        debug!(status = "started", phase = "host_run", "sandbox.host");
+        let prepared =
+            prepare_command_for_exec(&request.command, &request.workspace_root, &request.sandbox)
+                .await?;
+        let mut runner = Command::new("bash");
+        runner.arg("-lc").arg(prepared.wrapped_command());
+        runner.envs(&request.env);
+        runner.current_dir(prepared.normalized_workspace_root());
+        runner.kill_on_drop(true);
+
+        let output_result = timeout(
+            Duration::from_secs(request.timeout_seconds),
+            runner.output(),
+        )
+        .await;
+        prepared.cleanup().await;
+        let output = match output_result {
+            Ok(Ok(output)) => {
+                debug!(status = "completed", phase = "host_run", "sandbox.host");
+                output
+            }
+            Ok(Err(e)) => {
+                debug!(
+                    status = "failed",
+                    phase = "host_run",
+                    error = %e,
+                    "sandbox.host"
+                );
+                return Err(FrameworkError::Tool(format!(
+                    "exec failed to start sandbox runtime: {e}"
+                )));
+            }
+            Err(_) => {
+                debug!(
+                    status = "timed_out",
+                    phase = "host_run",
+                    timeout_seconds = request.timeout_seconds,
+                    "sandbox.host"
+                );
+                return Err(FrameworkError::Tool(format!(
+                    "exec timed out after {}s in sandbox runtime",
+                    request.timeout_seconds
+                )));
+            }
+        };
+
+        Ok(HostRunResult {
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            exit_code: output.status.code().unwrap_or(-1),
+        })
+    }
+
+    async fn prepare_spawn(
+        &self,
+        request: SpawnHostCommandRequest,
+    ) -> Result<PreparedHostCommand, FrameworkError> {
+        prepare_command_for_exec(&request.command, &request.workspace_root, &request.sandbox).await
+    }
 }
 
-impl PreparedSandboxCommand {
-    pub(crate) fn wrapped_command(&self) -> &str {
-        &self.wrapped_command
-    }
-
-    pub(crate) fn into_parts(self) -> (String, Arc<SandboxManager>) {
-        (self.wrapped_command, self.manager)
-    }
-
-    pub(crate) async fn cleanup(self) {
-        self.manager.reset().await;
-    }
-}
-
-pub async fn prepare_command_for_exec(
+async fn prepare_command_for_exec(
     user_command: &str,
     workspace_root: &Path,
     sandbox: &ToolSandboxConfig,
-) -> Result<PreparedSandboxCommand, FrameworkError> {
-    let workspace = crate::tools::sandbox::normalize_workspace_root(workspace_root)?;
+) -> Result<PreparedHostCommand, FrameworkError> {
+    let workspace = normalize_workspace_root(workspace_root)?;
     let runtime_cfg = build_runtime_config(&workspace, sandbox);
     let manager = Arc::new(SandboxManager::new());
     let init_started = Instant::now();
@@ -67,8 +120,9 @@ pub async fn prepare_command_for_exec(
         "sandbox.wrap"
     );
 
-    Ok(PreparedSandboxCommand {
+    Ok(PreparedHostCommand {
         wrapped_command: wrapped,
+        normalized_workspace_root: workspace,
         manager,
     })
 }
