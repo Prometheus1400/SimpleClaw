@@ -5,7 +5,7 @@ SimpleClaw is a Rust multi-agent runtime that connects channel events (currently
 - layered prompt assembly
 - short-term and long-term SQLite memory
 - provider-native or XML tool calling
-- tool sandbox controls (`read`/`edit` WASM, `exec` host or sandbox-runtime-rs)
+- tool sandbox controls (`read`/`edit`/`glob`/`grep`/`list`/`web_fetch`/`web_search` WASM, `exec` host or sandbox-runtime-rs)
 - per-session concurrency control
 
 This README is an implementation-level architecture deep dive, focused on message lifecycle.
@@ -264,10 +264,10 @@ cargo run -- agent memory --agent <id> --memory both --limit 20
 
 ## Sandbox Artifacts
 
-Build WASM guests for sandboxed `read`/`edit`:
+Build WASM guests for sandboxed filesystem tools:
 
 ```bash
-cargo build --package read_tool --package edit_tool --target wasm32-wasip1 --release
+cargo build --package read_tool --package edit_tool --package glob_tool --package grep_tool --package list_tool --package web_fetch_tool --package web_search_tool --target wasm32-wasip1 --release
 ```
 
 ## Linux Integration Tests (Podman)

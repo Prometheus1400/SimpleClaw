@@ -39,9 +39,10 @@ pub use routing::RoutingConfig;
 #[allow(unused_imports)]
 pub use tools::{
     BackgroundToolConfig, ClockToolConfig, CronToolConfig, EditToolConfig, ExecToolConfig,
-    ForgetToolConfig, MemorizeToolConfig, MemoryToolConfig, ReactToolConfig, ReadToolConfig,
-    SkillsToolConfig, SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig,
-    WebFetchToolConfig, WebSearchProvider, WebSearchToolConfig, WebSearchToolRuntimeConfig,
+    ForgetToolConfig, GlobToolConfig, GrepToolConfig, ListToolConfig, MemorizeToolConfig,
+    MemoryToolConfig, ReactToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
+    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchProvider,
+    WebSearchToolConfig, WebSearchToolRuntimeConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -630,6 +631,9 @@ channels:
                 "web_fetch".to_owned(),
                 "read".to_owned(),
                 "edit".to_owned(),
+                "glob".to_owned(),
+                "grep".to_owned(),
+                "list".to_owned(),
                 "exec".to_owned(),
                 "background".to_owned(),
             ]
@@ -734,6 +738,7 @@ skills:
                             provider: WebSearchProvider::Duckduckgo,
                             api_key: None,
                             timeout_seconds: Some(0),
+                            sandbox: ToolSandboxConfig::default(),
                         }),
                         ..ToolsConfig::default()
                     },
@@ -762,6 +767,7 @@ skills:
                             provider: WebSearchProvider::Brave,
                             api_key: None,
                             timeout_seconds: Some(10),
+                            sandbox: ToolSandboxConfig::default(),
                         }),
                         ..ToolsConfig::default()
                     },
@@ -790,6 +796,7 @@ skills:
                             provider: WebSearchProvider::Duckduckgo,
                             api_key: Some(Secret::from_name("resolved-key")),
                             timeout_seconds: Some(10),
+                            sandbox: ToolSandboxConfig::default(),
                         }),
                         ..ToolsConfig::default()
                     },
@@ -844,6 +851,7 @@ skills:
                             owner_restricted: true,
                             timeout_seconds: Some(10),
                             max_chars: Some(0),
+                            sandbox: ToolSandboxConfig::default(),
                         }),
                         ..ToolsConfig::default()
                     },
@@ -918,6 +926,7 @@ routing:
             provider: WebSearchProvider::Brave,
             api_key: Some(Secret::from_name(web_search_env)),
             timeout_seconds: Some(20),
+            sandbox: ToolSandboxConfig::default(),
         });
 
         global

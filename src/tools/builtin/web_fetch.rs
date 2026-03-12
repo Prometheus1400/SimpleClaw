@@ -6,7 +6,8 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::WebFetchToolConfig;
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
+use crate::sandbox::{RunWasmRequest, WasmSandbox};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::parse_simple_text_arg;
 
@@ -16,6 +17,13 @@ const DEFAULT_WEB_FETCH_MAX_CHARS: usize = 8_000;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebFetchTool {
     config: WebFetchToolConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebFetchPlan {
+    pub url: String,
+    pub timeout_seconds: u64,
+    pub max_chars: usize,
 }
 
 #[async_trait]
@@ -39,12 +47,25 @@ impl Tool for WebFetchTool {
         Ok(())
     }
 
+    fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
+        &[ToolExecutionKind::Direct, ToolExecutionKind::WasmSandbox]
+    }
+
     async fn execute(
         &self,
         _ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
+        let plan = self.plan(args_json)?;
+        self.execute_direct(plan)
+            .await
+            .map(ToolExecutionOutcome::Completed)
+    }
+}
+
+impl WebFetchTool {
+    pub fn plan(&self, args_json: &str) -> Result<WebFetchPlan, FrameworkError> {
         let url = parse_simple_text_arg(args_json);
         let timeout_seconds = self
             .config
@@ -55,9 +76,48 @@ impl Tool for WebFetchTool {
             .max_chars
             .map(|value| value as usize)
             .unwrap_or(DEFAULT_WEB_FETCH_MAX_CHARS);
-        fetch_url_markdown(&url, timeout_seconds, max_chars)
-            .await
-            .map(ToolExecutionOutcome::completed)
+        Ok(WebFetchPlan {
+            url,
+            timeout_seconds,
+            max_chars,
+        })
+    }
+
+    pub async fn execute_direct(&self, plan: WebFetchPlan) -> Result<ToolRunOutput, FrameworkError> {
+        let output = fetch_url_markdown(&plan.url, plan.timeout_seconds, plan.max_chars).await?;
+        Ok(ToolRunOutput::plain(output))
+    }
+
+    pub async fn execute_wasm(
+        &self,
+        ctx: &ToolExecEnv,
+        plan: WebFetchPlan,
+        runtime: &dyn WasmSandbox,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        let stdin = serde_json::to_vec(&serde_json::json!({
+            "url": plan.url,
+            "timeout_seconds": plan.timeout_seconds,
+            "max_chars": plan.max_chars,
+        }))
+        .map_err(|e| FrameworkError::Tool(format!("failed to serialize web_fetch args: {e}")))?;
+        let output = runtime
+            .run(RunWasmRequest {
+                workspace_root: ctx.workspace_root.clone(),
+                persona_root: ctx.persona_root.clone(),
+                artifact_name: "web_fetch_tool.wasm",
+                args: Vec::new(),
+                stdin,
+                timeout: std::time::Duration::from_secs(plan.timeout_seconds),
+            })
+            .await?;
+        if output.exit_code != 0 {
+            return Err(FrameworkError::Tool(format!(
+                "web_fetch tool failed: exit_code={} stderr={}",
+                output.exit_code,
+                output.stderr.trim()
+            )));
+        }
+        Ok(ToolRunOutput::plain(output.stdout))
     }
 }
 

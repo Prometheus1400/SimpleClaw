@@ -6,16 +6,17 @@ use crate::sandbox::{HostSandbox, RunHostCommandRequest, SandboxPolicy, SpawnHos
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
+use super::read::resolve_path_for_read;
 
 const DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS: u64 = 120;
 const EXEC_DESCRIPTION_WITH_BG: &str =
-    "Run local shell commands using JSON: {command, background?}. Returns JSON string.";
+    "Run local shell commands using JSON: {command, workdir?, background?}. Returns JSON string.";
 const EXEC_DESCRIPTION_SYNC_ONLY: &str =
-    "Run local shell commands using JSON: {command}. Returns JSON string.";
+    "Run local shell commands using JSON: {command, workdir?}. Returns JSON string.";
 const EXEC_SCHEMA_WITH_BG: &str =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
+    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
 const EXEC_SCHEMA_SYNC_ONLY: &str =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}";
+    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"}},\"required\":[\"command\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecTool {
@@ -28,7 +29,7 @@ pub struct ExecPlan {
     pub background: bool,
     pub timeout_seconds: u64,
     pub env: std::collections::BTreeMap<String, String>,
-    pub workspace_root: std::path::PathBuf,
+    pub workdir: std::path::PathBuf,
 }
 
 #[async_trait]
@@ -103,12 +104,23 @@ impl ExecTool {
                 "background async tools are not allowed in delegated runs".to_owned(),
             ));
         }
+        let workdir = if let Some(workdir) = args.workdir.as_deref() {
+            resolve_path_for_read(workdir, &ctx.workspace_root)?
+        } else {
+            ctx.workspace_root.clone()
+        };
+        if !workdir.is_dir() {
+            return Err(FrameworkError::Tool(format!(
+                "exec workdir must be a directory: {}",
+                workdir.display()
+            )));
+        }
         Ok(ExecPlan {
             command: args.command.trim().to_owned(),
             background: args.background,
             timeout_seconds: self.config.timeout_seconds.unwrap_or(20),
             env: ctx.env.clone(),
-            workspace_root: ctx.workspace_root.clone(),
+            workdir,
         })
     }
 
@@ -126,7 +138,7 @@ impl ExecTool {
                     &plan.command,
                     &ctx.agent_id,
                     session_id,
-                    Some(&plan.workspace_root),
+                    Some(&plan.workdir),
                     &plan.env,
                     ctx.completion_tx.clone(),
                     ctx.completion_route.clone(),
@@ -137,7 +149,7 @@ impl ExecTool {
 
         let result = exec_shell_command(
             &plan.command,
-            Some(&plan.workspace_root),
+            Some(&plan.workdir),
             &plan.env,
             plan.timeout_seconds,
         )
@@ -155,10 +167,10 @@ impl ExecTool {
         runtime: &dyn HostSandbox,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         if plan.background {
-            let prepared = runtime
+                let prepared = runtime
                 .prepare_spawn(SpawnHostCommandRequest {
                     command: plan.command.clone(),
-                    workspace_root: plan.workspace_root.clone(),
+                    workspace_root: plan.workdir.clone(),
                     policy: self.sandbox_policy(),
                 })
                 .await?;
@@ -181,7 +193,7 @@ impl ExecTool {
         let output = runtime
             .run(RunHostCommandRequest {
                 command: plan.command,
-                workspace_root: plan.workspace_root,
+                workspace_root: plan.workdir,
                 policy: self.sandbox_policy(),
                 env: plan.env,
                 timeout_seconds: self
@@ -364,6 +376,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_runs_in_overridden_workdir() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({ "sandbox": { "enabled": false } }))
+            .expect("config should apply");
+        let ctx = test_ctx().await;
+        let nested = ctx.workspace_root.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested directory should exist");
+
+        let output = tool
+            .execute(
+                &ctx,
+                &serde_json::json!({
+                    "command": "pwd",
+                    "workdir": nested.to_string_lossy(),
+                })
+                .to_string(),
+                "sess-1",
+            )
+            .await
+            .expect("foreground exec should succeed");
+        let ToolExecutionOutcome::Completed(output) = output else {
+            panic!("foreground exec should complete immediately");
+        };
+        let parsed: Value =
+            serde_json::from_str(&output.output).expect("exec output should be json");
+
+        let stdout = parsed["stdout"].as_str().expect("stdout should be string");
+        assert!(stdout.ends_with("/nested"));
+        assert!(stdout.contains("simpleclaw_exec_test_"));
+    }
+
+    #[tokio::test]
     async fn exec_backgrounds_process_when_enabled() {
         let mut tool = ExecTool::default();
         tool.configure(serde_json::json!({
@@ -436,11 +480,11 @@ mod tests {
 
         assert_eq!(
             tool.input_schema_json(),
-            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}"
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"}},\"required\":[\"command\"]}"
         );
         assert_eq!(
             tool.description(),
-            "Run local shell commands using JSON: {command}. Returns JSON string."
+            "Run local shell commands using JSON: {command, workdir?}. Returns JSON string."
         );
     }
 
@@ -455,7 +499,7 @@ mod tests {
 
         assert_eq!(
             tool.input_schema_json(),
-            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
         );
     }
 

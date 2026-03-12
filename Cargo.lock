@@ -1607,6 +1607,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "glob_tool"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "sandbox_common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "grep_tool"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "regex",
+ "sandbox_common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2268,6 +2289,16 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "list_tool"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "sandbox_common",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "litemap"
@@ -3286,6 +3317,8 @@ name = "read_tool"
 version = "0.1.0"
 dependencies = [
  "sandbox_common",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3922,6 +3955,7 @@ dependencies = [
  "deadpool-sqlite",
  "fastembed",
  "fs2",
+ "glob",
  "rand 0.8.5",
  "regex",
  "reqwest",
@@ -5332,6 +5366,27 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web_fetch_tool"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "scraper",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "web_search_tool"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
