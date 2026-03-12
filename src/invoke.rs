@@ -54,6 +54,17 @@ impl AgentInvoker for DirectAgentInvoker {
                 FrameworkError::Tool(format!("no memory for agent: {}", request.target_agent_id))
             })?;
         let effective_max_steps = target_config.effective_execution.max_steps;
+        let delegated_exec_enabled = target_config
+            .agent_config
+            .tools
+            .exec
+            .clone()
+            .unwrap_or_default()
+            .enabled;
+        let delegated_tool_registry = target_config
+            .tool_registry
+            .without_names(&["summon", "task", "background"])
+            .with_async_disabled_if(delegated_exec_enabled);
         let params = RunParams {
             provider_key: &target_config.provider_key,
             system_prompt: &target_config.system_prompt,
@@ -68,12 +79,13 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: target_config.owner_ids.clone(),
             async_tool_runs: Arc::clone(&self.async_tool_runs),
-            tool_registry: target_config.tool_registry.clone(),
+            tool_registry: delegated_tool_registry,
             gateway: None,
             completion_tx: None,
             completion_route: None,
             source_message_id: None,
             on_text_delta: None,
+            allow_async_tools: false,
         };
         self.react_loop
             .upgrade()
@@ -99,13 +111,18 @@ impl AgentInvoker for DirectAgentInvoker {
             .memory(&request.current_agent_id)
             .cloned()
             .ok_or_else(|| FrameworkError::Tool("current agent memory unavailable".to_owned()))?;
-        let mut worker_agent_config = current_config.agent_config.clone();
-        worker_agent_config.tools = worker_agent_config
-            .tools
-            .with_disabled(&["summon", "task", "memorize", "forget"]);
         let worker_tool_registry = current_config
             .tool_registry
-            .without_names(&["summon", "task", "memorize", "forget"]);
+            .without_names(&["summon", "task", "background", "memorize", "forget"])
+            .with_async_disabled_if(
+                current_config
+                    .agent_config
+                    .tools
+                    .exec
+                    .clone()
+                    .unwrap_or_default()
+                    .enabled,
+            );
         let params = RunParams {
             provider_key: &current_config.provider_key,
             system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
@@ -128,6 +145,7 @@ impl AgentInvoker for DirectAgentInvoker {
             completion_route: None,
             source_message_id: None,
             on_text_delta: None,
+            allow_async_tools: false,
         };
         self.react_loop
             .upgrade()
@@ -476,6 +494,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoke_agent_disables_recursive_and_background_tools_in_tool_specs() {
+        let provider_impl = Arc::new(RecordingProvider::final_text("agent reply"));
+        let provider: Arc<dyn Provider> = provider_impl.clone();
+        let react_loop = test_react_loop(provider);
+        let invoker = DirectAgentInvoker::new(
+            Arc::downgrade(&react_loop),
+            test_directory(true),
+            Arc::new(AsyncToolRunManager::new()),
+        );
+
+        invoker
+            .invoke_agent(AgentInvokeRequest {
+                target_agent_id: "default".to_owned(),
+                session_id: "sess-1".to_owned(),
+                user_id: "user-1".to_owned(),
+                prompt: "delegate this".to_owned(),
+            })
+            .await
+            .expect("invoke_agent should succeed");
+
+        let tool_sets = provider_impl.tools_seen().await;
+        assert_eq!(tool_sets.len(), 1);
+        let tools = &tool_sets[0];
+        assert!(!tools.iter().any(|name| name == "summon"));
+        assert!(!tools.iter().any(|name| name == "task"));
+        assert!(!tools.iter().any(|name| name == "background"));
+    }
+
+    #[tokio::test]
     async fn invoke_worker_disables_recursive_tools_in_tool_specs() {
         let provider_impl = Arc::new(RecordingProvider::final_text("worker reply"));
         let provider: Arc<dyn Provider> = provider_impl.clone();
@@ -503,6 +550,7 @@ mod tests {
         let tools = &tool_sets[0];
         assert!(!tools.iter().any(|name| name == "summon"));
         assert!(!tools.iter().any(|name| name == "task"));
+        assert!(!tools.iter().any(|name| name == "background"));
         assert!(!tools.iter().any(|name| name == "memorize"));
         assert!(!tools.iter().any(|name| name == "forget"));
         assert!(tools.iter().any(|name| name == "clock"));

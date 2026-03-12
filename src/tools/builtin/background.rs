@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::error::FrameworkError;
-use crate::tools::{AsyncToolRunKind, Tool, ToolExecEnv, ToolExecutionOutcome};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
 
 use super::common::{parse_background_args, snapshot_to_json};
 
@@ -37,10 +37,7 @@ impl Tool for BackgroundTool {
                 let items = ctx
                     .async_tool_runs
                     .list_for_session(&ctx.agent_id, session_id)
-                    .await
-                    .into_iter()
-                    .filter(|snapshot| snapshot.kind == AsyncToolRunKind::Process)
-                    .collect::<Vec<_>>();
+                    .await;
                 let payload = items
                     .into_iter()
                     .map(|snapshot| snapshot_to_json(&snapshot))

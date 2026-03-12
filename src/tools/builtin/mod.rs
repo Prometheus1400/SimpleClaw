@@ -9,8 +9,8 @@ mod memorize;
 mod memory;
 mod react;
 pub(crate) mod read;
-mod summon;
-mod task;
+pub(crate) mod summon;
+pub(crate) mod task;
 mod web_fetch;
 mod web_search;
 
@@ -28,12 +28,8 @@ pub(crate) fn builtin_tools() -> Vec<RegisteredTool> {
             std::sync::Arc::new(forget::ForgetTool::LongTermSemanticPrune)
                 as std::sync::Arc<dyn Tool>,
         ),
-        RegisteredTool::Direct(
-            std::sync::Arc::new(summon::SummonTool::default()) as std::sync::Arc<dyn Tool>
-        ),
-        RegisteredTool::Direct(
-            std::sync::Arc::new(task::TaskTool::default()) as std::sync::Arc<dyn Tool>
-        ),
+        RegisteredTool::Summon(std::sync::Arc::new(summon::SummonTool::default())),
+        RegisteredTool::Task(std::sync::Arc::new(task::TaskTool::default())),
         RegisteredTool::Direct(
             std::sync::Arc::new(web_search::WebSearchTool::default()) as std::sync::Arc<dyn Tool>
         ),

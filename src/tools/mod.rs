@@ -22,8 +22,7 @@ use crate::sandbox::{DefaultHostSandbox, DefaultWasmSandbox, HostSandbox, WasmSa
 
 pub(crate) use async_tool_manager::StartedAsyncToolRun;
 pub use async_tool_manager::{
-    AsyncToolRunDetails, AsyncToolRunKind, AsyncToolRunManager, AsyncToolRunSnapshot,
-    AsyncToolRunStatus,
+    AsyncToolRunDetails, AsyncToolRunManager, AsyncToolRunSnapshot, AsyncToolRunStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -115,6 +114,7 @@ pub(crate) struct ToolExecEnv {
     pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
+    pub allow_async_tools: bool,
 }
 
 impl ToolExecEnv {
@@ -197,6 +197,8 @@ pub(crate) enum RegisteredTool {
     Read(Arc<builtin::read::ReadTool>),
     Edit(Arc<builtin::edit::EditTool>),
     Exec(Arc<builtin::exec::ExecTool>),
+    Summon(Arc<builtin::summon::SummonTool>),
+    Task(Arc<builtin::task::TaskTool>),
     Direct(Arc<dyn Tool>),
 }
 
@@ -206,6 +208,8 @@ impl RegisteredTool {
             Self::Read(tool) => tool.name(),
             Self::Edit(tool) => tool.name(),
             Self::Exec(tool) => tool.name(),
+            Self::Summon(tool) => tool.name(),
+            Self::Task(tool) => tool.name(),
             Self::Direct(tool) => tool.name(),
         }
     }
@@ -215,6 +219,8 @@ impl RegisteredTool {
             Self::Read(tool) => tool.metadata(),
             Self::Edit(tool) => tool.metadata(),
             Self::Exec(tool) => tool.metadata(),
+            Self::Summon(tool) => tool.metadata(),
+            Self::Task(tool) => tool.metadata(),
             Self::Direct(tool) => tool.metadata(),
         }
     }
@@ -251,6 +257,20 @@ impl RegisteredTool {
                 }
                 Ok(Self::Exec(Arc::new(next)))
             }
+            Self::Summon(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Summon(Arc::new(next)))
+            }
+            Self::Task(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Task(Arc::new(next)))
+            }
             Self::Direct(tool) => {
                 let mut next = tool.box_clone();
                 if let Some(config) = config {
@@ -275,6 +295,8 @@ impl RegisteredTool {
             Self::Read(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Edit(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Exec(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Summon(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Task(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Direct(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
         }
     }
@@ -342,6 +364,48 @@ impl AgentToolRegistry {
         names
             .iter()
             .fold(self.clone(), |registry, name| registry.without(name))
+    }
+
+    pub(crate) fn with_async_disabled(&self) -> Self {
+        let mut ordered = Vec::with_capacity(self.ordered.len());
+        for entry in &self.ordered {
+            let tool = match &*entry.tool {
+                RegisteredTool::Exec(exec) => {
+                    let mut next = (**exec).clone();
+                    next.set_allow_background(false);
+                    Arc::new(RegisteredTool::Exec(Arc::new(next)))
+                }
+                RegisteredTool::Summon(summon) => {
+                    let mut next = (**summon).clone();
+                    next.set_allow_background(false);
+                    Arc::new(RegisteredTool::Summon(Arc::new(next)))
+                }
+                RegisteredTool::Task(task) => {
+                    let mut next = (**task).clone();
+                    next.set_allow_background(false);
+                    Arc::new(RegisteredTool::Task(Arc::new(next)))
+                }
+                _ => Arc::clone(&entry.tool),
+            };
+            ordered.push(AgentToolEntry {
+                tool,
+                execution_kind: entry.execution_kind,
+                owner_restricted: entry.owner_restricted,
+            });
+        }
+        let by_name = ordered
+            .iter()
+            .map(|entry| (entry.tool.name().to_owned(), entry.clone()))
+            .collect();
+        Self { ordered, by_name }
+    }
+
+    pub(crate) fn with_async_disabled_if(&self, disable_async: bool) -> Self {
+        if disable_async {
+            self.with_async_disabled()
+        } else {
+            self.clone()
+        }
     }
 }
 
@@ -581,6 +645,12 @@ impl ToolExecutor for DefaultToolExecutor {
                     self.host_sandbox_runtime.as_ref(),
                 )
                 .await
+            }
+            (RegisteredTool::Summon(tool), ToolExecutionKind::Direct) => {
+                tool.execute_with_trace(ctx, args_json, session_id).await
+            }
+            (RegisteredTool::Task(tool), ToolExecutionKind::Direct) => {
+                tool.execute_with_trace(ctx, args_json, session_id).await
             }
             (tool, ToolExecutionKind::Direct) => {
                 tool.execute_direct(ctx, args_json, session_id).await
@@ -908,5 +978,32 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
         };
+    }
+
+    #[test]
+    fn exec_tool_definition_hides_background_when_disabled() {
+        let factory = default_factory();
+        let mut config = only_background_enabled();
+        config.background = Some(crate::config::BackgroundToolConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        config.exec = Some(crate::config::ExecToolConfig {
+            enabled: true,
+            allow_background: false,
+            ..Default::default()
+        });
+
+        let active = factory
+            .build_registry(&config, &[])
+            .expect("tool registry should build");
+        let exec = active
+            .definitions()
+            .into_iter()
+            .find(|tool| tool.name == "exec")
+            .expect("exec definition should exist");
+
+        assert!(!exec.input_schema_json.contains("background"));
+        assert!(!exec.description.contains("background"));
     }
 }

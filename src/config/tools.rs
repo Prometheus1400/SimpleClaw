@@ -469,6 +469,7 @@ pub struct SummonToolConfig {
     pub enabled: bool,
     #[serde(default = "default_owner_restricted")]
     pub owner_restricted: bool,
+    pub allow_background: bool,
     pub allowed: Vec<String>,
 }
 
@@ -477,6 +478,7 @@ impl Default for SummonToolConfig {
         Self {
             enabled: default_enabled(),
             owner_restricted: default_owner_restricted(),
+            allow_background: true,
             allowed: Vec::new(),
         }
     }
@@ -489,6 +491,7 @@ pub struct TaskToolConfig {
     pub enabled: bool,
     #[serde(default = "default_owner_restricted")]
     pub owner_restricted: bool,
+    pub allow_background: bool,
     pub worker_max_steps: Option<u32>,
 }
 
@@ -497,6 +500,7 @@ impl Default for TaskToolConfig {
         Self {
             enabled: default_enabled(),
             owner_restricted: default_owner_restricted(),
+            allow_background: true,
             worker_max_steps: None,
         }
     }
@@ -581,7 +585,7 @@ impl Default for SkillsToolConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{WebSearchProvider, WebSearchToolConfig};
+    use super::{SummonToolConfig, TaskToolConfig, WebSearchProvider, WebSearchToolConfig};
     use crate::secrets::Secret;
 
     #[test]
@@ -597,9 +601,14 @@ mod tests {
         let err = config
             .to_runtime()
             .expect_err("unresolved secret should fail runtime assembly");
-        assert!(
-            err.to_string()
-                .contains("web_search api_key was not resolved before runtime assembly")
-        );
+        assert!(err
+            .to_string()
+            .contains("web_search api_key was not resolved before runtime assembly"));
+    }
+
+    #[test]
+    fn summon_and_task_allow_background_default_to_true() {
+        assert!(SummonToolConfig::default().allow_background);
+        assert!(TaskToolConfig::default().allow_background);
     }
 }

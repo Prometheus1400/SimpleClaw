@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use std::future::Future;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -40,12 +41,14 @@ impl StartedAsyncToolRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsyncToolRunKind {
     Process,
+    Delegated,
 }
 
 impl AsyncToolRunKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Process => "process",
+            Self::Delegated => "delegated",
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct AsyncToolRunSnapshot {
 #[derive(Debug, Clone)]
 pub enum AsyncToolRunDetails {
     Process(ProcessAsyncToolRunDetails),
+    Delegated(DelegatedAsyncToolRunDetails),
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +95,13 @@ pub struct ProcessAsyncToolRunDetails {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DelegatedAsyncToolRunDetails {
+    pub request: String,
+    pub reply: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -149,16 +160,19 @@ impl AsyncToolRunManager {
             tool_name: tool_name.to_owned(),
             kind: AsyncToolRunKind::Process,
             summary: command.to_owned(),
-            command: command.to_owned(),
             agent_id: agent_id.to_owned(),
             session_key: session_key.to_owned(),
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
-            pid,
-            stdout_path,
-            stderr_path,
-            exit_code: None,
+            process: Some(ProcessRunState {
+                command: command.to_owned(),
+                pid,
+                stdout_path,
+                stderr_path,
+                exit_code: None,
+            }),
+            delegated: None,
         };
 
         let mut runs = self.runs.lock().await;
@@ -228,16 +242,19 @@ impl AsyncToolRunManager {
             tool_name: tool_name.to_owned(),
             kind: AsyncToolRunKind::Process,
             summary: command.to_owned(),
-            command: command.to_owned(),
             agent_id: agent_id.to_owned(),
             session_key: session_key.to_owned(),
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
-            pid,
-            stdout_path,
-            stderr_path,
-            exit_code: None,
+            process: Some(ProcessRunState {
+                command: command.to_owned(),
+                pid,
+                stdout_path,
+                stderr_path,
+                exit_code: None,
+            }),
+            delegated: None,
         };
 
         let mut runs = self.runs.lock().await;
@@ -250,6 +267,59 @@ impl AsyncToolRunManager {
             run_id,
             tool_name: tool_name.to_owned(),
             kind: AsyncToolRunKind::Process,
+        })
+    }
+
+    pub async fn start_delegated<F>(
+        self: &Arc<Self>,
+        tool_name: &str,
+        request: &str,
+        agent_id: &str,
+        session_key: &str,
+        completion_tx: Option<mpsc::Sender<InboundMessage>>,
+        route: Option<CompletionRoute>,
+        future: F,
+    ) -> Result<StartedAsyncToolRun, FrameworkError>
+    where
+        F: Future<Output = Result<String, FrameworkError>> + Send + 'static,
+    {
+        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+        let run_id = format!("async-tool-run-{}-{seq}", Utc::now().timestamp_millis());
+        let started_at = Utc::now();
+        let entry = AsyncToolRunEntry {
+            tool_name: tool_name.to_owned(),
+            kind: AsyncToolRunKind::Delegated,
+            summary: request.to_owned(),
+            agent_id: agent_id.to_owned(),
+            session_key: session_key.to_owned(),
+            status: AsyncToolRunStatus::Running,
+            started_at,
+            finished_at: None,
+            process: None,
+            delegated: Some(DelegatedRunState {
+                request: request.to_owned(),
+                reply: None,
+                error: None,
+            }),
+        };
+
+        let mut runs = self.runs.lock().await;
+        runs.insert(run_id.clone(), entry);
+        Self::auto_evict(&mut runs);
+        drop(runs);
+        debug!(status = "started", "async tool run");
+
+        let join_handle = tokio::spawn(future);
+        self.spawn_completion_watcher(
+            run_id.clone(),
+            CompletionHandle::Delegated(join_handle),
+            completion_tx,
+            route,
+        );
+        Ok(StartedAsyncToolRun {
+            run_id,
+            tool_name: tool_name.to_owned(),
+            kind: AsyncToolRunKind::Delegated,
         })
     }
 
@@ -346,13 +416,15 @@ impl AsyncToolRunManager {
         );
         tokio::spawn(
             async move {
-                let (exit_code, sandbox_manager) = match handle {
+                let content = match handle {
                     CompletionHandle::Host(mut child) => {
                         let status = tokio::task::spawn_blocking(move || child.wait())
                             .await
                             .ok()
                             .and_then(|r| r.ok());
-                        (status.and_then(|s| s.code()), None)
+                        let exit_code = status.and_then(|s| s.code());
+                        pm.mark_process_completed(&run_id, exit_code).await;
+                        pm.completion_content_for_process(&run_id, exit_code).await
                     }
                     CompletionHandle::HostSandboxed(spawned) => {
                         let (mut child, cleanup) = spawned.into_parts();
@@ -360,26 +432,25 @@ impl AsyncToolRunManager {
                             .await
                             .ok()
                             .and_then(|r| r.ok());
-                        (status.and_then(|s| s.code()), Some(cleanup))
+                        let exit_code = status.and_then(|s| s.code());
+                        cleanup.cleanup().await;
+                        pm.mark_process_completed(&run_id, exit_code).await;
+                        pm.completion_content_for_process(&run_id, exit_code).await
+                    }
+                    CompletionHandle::Delegated(join_handle) => {
+                        let result = match join_handle.await {
+                            Ok(outcome) => outcome,
+                            Err(err) => {
+                                Err(FrameworkError::Tool(format!(
+                                    "delegated async run join failed: {err}"
+                                )))
+                            }
+                        };
+                        pm.mark_delegated_completed(&run_id, &result).await;
+                        pm.completion_content_for_delegated(&run_id, &result).await
                     }
                 };
 
-                if let Some(cleanup) = sandbox_manager {
-                    cleanup.cleanup().await;
-                }
-
-                pm.mark_completed(&run_id, exit_code).await;
-
-                let snapshot = pm.get(&run_id).await;
-                let summary = snapshot
-                    .as_ref()
-                    .map(|s| s.summary.as_str())
-                    .unwrap_or("unknown");
-                let code = exit_code.unwrap_or(-1);
-                let content = format!(
-                    "[async tool run completed] run_id={} tool=exec kind=process exit_code={} summary={}",
-                    run_id, code, summary
-                );
                 if let (Some(tx), Some(route)) = (completion_tx, route) {
                     let msg = InboundMessage {
                         trace_id: route.trace_id.clone(),
@@ -414,14 +485,81 @@ impl AsyncToolRunManager {
         );
     }
 
-    async fn mark_completed(&self, run_id: &str, exit_code: Option<i32>) {
+    async fn mark_process_completed(&self, run_id: &str, exit_code: Option<i32>) {
         let mut runs = self.runs.lock().await;
         if let Some(entry) = runs.get_mut(run_id)
             && entry.status == AsyncToolRunStatus::Running
         {
             entry.status = AsyncToolRunStatus::Completed;
-            entry.exit_code = exit_code;
+            if let Some(process) = entry.process.as_mut() {
+                process.exit_code = exit_code;
+            }
             entry.finished_at = Some(Utc::now());
+        }
+    }
+
+    async fn mark_delegated_completed(
+        &self,
+        run_id: &str,
+        result: &Result<String, FrameworkError>,
+    ) {
+        let mut runs = self.runs.lock().await;
+        if let Some(entry) = runs.get_mut(run_id)
+            && entry.status == AsyncToolRunStatus::Running
+        {
+            entry.status = AsyncToolRunStatus::Completed;
+            entry.finished_at = Some(Utc::now());
+            if let Some(delegated) = entry.delegated.as_mut() {
+                match result {
+                    Ok(reply) => {
+                        delegated.reply = Some(reply.clone());
+                        delegated.error = None;
+                    }
+                    Err(err) => {
+                        delegated.reply = None;
+                        delegated.error = Some(err.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    async fn completion_content_for_process(&self, run_id: &str, exit_code: Option<i32>) -> String {
+        let summary = self
+            .get(run_id)
+            .await
+            .ok()
+            .map(|s| s.summary)
+            .unwrap_or_else(|| "unknown".to_owned());
+        format!(
+            "[async tool run completed] run_id={} kind=process exit_code={} summary={}",
+            run_id,
+            exit_code.unwrap_or(-1),
+            summary
+        )
+    }
+
+    async fn completion_content_for_delegated(
+        &self,
+        run_id: &str,
+        result: &Result<String, FrameworkError>,
+    ) -> String {
+        let snapshot = self.get(run_id).await.ok();
+        let (tool_name, summary) = snapshot
+            .map(|s| (s.tool_name, s.summary))
+            .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
+        match result {
+            Ok(_) => format!(
+                "[async tool run completed] run_id={} tool={} kind=delegated status=ok summary={}",
+                run_id, tool_name, summary
+            ),
+            Err(err) => format!(
+                "[async tool run completed] run_id={} tool={} kind=delegated status=error error={} summary={}",
+                run_id,
+                tool_name,
+                err,
+                summary
+            ),
         }
     }
 }
@@ -435,6 +573,7 @@ impl Default for AsyncToolRunManager {
 enum CompletionHandle {
     Host(std::process::Child),
     HostSandboxed(crate::sandbox::SpawnedHostCommand),
+    Delegated(tokio::task::JoinHandle<Result<String, FrameworkError>>),
 }
 
 #[derive(Debug)]
@@ -442,16 +581,29 @@ struct AsyncToolRunEntry {
     tool_name: String,
     kind: AsyncToolRunKind,
     summary: String,
-    command: String,
     agent_id: String,
     session_key: String,
     status: AsyncToolRunStatus,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
+    process: Option<ProcessRunState>,
+    delegated: Option<DelegatedRunState>,
+}
+
+#[derive(Debug)]
+struct ProcessRunState {
+    command: String,
     pid: Option<u32>,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     exit_code: Option<i32>,
+}
+
+#[derive(Debug)]
+struct DelegatedRunState {
+    request: String,
+    reply: Option<String>,
+    error: Option<String>,
 }
 
 struct AsyncToolRunEntryMeta {
@@ -459,14 +611,25 @@ struct AsyncToolRunEntryMeta {
     tool_name: String,
     kind: AsyncToolRunKind,
     summary: String,
-    command: String,
     status: AsyncToolRunStatus,
-    pid: Option<u32>,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
+    process: Option<ProcessRunStateMeta>,
+    delegated: Option<DelegatedRunStateMeta>,
+}
+
+struct ProcessRunStateMeta {
+    command: String,
+    pid: Option<u32>,
     exit_code: Option<i32>,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
+}
+
+struct DelegatedRunStateMeta {
+    request: String,
+    reply: Option<String>,
+    error: Option<String>,
 }
 
 impl AsyncToolRunEntry {
@@ -483,7 +646,12 @@ impl AsyncToolRunEntry {
         if self.status != AsyncToolRunStatus::Running {
             return Ok(());
         }
-        if let Some(pid) = self.pid {
+        let Some(process) = self.process.as_mut() else {
+            return Err(FrameworkError::Tool(
+                "background run kind does not support kill".to_owned(),
+            ));
+        };
+        if let Some(pid) = process.pid {
             let output = Command::new("kill")
                 .arg(pid.to_string())
                 .output()
@@ -499,7 +667,7 @@ impl AsyncToolRunEntry {
         }
         self.status = AsyncToolRunStatus::Killed;
         self.finished_at = Some(Utc::now());
-        self.exit_code = Some(-1);
+        process.exit_code = Some(-1);
         Ok(())
     }
 
@@ -509,57 +677,99 @@ impl AsyncToolRunEntry {
             tool_name: self.tool_name.clone(),
             kind: self.kind,
             summary: self.summary.clone(),
-            command: self.command.clone(),
             status: self.status.clone(),
-            pid: self.pid,
             started_at: self.started_at,
             finished_at: self.finished_at,
-            exit_code: self.exit_code,
-            stdout_path: self.stdout_path.clone(),
-            stderr_path: self.stderr_path.clone(),
+            process: self.process.as_ref().map(|process| ProcessRunStateMeta {
+                command: process.command.clone(),
+                pid: process.pid,
+                exit_code: process.exit_code,
+                stdout_path: process.stdout_path.clone(),
+                stderr_path: process.stderr_path.clone(),
+            }),
+            delegated: self
+                .delegated
+                .as_ref()
+                .map(|delegated| DelegatedRunStateMeta {
+                    request: delegated.request.clone(),
+                    reply: delegated.reply.clone(),
+                    error: delegated.error.clone(),
+                }),
         }
     }
 
     fn snapshot(&self, run_id: String) -> AsyncToolRunSnapshot {
+        let details = if let Some(process) = self.process.as_ref() {
+            AsyncToolRunDetails::Process(ProcessAsyncToolRunDetails {
+                command: process.command.clone(),
+                pid: process.pid,
+                exit_code: process.exit_code,
+                stdout: read_process_output_tail(&process.stdout_path, 32_768),
+                stderr: read_process_output_tail(&process.stderr_path, 16_384),
+            })
+        } else if let Some(delegated) = self.delegated.as_ref() {
+            AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
+                request: delegated.request.clone(),
+                reply: delegated.reply.clone(),
+                error: delegated.error.clone(),
+            })
+        } else {
+            AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
+                request: self.summary.clone(),
+                reply: None,
+                error: Some("run details unavailable".to_owned()),
+            })
+        };
         AsyncToolRunSnapshot {
             run_id,
             tool_name: self.tool_name.clone(),
             kind: self.kind,
             status: self.status.clone(),
             summary: self.summary.clone(),
-            details: AsyncToolRunDetails::Process(ProcessAsyncToolRunDetails {
-                command: self.command.clone(),
-                pid: self.pid,
-                exit_code: self.exit_code,
-                stdout: read_process_output_tail(&self.stdout_path, 32_768),
-                stderr: read_process_output_tail(&self.stderr_path, 16_384),
-            }),
+            details,
             started_at: self.started_at,
             finished_at: self.finished_at,
         }
     }
 
     fn cleanup_files(self) {
-        let _ = std::fs::remove_file(&self.stdout_path);
-        let _ = std::fs::remove_file(&self.stderr_path);
+        if let Some(process) = self.process {
+            let _ = std::fs::remove_file(&process.stdout_path);
+            let _ = std::fs::remove_file(&process.stderr_path);
+        }
     }
 }
 
 impl AsyncToolRunEntryMeta {
     fn into_snapshot(self) -> AsyncToolRunSnapshot {
+        let details = if let Some(process) = self.process {
+            AsyncToolRunDetails::Process(ProcessAsyncToolRunDetails {
+                command: process.command,
+                pid: process.pid,
+                exit_code: process.exit_code,
+                stdout: read_process_output_tail(&process.stdout_path, 32_768),
+                stderr: read_process_output_tail(&process.stderr_path, 16_384),
+            })
+        } else if let Some(delegated) = self.delegated {
+            AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
+                request: delegated.request,
+                reply: delegated.reply,
+                error: delegated.error,
+            })
+        } else {
+            AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
+                request: self.summary.clone(),
+                reply: None,
+                error: Some("run details unavailable".to_owned()),
+            })
+        };
         AsyncToolRunSnapshot {
             run_id: self.run_id,
             tool_name: self.tool_name,
             kind: self.kind,
             status: self.status,
             summary: self.summary,
-            details: AsyncToolRunDetails::Process(ProcessAsyncToolRunDetails {
-                command: self.command,
-                pid: self.pid,
-                exit_code: self.exit_code,
-                stdout: read_process_output_tail(&self.stdout_path, 32_768),
-                stderr: read_process_output_tail(&self.stderr_path, 16_384),
-            }),
+            details,
             started_at: self.started_at,
             finished_at: self.finished_at,
         }
@@ -594,7 +804,7 @@ mod tests {
 
     use tokio::time::{Duration, sleep};
 
-    use super::{AsyncToolRunManager, AsyncToolRunStatus};
+    use super::{AsyncToolRunDetails, AsyncToolRunManager, AsyncToolRunStatus};
 
     #[tokio::test]
     async fn completion_watcher_marks_background_process_complete_without_route() {
@@ -660,5 +870,69 @@ mod tests {
 
         let items = manager.list_for_session("agent-a", "session-a").await;
         assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delegated_runs_appear_in_list_and_capture_reply() {
+        let manager = Arc::new(AsyncToolRunManager::new());
+        let started = manager
+            .start_delegated(
+                "task",
+                "do delegated work",
+                "agent-a",
+                "session-a",
+                None,
+                None,
+                async { Ok("done".to_owned()) },
+            )
+            .await
+            .expect("start delegated should succeed");
+
+        for _ in 0..20 {
+            let snapshot = manager
+                .get(&started.run_id)
+                .await
+                .expect("snapshot should exist");
+            if snapshot.status != AsyncToolRunStatus::Running {
+                assert_eq!(snapshot.status, AsyncToolRunStatus::Completed);
+                let AsyncToolRunDetails::Delegated(details) = snapshot.details else {
+                    panic!("delegated run should return delegated details");
+                };
+                assert_eq!(details.reply.as_deref(), Some("done"));
+                return;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        panic!("delegated run did not complete in time");
+    }
+
+    #[tokio::test]
+    async fn delegated_runs_cannot_be_killed() {
+        let manager = Arc::new(AsyncToolRunManager::new());
+        let started = manager
+            .start_delegated(
+                "summon",
+                "handoff",
+                "agent-a",
+                "session-a",
+                None,
+                None,
+                async {
+                    sleep(Duration::from_millis(200)).await;
+                    Ok("done".to_owned())
+                },
+            )
+            .await
+            .expect("start delegated should succeed");
+
+        let err = manager
+            .kill_for_session(&started.run_id, "agent-a", "session-a")
+            .await
+            .err()
+            .expect("kill should fail for delegated runs");
+        assert!(
+            err.to_string()
+                .contains("background run kind does not support kill")
+        );
     }
 }
