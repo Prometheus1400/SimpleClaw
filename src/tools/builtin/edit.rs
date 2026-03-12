@@ -184,11 +184,7 @@ fn normalize_line_endings(text: &str) -> String {
 }
 
 fn detect_line_ending(text: &str) -> &'static str {
-    if text.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    }
+    if text.contains("\r\n") { "\r\n" } else { "\n" }
 }
 
 fn convert_to_line_ending(text: &str, ending: &str) -> String {

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use sandbox_common::{normalize_absolute_path, persona_relative_path_allowed};
 use serde::Deserialize;
-use std::fs;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -183,7 +183,10 @@ fn render_file_output(path: &Path, offset: usize, limit: usize) -> Result<String
         .enumerate()
         .map(|(idx, line)| {
             let value = if line.chars().count() > MAX_LINE_LENGTH {
-                format!("{}...", line.chars().take(MAX_LINE_LENGTH).collect::<String>())
+                format!(
+                    "{}...",
+                    line.chars().take(MAX_LINE_LENGTH).collect::<String>()
+                )
             } else {
                 (*line).to_owned()
             };

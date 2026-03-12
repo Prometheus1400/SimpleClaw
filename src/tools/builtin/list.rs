@@ -109,7 +109,8 @@ impl ListTool {
                 host_path.display()
             )));
         }
-        let guest_path = host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        let guest_path =
+            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
         Ok(ListPlan {
             host_path,
             guest_path,
@@ -165,15 +166,15 @@ pub(crate) fn run_list(root: &Path, ignore: &[String]) -> Result<String, Framewo
     let mut ignore_patterns = Vec::new();
     for pattern in IGNORE_PATTERNS {
         ignore_patterns.push(
-            Pattern::new(pattern)
-                .map_err(|e| FrameworkError::Tool(format!("invalid built-in ignore pattern: {e}")))?,
+            Pattern::new(pattern).map_err(|e| {
+                FrameworkError::Tool(format!("invalid built-in ignore pattern: {e}"))
+            })?,
         );
     }
     for pattern in ignore {
-        ignore_patterns.push(
-            Pattern::new(pattern)
-                .map_err(|e| FrameworkError::Tool(format!("invalid ignore pattern '{pattern}': {e}")))?,
-        );
+        ignore_patterns.push(Pattern::new(pattern).map_err(|e| {
+            FrameworkError::Tool(format!("invalid ignore pattern '{pattern}': {e}"))
+        })?);
     }
 
     let mut dirs = BTreeSet::new();
@@ -183,8 +184,9 @@ pub(crate) fn run_list(root: &Path, ignore: &[String]) -> Result<String, Framewo
     let mut files_seen = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir)
-            .map_err(|e| FrameworkError::Tool(format!("list failed to read {}: {e}", dir.display())))?;
+        let entries = fs::read_dir(&dir).map_err(|e| {
+            FrameworkError::Tool(format!("list failed to read {}: {e}", dir.display()))
+        })?;
         for entry in entries {
             if files_seen >= LIMIT {
                 break;
@@ -192,9 +194,9 @@ pub(crate) fn run_list(root: &Path, ignore: &[String]) -> Result<String, Framewo
             let entry = entry
                 .map_err(|e| FrameworkError::Tool(format!("list failed to walk directory: {e}")))?;
             let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|e| FrameworkError::Tool(format!("list failed to compute relative path: {e}")))?;
+            let relative = path.strip_prefix(root).map_err(|e| {
+                FrameworkError::Tool(format!("list failed to compute relative path: {e}"))
+            })?;
             if is_ignored(relative, &ignore_patterns) {
                 continue;
             }
@@ -244,7 +246,11 @@ fn render_dir(
     let mut output = String::new();
     if depth > 0 {
         let indent = "  ".repeat(depth);
-        output.push_str(&format!("{}{}/\n", indent, dir.file_name().and_then(|n| n.to_str()).unwrap_or("")));
+        output.push_str(&format!(
+            "{}{}/\n",
+            indent,
+            dir.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        ));
     }
 
     let children = dirs

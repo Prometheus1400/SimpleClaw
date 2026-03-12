@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Read;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS: u64 = 20;
 const DEFAULT_WEB_SEARCH_MAX_RESULTS: usize = 5;

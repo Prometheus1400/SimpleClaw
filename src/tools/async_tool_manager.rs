@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
-use std::future::Future;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -440,11 +440,9 @@ impl AsyncToolRunManager {
                     CompletionHandle::Delegated(join_handle) => {
                         let result = match join_handle.await {
                             Ok(outcome) => outcome,
-                            Err(err) => {
-                                Err(FrameworkError::Tool(format!(
-                                    "delegated async run join failed: {err}"
-                                )))
-                            }
+                            Err(err) => Err(FrameworkError::Tool(format!(
+                                "delegated async run join failed: {err}"
+                            ))),
                         };
                         pm.mark_delegated_completed(&run_id, &result).await;
                         pm.completion_content_for_delegated(&run_id, &result).await
@@ -478,7 +476,10 @@ impl AsyncToolRunManager {
                         debug!(status = "completed", "async tool run completion watcher");
                     }
                 } else {
-                    debug!(status = "completed_no_route", "async tool run completion watcher");
+                    debug!(
+                        status = "completed_no_route",
+                        "async tool run completion watcher"
+                    );
                 }
             }
             .instrument(span),
@@ -555,10 +556,7 @@ impl AsyncToolRunManager {
             ),
             Err(err) => format!(
                 "[async tool run completed] run_id={} tool={} kind=delegated status=error error={} summary={}",
-                run_id,
-                tool_name,
-                err,
-                summary
+                run_id, tool_name, err, summary
             ),
         }
     }

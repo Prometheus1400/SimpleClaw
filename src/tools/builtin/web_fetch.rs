@@ -83,7 +83,10 @@ impl WebFetchTool {
         })
     }
 
-    pub async fn execute_direct(&self, plan: WebFetchPlan) -> Result<ToolRunOutput, FrameworkError> {
+    pub async fn execute_direct(
+        &self,
+        plan: WebFetchPlan,
+    ) -> Result<ToolRunOutput, FrameworkError> {
         let output = fetch_url_markdown(&plan.url, plan.timeout_seconds, plan.max_chars).await?;
         Ok(ToolRunOutput::plain(output))
     }

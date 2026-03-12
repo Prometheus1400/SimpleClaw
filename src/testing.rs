@@ -64,6 +64,8 @@ pub struct TestHarnessConfig {
     pub allow_from: Option<Vec<String>>,
     /// Whether a listener-path test expects the inbound to be dropped before routing.
     pub expect_listener_drop: bool,
+    /// Additional user-visible inbound contents to route after the initial turn.
+    pub follow_up_inbound_contents: Vec<String>,
     /// Additional inbound messages to process after the initial turn.
     pub additional_inbounds_to_process: usize,
     /// Timeout used when waiting for additional inbound messages.
@@ -120,6 +122,42 @@ impl TestAgentConfig {
         self.agent_config.tools.exec = Some(crate::config::ExecToolConfig {
             timeout_seconds,
             allow_background,
+            sandbox: crate::config::ToolSandboxConfig {
+                enabled: sandbox_enabled,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable the list tool with optional WASM sandboxing for this test agent.
+    pub fn with_list_tool(mut self, sandbox_enabled: bool) -> Self {
+        self.agent_config.tools.list = Some(crate::config::ListToolConfig {
+            sandbox: crate::config::ToolSandboxConfig {
+                enabled: sandbox_enabled,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable the grep tool with optional WASM sandboxing for this test agent.
+    pub fn with_grep_tool(mut self, sandbox_enabled: bool) -> Self {
+        self.agent_config.tools.grep = Some(crate::config::GrepToolConfig {
+            sandbox: crate::config::ToolSandboxConfig {
+                enabled: sandbox_enabled,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable the glob tool with optional WASM sandboxing for this test agent.
+    pub fn with_glob_tool(mut self, sandbox_enabled: bool) -> Self {
+        self.agent_config.tools.glob = Some(crate::config::GlobToolConfig {
             sandbox: crate::config::ToolSandboxConfig {
                 enabled: sandbox_enabled,
                 ..Default::default()
@@ -186,6 +224,7 @@ impl Default for TestHarnessConfig {
             require_mentions: false,
             allow_from: None,
             expect_listener_drop: false,
+            follow_up_inbound_contents: Vec::new(),
             additional_inbounds_to_process: 0,
             additional_inbound_timeout_ms: 2_000,
             agents: Vec::new(),
@@ -246,6 +285,8 @@ pub struct TestTurnResult {
     pub observed_tool_result: bool,
     /// Last tool result payload observed by the provider, if any.
     pub observed_tool_response: Option<Value>,
+    /// All tool result payloads observed by the provider in call order.
+    pub observed_tool_responses: Vec<Value>,
 }
 
 /// Run one end-to-end gateway turn using a mock provider and ephemeral sqlite files.
@@ -361,6 +402,15 @@ pub async fn run_single_gateway_roundtrip(
         (memory_session_id, true)
     };
 
+    for content in &config.follow_up_inbound_contents {
+        let inbound = receive_listener_inbound(&mut inbound_rx, &channel, &config, content)
+            .await
+            .wrap_err("failed to route follow-up inbound through gateway listener")?;
+        handle_inbound_once(&state, inbound)
+            .await
+            .wrap_err("failed to process routed follow-up inbound message")?;
+    }
+
     for _ in 0..config.additional_inbounds_to_process {
         let inbound = timeout(
             Duration::from_millis(config.additional_inbound_timeout_ms),
@@ -392,6 +442,7 @@ pub async fn run_single_gateway_roundtrip(
         ephemeral_paths,
         observed_tool_result: primary_provider.saw_tool_result(),
         observed_tool_response: primary_provider.observed_tool_response(),
+        observed_tool_responses: primary_provider.observed_tool_responses(),
     })
 }
 
@@ -401,6 +452,26 @@ async fn run_via_gateway_listener(
     channel: &Arc<CaptureChannel>,
     config: &TestHarnessConfig,
 ) -> color_eyre::Result<(String, bool)> {
+    let inbound =
+        receive_listener_inbound(inbound_rx, channel, config, &config.inbound_content).await;
+    let inbound = match inbound {
+        Ok(inbound) => inbound,
+        Err(_) if config.expect_listener_drop => return Ok((String::new(), false)),
+        Err(err) => return Err(err),
+    };
+    let memory_session_id = inbound.session_key.clone();
+    handle_inbound_once(state, inbound)
+        .await
+        .wrap_err("failed to process routed inbound message")?;
+    Ok((memory_session_id, true))
+}
+
+async fn receive_listener_inbound(
+    inbound_rx: &mut tokio::sync::mpsc::Receiver<InboundMessage>,
+    channel: &Arc<CaptureChannel>,
+    config: &TestHarnessConfig,
+    content: &str,
+) -> color_eyre::Result<InboundMessage> {
     channel
         .push_inbound(ChannelInbound {
             message_id: "test-message-1".to_owned(),
@@ -410,30 +481,20 @@ async fn run_via_gateway_listener(
             user_id: config.user_id.clone(),
             username: config.username.clone(),
             mentioned_bot: config.mentioned_bot,
-            content: config.inbound_content.clone(),
+            content: content.to_owned(),
         })
         .await
         .wrap_err("failed to enqueue test inbound for gateway listener")?;
 
-    let inbound = match timeout(Duration::from_secs(1), inbound_rx.recv()).await {
-        Ok(Some(inbound)) => inbound,
-        Ok(None) => {
-            return Err(color_eyre::eyre::eyre!(
-                "gateway inbound queue closed unexpectedly"
-            ));
-        }
-        Err(_) if config.expect_listener_drop => return Ok((String::new(), false)),
-        Err(_) => {
-            return Err(color_eyre::eyre::eyre!(
-                "timed out waiting for gateway listener to emit inbound"
-            ));
-        }
-    };
-    let memory_session_id = inbound.session_key.clone();
-    handle_inbound_once(state, inbound)
-        .await
-        .wrap_err("failed to process routed inbound message")?;
-    Ok((memory_session_id, true))
+    match timeout(Duration::from_secs(1), inbound_rx.recv()).await {
+        Ok(Some(inbound)) => Ok(inbound),
+        Ok(None) => Err(color_eyre::eyre::eyre!(
+            "gateway inbound queue closed unexpectedly"
+        )),
+        Err(_) => Err(color_eyre::eyre::eyre!(
+            "timed out waiting for gateway listener to emit inbound"
+        )),
+    }
 }
 
 struct StaticMockProvider {
@@ -441,6 +502,7 @@ struct StaticMockProvider {
     call_count: AtomicUsize,
     saw_tool_result: AtomicBool,
     observed_tool_response: StdMutex<Option<Value>>,
+    observed_tool_responses: StdMutex<Vec<Value>>,
 }
 
 impl StaticMockProvider {
@@ -450,6 +512,7 @@ impl StaticMockProvider {
             call_count: AtomicUsize::new(0),
             saw_tool_result: AtomicBool::new(false),
             observed_tool_response: StdMutex::new(None),
+            observed_tool_responses: StdMutex::new(Vec::new()),
         }
     }
 
@@ -467,6 +530,13 @@ impl StaticMockProvider {
             .ok()
             .and_then(|guard| guard.clone())
     }
+
+    fn observed_tool_responses(&self) -> Vec<Value> {
+        self.observed_tool_responses
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
@@ -478,12 +548,17 @@ impl Provider for StaticMockProvider {
         _tools: &[ToolDefinition],
     ) -> Result<ProviderResponse, FrameworkError> {
         let call_index = self.call_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(message) = history.iter().rev().find(|m| !m.tool_results.is_empty()) {
+        if let Some(message) = history.last().filter(|m| !m.tool_results.is_empty()) {
             self.saw_tool_result.store(true, Ordering::SeqCst);
             if let Some(result) = message.tool_results.first()
                 && let Ok(mut slot) = self.observed_tool_response.lock()
             {
                 *slot = Some(result.response.clone());
+            }
+            if let Some(result) = message.tool_results.first()
+                && let Ok(mut slot) = self.observed_tool_responses.lock()
+            {
+                slot.push(result.response.clone());
             }
         }
 

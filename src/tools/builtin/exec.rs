@@ -13,10 +13,8 @@ const EXEC_DESCRIPTION_WITH_BG: &str =
     "Run local shell commands using JSON: {command, workdir?, background?}. Returns JSON string.";
 const EXEC_DESCRIPTION_SYNC_ONLY: &str =
     "Run local shell commands using JSON: {command, workdir?}. Returns JSON string.";
-const EXEC_SCHEMA_WITH_BG: &str =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
-const EXEC_SCHEMA_SYNC_ONLY: &str =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"}},\"required\":[\"command\"]}";
+const EXEC_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
+const EXEC_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"}},\"required\":[\"command\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecTool {
@@ -167,7 +165,7 @@ impl ExecTool {
         runtime: &dyn HostSandbox,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         if plan.background {
-                let prepared = runtime
+            let prepared = runtime
                 .prepare_spawn(SpawnHostCommandRequest {
                     command: plan.command.clone(),
                     workspace_root: plan.workdir.clone(),

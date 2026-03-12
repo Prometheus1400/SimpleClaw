@@ -11,10 +11,8 @@ const SUMMON_DESCRIPTION_WITH_BG: &str =
     "Hand off to another agent using JSON: {agent, summary?, background?}";
 const SUMMON_DESCRIPTION_SYNC_ONLY: &str =
     "Synchronously hand off to another agent with JSON: {agent, summary?}";
-const SUMMON_SCHEMA_WITH_BG: &str =
-    "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"agent\"]}";
-const SUMMON_SCHEMA_SYNC_ONLY: &str =
-    "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}},\"required\":[\"agent\"]}";
+const SUMMON_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"agent\"]}";
+const SUMMON_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}},\"required\":[\"agent\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SummonTool {

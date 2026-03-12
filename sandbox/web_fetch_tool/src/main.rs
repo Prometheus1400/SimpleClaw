@@ -1,9 +1,9 @@
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, USER_AGENT};
 use reqwest::Client;
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use std::io::Read;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 const DEFAULT_WEB_FETCH_TIMEOUT_SECONDS: u64 = 20;
 const DEFAULT_WEB_FETCH_MAX_CHARS: usize = 8_000;
@@ -93,13 +93,15 @@ fn render_fetch_response(
     max_chars: usize,
 ) -> Result<String, String> {
     if !(200..300).contains(&status_code) {
-        return Err(format!("fetch response error: status={status_code} url={url}"));
+        return Err(format!(
+            "fetch response error: status={status_code} url={url}"
+        ));
     }
 
     if body.contains("<html") || body.contains("<body") {
         let doc = Html::parse_document(body);
-        let selector = Selector::parse("body")
-            .map_err(|e| format!("html selector parse failed: {e}"))?;
+        let selector =
+            Selector::parse("body").map_err(|e| format!("html selector parse failed: {e}"))?;
         let text = doc
             .select(&selector)
             .flat_map(|node| node.text())
