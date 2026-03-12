@@ -2,7 +2,9 @@ use async_trait::async_trait;
 
 use crate::config::ExecToolConfig;
 use crate::error::FrameworkError;
-use crate::sandbox::{HostSandbox, RunHostCommandRequest, SpawnHostCommandRequest};
+use crate::sandbox::{
+    HostSandbox, RunHostCommandRequest, SandboxPolicy, SpawnHostCommandRequest,
+};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
@@ -59,6 +61,13 @@ impl Tool for ExecTool {
 }
 
 impl ExecTool {
+    fn sandbox_policy(&self) -> SandboxPolicy {
+        SandboxPolicy {
+            network_enabled: self.config.sandbox.network_enabled.unwrap_or(false),
+            extra_writable_paths: self.config.sandbox.extra_writable_paths.clone(),
+        }
+    }
+
     pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ExecPlan, FrameworkError> {
         let args = parse_exec_args(args_json);
         if args.command.trim().is_empty() {
@@ -123,7 +132,7 @@ impl ExecTool {
                 .prepare_spawn(SpawnHostCommandRequest {
                     command: plan.command.clone(),
                     workspace_root: plan.workspace_root.clone(),
-                    sandbox: self.config.sandbox.clone(),
+                    policy: self.sandbox_policy(),
                 })
                 .await?;
             let started = ctx
@@ -144,7 +153,7 @@ impl ExecTool {
             .run(RunHostCommandRequest {
                 command: plan.command,
                 workspace_root: plan.workspace_root,
-                sandbox: self.config.sandbox.clone(),
+                policy: self.sandbox_policy(),
                 env: plan.env,
                 timeout_seconds: self
                     .config

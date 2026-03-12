@@ -11,8 +11,8 @@ use tokio::time::{Duration, interval};
 use tracing::{debug, warn};
 
 use crate::channels::InboundMessage;
-use crate::config::{GatewayChannelKind, ToolSandboxConfig};
-use crate::sandbox::{DefaultHostSandbox, HostSandbox, RunHostCommandRequest};
+use crate::config::GatewayChannelKind;
+use crate::sandbox::{DefaultHostSandbox, HostSandbox, RunHostCommandRequest, SandboxPolicy};
 use crate::telemetry::next_trace_id;
 use crate::tools::builtin::cron::{CronJob, CronStore};
 
@@ -217,18 +217,16 @@ async fn run_guard_command(
     env: &BTreeMap<String, String>,
     timeout_seconds: u64,
 ) -> Result<bool, crate::error::FrameworkError> {
-    let sandbox_cfg = ToolSandboxConfig {
-        enabled: true,
-        extra_readable_paths: Vec::new(),
+    let sandbox_cfg = SandboxPolicy {
         extra_writable_paths: Vec::new(),
-        network_enabled: Some(false),
+        network_enabled: false,
     };
 
     let output = DefaultHostSandbox
         .run(RunHostCommandRequest {
             command: command.to_owned(),
             workspace_root: workspace_root.to_path_buf(),
-            sandbox: sandbox_cfg,
+            policy: sandbox_cfg,
             env: env.clone(),
             timeout_seconds,
         })

@@ -10,10 +10,9 @@ use tokio::runtime::Builder;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
 
-use crate::config::ToolSandboxConfig;
 use crate::error::FrameworkError;
 use crate::sandbox::{
-    HostRunResult, HostSandbox, PreparedHostCommand, RunHostCommandRequest,
+    HostRunResult, HostSandbox, PreparedHostCommand, RunHostCommandRequest, SandboxPolicy,
     SpawnHostCommandRequest, normalize_workspace_root,
 };
 
@@ -27,7 +26,7 @@ impl HostSandbox for DefaultHostSandbox {
     async fn run(&self, request: RunHostCommandRequest) -> Result<HostRunResult, FrameworkError> {
         debug!(status = "started", phase = "host_run", "sandbox.host");
         let prepared =
-            prepare_command_for_exec(&request.command, &request.workspace_root, &request.sandbox)
+            prepare_command_for_exec(&request.command, &request.workspace_root, &request.policy)
                 .await?;
         let mut runner = Command::new("bash");
         runner.arg("-lc").arg(prepared.wrapped_command());
@@ -82,14 +81,14 @@ impl HostSandbox for DefaultHostSandbox {
         &self,
         request: SpawnHostCommandRequest,
     ) -> Result<PreparedHostCommand, FrameworkError> {
-        prepare_command_for_exec(&request.command, &request.workspace_root, &request.sandbox).await
+        prepare_command_for_exec(&request.command, &request.workspace_root, &request.policy).await
     }
 }
 
 async fn prepare_command_for_exec(
     user_command: &str,
     workspace_root: &Path,
-    sandbox: &ToolSandboxConfig,
+    sandbox: &SandboxPolicy,
 ) -> Result<PreparedHostCommand, FrameworkError> {
     let workspace = normalize_workspace_root(workspace_root)?;
     let runtime_cfg = build_runtime_config(&workspace, sandbox);
@@ -179,10 +178,9 @@ async fn run_manager_wrap_with_timeout(
 
 fn build_runtime_config(
     workspace_root: &Path,
-    sandbox: &ToolSandboxConfig,
+    sandbox: &SandboxPolicy,
 ) -> SandboxRuntimeConfig {
-    let network_enabled = sandbox.network_enabled.unwrap_or(false);
-    let network = if network_enabled {
+    let network = if sandbox.network_enabled {
         NetworkConfig::default()
     } else {
         NetworkConfig {
@@ -204,7 +202,7 @@ fn build_runtime_config(
     }
 }
 
-fn build_write_allow_paths(workspace_root: &Path, sandbox: &ToolSandboxConfig) -> Vec<String> {
+fn build_write_allow_paths(workspace_root: &Path, sandbox: &SandboxPolicy) -> Vec<String> {
     let mut allow = vec![workspace_root.display().to_string(), "/tmp".to_owned()];
     allow.extend(sandbox.extra_writable_paths.iter().cloned());
     allow
@@ -213,12 +211,12 @@ fn build_write_allow_paths(workspace_root: &Path, sandbox: &ToolSandboxConfig) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ToolSandboxConfig;
+    use crate::sandbox::SandboxPolicy;
     use std::path::Path;
 
     #[test]
     fn build_runtime_config_disables_network_by_default() {
-        let sandbox = ToolSandboxConfig::default();
+        let sandbox = SandboxPolicy::default();
         let cfg = build_runtime_config(Path::new("/tmp/work"), &sandbox);
         assert_eq!(
             cfg.network.allowed_domains,
@@ -228,8 +226,8 @@ mod tests {
 
     #[test]
     fn build_runtime_config_allows_network_when_enabled() {
-        let sandbox = ToolSandboxConfig {
-            network_enabled: Some(true),
+        let sandbox = SandboxPolicy {
+            network_enabled: true,
             ..Default::default()
         };
         let cfg = build_runtime_config(Path::new("/tmp/work"), &sandbox);
@@ -238,7 +236,7 @@ mod tests {
 
     #[test]
     fn build_write_allow_paths_includes_workspace_tmp_and_extra() {
-        let sandbox = ToolSandboxConfig {
+        let sandbox = SandboxPolicy {
             extra_writable_paths: vec!["/var/tmp/simpleclaw-extra".to_owned()],
             ..Default::default()
         };
