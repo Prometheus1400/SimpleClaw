@@ -86,7 +86,14 @@ pub(super) fn parse_memory_args(args_json: &str) -> MemoryAction {
     }
 }
 
-pub(super) fn parse_summon_args(args_json: &str) -> (String, String) {
+#[derive(Debug, Deserialize)]
+pub(super) struct SummonArgs {
+    pub agent: String,
+    pub summary: String,
+    pub background: bool,
+}
+
+pub(super) fn parse_summon_args(args_json: &str) -> SummonArgs {
     if let Ok(value) = serde_json::from_str::<Value>(args_json) {
         if let Some(agent) = value.get("agent").and_then(|v| v.as_str()) {
             let summary = value
@@ -94,25 +101,60 @@ pub(super) fn parse_summon_args(args_json: &str) -> (String, String) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
-            return (agent.to_owned(), summary);
+            let background = value
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            return SummonArgs {
+                agent: agent.to_owned(),
+                summary,
+                background,
+            };
         }
         if let Some(s) = value.as_str() {
-            return (s.to_owned(), String::new());
+            return SummonArgs {
+                agent: s.to_owned(),
+                summary: String::new(),
+                background: false,
+            };
         }
     }
-    (args_json.trim_matches('"').to_owned(), String::new())
+    SummonArgs {
+        agent: args_json.trim_matches('"').to_owned(),
+        summary: String::new(),
+        background: false,
+    }
 }
 
-pub(super) fn parse_task_args(args_json: &str) -> String {
+#[derive(Debug, Deserialize)]
+pub(super) struct TaskArgs {
+    pub prompt: String,
+    pub background: bool,
+}
+
+pub(super) fn parse_task_args(args_json: &str) -> TaskArgs {
     if let Ok(value) = serde_json::from_str::<Value>(args_json) {
         if let Some(prompt) = value.get("prompt").and_then(|v| v.as_str()) {
-            return prompt.to_owned();
+            let background = value
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            return TaskArgs {
+                prompt: prompt.to_owned(),
+                background,
+            };
         }
         if let Some(s) = value.as_str() {
-            return s.to_owned();
+            return TaskArgs {
+                prompt: s.to_owned(),
+                background: false,
+            };
         }
     }
-    args_json.trim_matches('"').to_owned()
+    TaskArgs {
+        prompt: args_json.trim_matches('"').to_owned(),
+        background: false,
+    }
 }
 
 pub(super) fn parse_react_args(args_json: &str) -> String {
@@ -315,6 +357,11 @@ pub(super) fn snapshot_to_json(snapshot: &AsyncToolRunSnapshot) -> Value {
             "stdout": truncate_for_tool_output(process.stdout.trim(), 8_000),
             "stderr": truncate_for_tool_output(process.stderr.trim(), 4_000),
         }),
+        crate::tools::AsyncToolRunDetails::Delegated(delegated) => json!({
+            "request": delegated.request,
+            "reply": delegated.reply,
+            "error": delegated.error,
+        }),
     };
     let mut payload = json!({
         "status": snapshot.status.as_str(),
@@ -347,7 +394,10 @@ fn truncate_for_tool_output(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_background_args, parse_exec_args, parse_forget_args, parse_task_args};
+    use super::{
+        parse_background_args, parse_exec_args, parse_forget_args, parse_summon_args,
+        parse_task_args,
+    };
 
     #[test]
     fn parse_exec_args_accepts_background_flag() {
@@ -388,6 +438,21 @@ mod tests {
     #[test]
     fn parse_task_args_accepts_prompt_object() {
         let prompt = parse_task_args(r#"{"prompt":"summarize this file"}"#);
-        assert_eq!(prompt, "summarize this file");
+        assert_eq!(prompt.prompt, "summarize this file");
+    }
+
+    #[test]
+    fn parse_task_args_accepts_background_flag() {
+        let args = parse_task_args(r#"{"prompt":"summarize this file","background":true}"#);
+        assert_eq!(args.prompt, "summarize this file");
+        assert!(args.background);
+    }
+
+    #[test]
+    fn parse_summon_args_accepts_background_flag() {
+        let args = parse_summon_args(r#"{"agent":"helper","summary":"go","background":true}"#);
+        assert_eq!(args.agent, "helper");
+        assert_eq!(args.summary, "go");
+        assert!(args.background);
     }
 }

@@ -179,6 +179,7 @@ impl AgentRuntime {
             }),
             source_message_id: inbound.source_message_id.clone(),
             on_text_delta,
+            allow_async_tools: true,
         };
 
         let mut outcome = match context.react_loop.run(params, history).await {

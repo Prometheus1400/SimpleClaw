@@ -8,6 +8,14 @@ use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, T
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};
 
 const DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS: u64 = 120;
+const EXEC_DESCRIPTION_WITH_BG: &str =
+    "Run local shell commands using JSON: {command, background?}. Returns JSON string.";
+const EXEC_DESCRIPTION_SYNC_ONLY: &str =
+    "Run local shell commands using JSON: {command}. Returns JSON string.";
+const EXEC_SCHEMA_WITH_BG: &str =
+    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
+const EXEC_SCHEMA_SYNC_ONLY: &str =
+    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecTool {
@@ -30,11 +38,19 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run local shell commands using JSON: {command, background?}. Returns JSON string."
+        if self.config.allow_background {
+            EXEC_DESCRIPTION_WITH_BG
+        } else {
+            EXEC_DESCRIPTION_SYNC_ONLY
+        }
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
+        if self.config.allow_background {
+            EXEC_SCHEMA_WITH_BG
+        } else {
+            EXEC_SCHEMA_SYNC_ONLY
+        }
     }
 
     fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
@@ -59,6 +75,10 @@ impl Tool for ExecTool {
 }
 
 impl ExecTool {
+    pub(crate) fn set_allow_background(&mut self, allow_background: bool) {
+        self.config.allow_background = allow_background;
+    }
+
     fn sandbox_policy(&self) -> SandboxPolicy {
         SandboxPolicy {
             network_enabled: self.config.sandbox.network_enabled.unwrap_or(false),
@@ -76,6 +96,11 @@ impl ExecTool {
         if args.background && !self.config.allow_background {
             return Err(FrameworkError::Tool(
                 "exec background mode is disabled by tools.exec.allow_background".to_owned(),
+            ));
+        }
+        if args.background && !ctx.allow_async_tools {
+            return Err(FrameworkError::Tool(
+                "background async tools are not allowed in delegated runs".to_owned(),
             ));
         }
         Ok(ExecPlan {
@@ -240,6 +265,7 @@ mod tests {
             gateway: None,
             completion_tx: None,
             completion_route: None,
+            allow_async_tools: true,
         }
     }
 
@@ -370,6 +396,67 @@ mod tests {
             .list_for_session(&ctx.agent_id, "sess-1")
             .await;
         assert!(sessions.iter().any(|snapshot| snapshot.run_id == run_id));
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_background_when_async_tools_disallowed_in_context() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({
+            "allow_background": true,
+            "sandbox": { "enabled": false }
+        }))
+        .expect("config should apply");
+        let mut ctx = test_ctx().await;
+        ctx.allow_async_tools = false;
+
+        let err = tool
+            .execute(
+                &ctx,
+                r#"{"command":"sleep 0.1","background":true}"#,
+                "sess-1",
+            )
+            .await
+            .err()
+            .expect("background execution should fail");
+
+        assert!(
+            err.to_string()
+                .contains("background async tools are not allowed in delegated runs")
+        );
+    }
+
+    #[test]
+    fn exec_schema_hides_background_when_disabled() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({
+            "allow_background": false,
+            "sandbox": { "enabled": false }
+        }))
+        .expect("config should apply");
+
+        assert_eq!(
+            tool.input_schema_json(),
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}"
+        );
+        assert_eq!(
+            tool.description(),
+            "Run local shell commands using JSON: {command}. Returns JSON string."
+        );
+    }
+
+    #[test]
+    fn exec_schema_exposes_background_when_enabled() {
+        let mut tool = ExecTool::default();
+        tool.configure(serde_json::json!({
+            "allow_background": true,
+            "sandbox": { "enabled": false }
+        }))
+        .expect("config should apply");
+
+        assert_eq!(
+            tool.input_schema_json(),
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
+        );
     }
 
     #[tokio::test]

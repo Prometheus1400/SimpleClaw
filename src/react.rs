@@ -42,6 +42,7 @@ pub struct RunParams<'a> {
     pub completion_route: Option<CompletionRoute>,
     pub source_message_id: Option<String>,
     pub on_text_delta: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub allow_async_tools: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,7 @@ impl ReactLoop {
             gateway: params.gateway.clone(),
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
+            allow_async_tools: params.allow_async_tools,
         };
         let tool_registry = params.tool_registry.clone();
         run_loop(
