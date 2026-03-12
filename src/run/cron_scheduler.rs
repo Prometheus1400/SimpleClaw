@@ -5,17 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use cron::Schedule;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, interval, timeout};
+use tokio::time::{Duration, interval};
 use tracing::{debug, warn};
 
 use crate::channels::InboundMessage;
 use crate::config::{GatewayChannelKind, ToolSandboxConfig};
+use crate::sandbox::{DefaultHostSandbox, HostSandbox, RunHostCommandRequest};
 use crate::telemetry::next_trace_id;
 use crate::tools::builtin::cron::{CronJob, CronStore};
-use crate::tools::sandbox_runtime;
 
 pub fn spawn(
     store: Arc<Mutex<CronStore>>,
@@ -225,30 +224,17 @@ async fn run_guard_command(
         network_enabled: Some(false),
     };
 
-    let prepared =
-        sandbox_runtime::prepare_command_for_exec(command, workspace_root, &sandbox_cfg).await?;
+    let output = DefaultHostSandbox
+        .run(RunHostCommandRequest {
+            command: command.to_owned(),
+            workspace_root: workspace_root.to_path_buf(),
+            sandbox: sandbox_cfg,
+            env: env.clone(),
+            timeout_seconds,
+        })
+        .await?;
 
-    let mut runner = Command::new("bash");
-    runner.arg("-lc").arg(prepared.wrapped_command());
-    runner.envs(env);
-    runner.current_dir(crate::tools::sandbox::normalize_workspace_root(
-        workspace_root,
-    )?);
-
-    let output_result = timeout(Duration::from_secs(timeout_seconds), runner.output()).await;
-    prepared.cleanup().await;
-
-    let output = output_result
-        .map_err(|_| {
-            crate::error::FrameworkError::Tool(format!(
-                "cron guard command timed out after {timeout_seconds}s"
-            ))
-        })?
-        .map_err(|err| {
-            crate::error::FrameworkError::Tool(format!("cron guard command failed to start: {err}"))
-        })?;
-
-    Ok(output.status.success())
+    Ok(output.exit_code == 0)
 }
 
 fn parse_source_channel(raw: &str) -> Option<GatewayChannelKind> {

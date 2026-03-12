@@ -18,6 +18,7 @@ mod providers;
 mod react;
 mod reply_policy;
 mod run;
+pub(crate) mod sandbox;
 mod secrets;
 mod telemetry;
 /// Public test harness helpers for black-box integration tests.

@@ -1,6 +1,4 @@
 pub mod builtin;
-pub mod sandbox;
-pub mod sandbox_runtime;
 pub mod skill;
 
 use async_trait::async_trait;
@@ -21,12 +19,13 @@ use tracing::{Instrument, debug, info_span};
 use tokio::sync::mpsc;
 
 use crate::channels::InboundMessage;
-use crate::config::{GatewayChannelKind, ToolSandboxConfig, ToolsConfig};
+use crate::config::{GatewayChannelKind, ToolsConfig};
 use crate::dispatch::ToolExecutionResult;
 use crate::error::FrameworkError;
 use crate::gateway::Gateway;
 use crate::memory::DynMemory;
 use crate::providers::ToolDefinition;
+use crate::sandbox::{DefaultHostSandbox, DefaultWasmSandbox, HostSandbox, WasmSandbox};
 
 #[derive(Debug, Clone)]
 pub struct AgentInvokeRequest {
@@ -530,98 +529,6 @@ impl ToolAuthorizer for DefaultToolAuthorizer {
     }
 }
 
-pub(crate) struct WasmGuestRequest {
-    pub artifact_name: &'static str,
-    pub args: Vec<String>,
-    pub stdin: Vec<u8>,
-    pub timeout: std::time::Duration,
-}
-
-pub(crate) struct HostSandboxCommandRequest {
-    pub command: String,
-    pub workspace_root: PathBuf,
-    pub sandbox: ToolSandboxConfig,
-    pub env: BTreeMap<String, String>,
-    pub timeout_seconds: u64,
-    pub background: bool,
-}
-
-#[async_trait]
-pub(crate) trait WasmSandboxRuntime: Send + Sync {
-    async fn run_guest(
-        &self,
-        ctx: &ToolExecEnv,
-        request: WasmGuestRequest,
-    ) -> Result<sandbox::WasmGuestOutput, FrameworkError>;
-}
-
-pub(crate) struct DefaultWasmSandboxRuntime;
-
-#[async_trait]
-impl WasmSandboxRuntime for DefaultWasmSandboxRuntime {
-    async fn run_guest(
-        &self,
-        ctx: &ToolExecEnv,
-        request: WasmGuestRequest,
-    ) -> Result<sandbox::WasmGuestOutput, FrameworkError> {
-        sandbox::run_wasm_guest(
-            &ctx.workspace_root,
-            &ctx.persona_root,
-            request.artifact_name,
-            &request.args,
-            &request.stdin,
-            request.timeout,
-        )
-        .await
-    }
-}
-
-#[async_trait]
-pub(crate) trait HostSandboxRuntime: Send + Sync {
-    async fn run_command(
-        &self,
-        ctx: &ToolExecEnv,
-        request: HostSandboxCommandRequest,
-    ) -> Result<ToolExecutionOutcome, FrameworkError>;
-}
-
-pub(crate) struct DefaultHostSandboxRuntime;
-
-#[async_trait]
-impl HostSandboxRuntime for DefaultHostSandboxRuntime {
-    async fn run_command(
-        &self,
-        ctx: &ToolExecEnv,
-        request: HostSandboxCommandRequest,
-    ) -> Result<ToolExecutionOutcome, FrameworkError> {
-        if request.background {
-            let started = ctx
-                .async_tool_runs
-                .start_sandboxed_process(
-                    "exec",
-                    &request.command,
-                    &request.workspace_root,
-                    &request.sandbox,
-                    &request.env,
-                    ctx.completion_tx.clone(),
-                    ctx.completion_route.clone(),
-                )
-                .await?;
-            return Ok(ToolExecutionOutcome::AsyncStarted(started));
-        }
-
-        let result = builtin::exec::exec_with_sandbox_runtime(
-            &request.command,
-            &request.workspace_root,
-            &request.sandbox,
-            request.timeout_seconds,
-            &request.env,
-        )
-        .await?;
-        Ok(ToolExecutionOutcome::completed(result.to_string()))
-    }
-}
-
 #[async_trait]
 pub(crate) trait ToolExecutor: Send + Sync {
     async fn execute(
@@ -634,15 +541,15 @@ pub(crate) trait ToolExecutor: Send + Sync {
 }
 
 pub(crate) struct DefaultToolExecutor {
-    wasm_runtime: Arc<dyn WasmSandboxRuntime>,
-    host_sandbox_runtime: Arc<dyn HostSandboxRuntime>,
+    wasm_runtime: Arc<dyn WasmSandbox>,
+    host_sandbox_runtime: Arc<dyn HostSandbox>,
 }
 
 impl DefaultToolExecutor {
     pub(crate) fn new() -> Self {
         Self {
-            wasm_runtime: Arc::new(DefaultWasmSandboxRuntime),
-            host_sandbox_runtime: Arc::new(DefaultHostSandboxRuntime),
+            wasm_runtime: Arc::new(DefaultWasmSandbox),
+            host_sandbox_runtime: Arc::new(DefaultHostSandbox),
         }
     }
 }
@@ -853,20 +760,15 @@ impl AsyncToolRunManager {
         }
     }
 
-    pub async fn start_sandboxed_process(
+    pub async fn start_prepared_process(
         self: &Arc<Self>,
         tool_name: &str,
         command: &str,
-        workspace_root: &std::path::Path,
-        sandbox: &ToolSandboxConfig,
+        prepared: crate::sandbox::PreparedHostCommand,
         env: &BTreeMap<String, String>,
         completion_tx: Option<mpsc::Sender<InboundMessage>>,
         route: Option<CompletionRoute>,
     ) -> Result<StartedAsyncToolRun, FrameworkError> {
-        let prepared =
-            sandbox_runtime::prepare_command_for_exec(command, workspace_root, sandbox).await?;
-        let (wrapped, manager) = prepared.into_parts();
-
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
         let run_id = format!("async-tool-run-{}-{seq}", Utc::now().timestamp_millis());
         let base = std::env::temp_dir().join("simpleclaw_process");
@@ -878,22 +780,11 @@ impl AsyncToolRunManager {
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stdout log: {e}")))?;
         let stderr_file = File::create(&stderr_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stderr log: {e}")))?;
-        let workspace = sandbox::normalize_workspace_root(workspace_root)?;
-        let child = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(wrapped)
-            .envs(env)
-            .current_dir(&workspace)
-            .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file))
-            .spawn()
-            .map_err(|e| {
-                FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}"))
-            })?;
+        let spawned = prepared.spawn(env, Stdio::from(stdout_file), Stdio::from(stderr_file))?;
 
         let started_at = Utc::now();
-        let pid = Some(child.id());
-        let handle = CompletionHandle::HostSandboxed { child, manager };
+        let pid = Some(spawned.pid());
+        let handle = CompletionHandle::HostSandboxed(spawned);
         let entry = AsyncToolRunEntry {
             tool_name: tool_name.to_owned(),
             kind: AsyncToolRunKind::Process,
@@ -923,9 +814,9 @@ impl AsyncToolRunManager {
 
     pub async fn get(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
         let mut runs = self.runs.lock().await;
-        let entry = runs.get_mut(run_id).ok_or_else(|| {
-            FrameworkError::Tool(format!("unknown async tool run_id: {run_id}"))
-        })?;
+        let entry = runs
+            .get_mut(run_id)
+            .ok_or_else(|| FrameworkError::Tool(format!("unknown async tool run_id: {run_id}")))?;
         entry.poll_completion();
         Ok(entry.snapshot(run_id.to_owned()))
     }
@@ -936,22 +827,23 @@ impl AsyncToolRunManager {
             for entry in runs.values_mut() {
                 entry.poll_completion();
             }
-            runs
-                .iter()
+            runs.iter()
                 .map(|(id, entry)| entry.metadata(id.clone()))
                 .collect()
         };
-        let mut items: Vec<AsyncToolRunSnapshot> =
-            metadata.into_iter().map(AsyncToolRunEntryMeta::into_snapshot).collect();
+        let mut items: Vec<AsyncToolRunSnapshot> = metadata
+            .into_iter()
+            .map(AsyncToolRunEntryMeta::into_snapshot)
+            .collect();
         items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         items
     }
 
     pub async fn cancel(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
         let mut runs = self.runs.lock().await;
-        let entry = runs.get_mut(run_id).ok_or_else(|| {
-            FrameworkError::Tool(format!("unknown async tool run_id: {run_id}"))
-        })?;
+        let entry = runs
+            .get_mut(run_id)
+            .ok_or_else(|| FrameworkError::Tool(format!("unknown async tool run_id: {run_id}")))?;
         entry.kill().await?;
         Ok(entry.snapshot(run_id.to_owned()))
     }
@@ -987,17 +879,18 @@ impl AsyncToolRunManager {
                             .and_then(|r| r.ok());
                         (status.and_then(|s| s.code()), None)
                     }
-                    CompletionHandle::HostSandboxed { mut child, manager } => {
+                    CompletionHandle::HostSandboxed(spawned) => {
+                        let (mut child, cleanup) = spawned.into_parts();
                         let status = tokio::task::spawn_blocking(move || child.wait())
                             .await
                             .ok()
                             .and_then(|r| r.ok());
-                        (status.and_then(|s| s.code()), Some(manager))
+                        (status.and_then(|s| s.code()), Some(cleanup))
                     }
                 };
 
-                if let Some(manager) = sandbox_manager {
-                    manager.reset().await;
+                if let Some(cleanup) = sandbox_manager {
+                    cleanup.cleanup().await;
                 }
 
                 pm.mark_completed(&run_id, exit_code).await;
@@ -1059,9 +952,9 @@ impl AsyncToolRunManager {
 
     pub async fn forget(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
         let mut runs = self.runs.lock().await;
-        let entry = runs.get(run_id).ok_or_else(|| {
-            FrameworkError::Tool(format!("unknown async tool run_id: {run_id}"))
-        })?;
+        let entry = runs
+            .get(run_id)
+            .ok_or_else(|| FrameworkError::Tool(format!("unknown async tool run_id: {run_id}")))?;
         if entry.status == AsyncToolRunStatus::Running {
             return Err(FrameworkError::Tool(
                 "cannot forget a running async tool run; cancel it first".to_owned(),
@@ -1083,10 +976,7 @@ impl Default for AsyncToolRunManager {
 /// Handle passed to the completion watcher for event-driven (non-polling) wait.
 pub enum CompletionHandle {
     Host(std::process::Child),
-    HostSandboxed {
-        child: std::process::Child,
-        manager: std::sync::Arc<::sandbox_runtime::SandboxManager>,
-    },
+    HostSandboxed(crate::sandbox::SpawnedHostCommand),
 }
 
 #[derive(Debug)]
@@ -1545,5 +1435,24 @@ mod tests {
         }
 
         panic!("background process did not complete in time");
+    }
+
+    #[test]
+    fn sandbox_module_exposes_neutral_api_types() {
+        let request = crate::sandbox::RunHostCommandRequest {
+            command: "echo hello".to_owned(),
+            workspace_root: PathBuf::from("/tmp/work"),
+            sandbox: crate::config::ToolSandboxConfig::default(),
+            env: BTreeMap::new(),
+            timeout_seconds: 5,
+        };
+
+        assert_eq!(request.command, "echo hello");
+        let _prepared = std::any::TypeId::of::<crate::sandbox::PreparedHostCommand>();
+        let _wasm_result = crate::sandbox::WasmRunResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
     }
 }
