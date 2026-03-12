@@ -36,7 +36,7 @@ agents:
         network:
           mode: enabled
       tools:
-        enabled_tools: [memory, memorize, summon, web_search, web_fetch, clock, read, exec, process, edit, task]
+        enabled_tools: [memory, memorize, summon, web_search, web_fetch, clock, read, exec, background, edit, task]
       skills:
         enabled_skills: [test_skill, global_test_skill]
 
@@ -63,4 +63,3 @@ embedding:
 database:
   pool_size: 16
   busy_timeout_ms: 5000
-

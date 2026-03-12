@@ -74,9 +74,14 @@ pub struct AsyncToolRunSnapshot {
     pub kind: AsyncToolRunKind,
     pub status: AsyncToolRunStatus,
     pub summary: String,
-    pub process: Option<ProcessAsyncToolRunDetails>,
+    pub details: AsyncToolRunDetails,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AsyncToolRunDetails {
+    Process(ProcessAsyncToolRunDetails),
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +111,8 @@ impl AsyncToolRunManager {
         self: &Arc<Self>,
         tool_name: &str,
         command: &str,
+        agent_id: &str,
+        session_key: &str,
         workspace_root: Option<&std::path::Path>,
         env: &BTreeMap<String, String>,
         completion_tx: Option<mpsc::Sender<InboundMessage>>,
@@ -143,6 +150,8 @@ impl AsyncToolRunManager {
             kind: AsyncToolRunKind::Process,
             summary: command.to_owned(),
             command: command.to_owned(),
+            agent_id: agent_id.to_owned(),
+            session_key: session_key.to_owned(),
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
@@ -192,6 +201,8 @@ impl AsyncToolRunManager {
         self: &Arc<Self>,
         tool_name: &str,
         command: &str,
+        agent_id: &str,
+        session_key: &str,
         prepared: PreparedHostCommand,
         env: &BTreeMap<String, String>,
         completion_tx: Option<mpsc::Sender<InboundMessage>>,
@@ -218,6 +229,8 @@ impl AsyncToolRunManager {
             kind: AsyncToolRunKind::Process,
             summary: command.to_owned(),
             command: command.to_owned(),
+            agent_id: agent_id.to_owned(),
+            session_key: session_key.to_owned(),
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
@@ -249,13 +262,37 @@ impl AsyncToolRunManager {
         Ok(entry.snapshot(run_id.to_owned()))
     }
 
-    pub async fn list(&self) -> Vec<AsyncToolRunSnapshot> {
+    pub async fn get_for_session(
+        &self,
+        run_id: &str,
+        agent_id: &str,
+        session_key: &str,
+    ) -> Result<AsyncToolRunSnapshot, FrameworkError> {
+        let mut runs = self.runs.lock().await;
+        let entry = runs
+            .get_mut(run_id)
+            .ok_or_else(|| FrameworkError::Tool(format!("unknown background run_id: {run_id}")))?;
+        entry.poll_completion();
+        if !entry.belongs_to(agent_id, session_key) {
+            return Err(FrameworkError::Tool(format!(
+                "unknown background run_id: {run_id}"
+            )));
+        }
+        Ok(entry.snapshot(run_id.to_owned()))
+    }
+
+    pub async fn list_for_session(
+        &self,
+        agent_id: &str,
+        session_key: &str,
+    ) -> Vec<AsyncToolRunSnapshot> {
         let metadata: Vec<AsyncToolRunEntryMeta> = {
             let mut runs = self.runs.lock().await;
             for entry in runs.values_mut() {
                 entry.poll_completion();
             }
             runs.iter()
+                .filter(|(_, entry)| entry.belongs_to(agent_id, session_key))
                 .map(|(id, entry)| entry.metadata(id.clone()))
                 .collect()
         };
@@ -267,11 +304,21 @@ impl AsyncToolRunManager {
         items
     }
 
-    pub async fn cancel(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
+    pub async fn kill_for_session(
+        &self,
+        run_id: &str,
+        agent_id: &str,
+        session_key: &str,
+    ) -> Result<AsyncToolRunSnapshot, FrameworkError> {
         let mut runs = self.runs.lock().await;
         let entry = runs
             .get_mut(run_id)
-            .ok_or_else(|| FrameworkError::Tool(format!("unknown async tool run_id: {run_id}")))?;
+            .ok_or_else(|| FrameworkError::Tool(format!("unknown background run_id: {run_id}")))?;
+        if !entry.belongs_to(agent_id, session_key) {
+            return Err(FrameworkError::Tool(format!(
+                "unknown background run_id: {run_id}"
+            )));
+        }
         entry.kill().await?;
         Ok(entry.snapshot(run_id.to_owned()))
     }
@@ -377,22 +424,6 @@ impl AsyncToolRunManager {
             entry.finished_at = Some(Utc::now());
         }
     }
-
-    pub async fn forget(&self, run_id: &str) -> Result<AsyncToolRunSnapshot, FrameworkError> {
-        let mut runs = self.runs.lock().await;
-        let entry = runs
-            .get(run_id)
-            .ok_or_else(|| FrameworkError::Tool(format!("unknown async tool run_id: {run_id}")))?;
-        if entry.status == AsyncToolRunStatus::Running {
-            return Err(FrameworkError::Tool(
-                "cannot forget a running async tool run; cancel it first".to_owned(),
-            ));
-        }
-        let entry = runs.remove(run_id).unwrap();
-        let snapshot = entry.snapshot(run_id.to_owned());
-        entry.cleanup_files();
-        Ok(snapshot)
-    }
 }
 
 impl Default for AsyncToolRunManager {
@@ -412,6 +443,8 @@ struct AsyncToolRunEntry {
     kind: AsyncToolRunKind,
     summary: String,
     command: String,
+    agent_id: String,
+    session_key: String,
     status: AsyncToolRunStatus,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
@@ -442,6 +475,10 @@ impl AsyncToolRunEntry {
         // No on-demand poll is possible here.
     }
 
+    fn belongs_to(&self, agent_id: &str, session_key: &str) -> bool {
+        self.agent_id == agent_id && self.session_key == session_key
+    }
+
     async fn kill(&mut self) -> Result<(), FrameworkError> {
         if self.status != AsyncToolRunStatus::Running {
             return Ok(());
@@ -451,12 +488,12 @@ impl AsyncToolRunEntry {
                 .arg(pid.to_string())
                 .output()
                 .await
-                .map_err(|e| FrameworkError::Tool(format!("failed to kill process: {e}")))?;
+                .map_err(|e| FrameworkError::Tool(format!("failed to kill background run: {e}")))?;
             if !output.status.success() {
                 tracing::warn!(
                     status = "failed",
-                    error_kind = "kill_process",
-                    "process kill"
+                    error_kind = "kill_background_run",
+                    "background run kill"
                 );
             }
         }
@@ -490,7 +527,7 @@ impl AsyncToolRunEntry {
             kind: self.kind,
             status: self.status.clone(),
             summary: self.summary.clone(),
-            process: Some(ProcessAsyncToolRunDetails {
+            details: AsyncToolRunDetails::Process(ProcessAsyncToolRunDetails {
                 command: self.command.clone(),
                 pid: self.pid,
                 exit_code: self.exit_code,
@@ -516,7 +553,7 @@ impl AsyncToolRunEntryMeta {
             kind: self.kind,
             status: self.status,
             summary: self.summary,
-            process: Some(ProcessAsyncToolRunDetails {
+            details: AsyncToolRunDetails::Process(ProcessAsyncToolRunDetails {
                 command: self.command,
                 pid: self.pid,
                 exit_code: self.exit_code,
@@ -563,7 +600,16 @@ mod tests {
     async fn completion_watcher_marks_background_process_complete_without_route() {
         let manager = Arc::new(AsyncToolRunManager::new());
         let started = manager
-            .start_process("exec", "echo hello", None, &BTreeMap::new(), None, None)
+            .start_process(
+                "exec",
+                "echo hello",
+                "default",
+                "session-1",
+                None,
+                &BTreeMap::new(),
+                None,
+                None,
+            )
             .await
             .expect("spawn should succeed");
 
@@ -579,6 +625,40 @@ mod tests {
             sleep(Duration::from_millis(50)).await;
         }
 
-        panic!("background process did not complete in time");
+        panic!("background run did not complete in time");
+    }
+
+    #[tokio::test]
+    async fn list_for_session_excludes_other_sessions() {
+        let manager = Arc::new(AsyncToolRunManager::new());
+        manager
+            .start_process(
+                "exec",
+                "echo hello",
+                "agent-a",
+                "session-a",
+                None,
+                &BTreeMap::new(),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn should succeed");
+        manager
+            .start_process(
+                "exec",
+                "echo hello",
+                "agent-a",
+                "session-b",
+                None,
+                &BTreeMap::new(),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn should succeed");
+
+        let items = manager.list_for_session("agent-a", "session-a").await;
+        assert_eq!(items.len(), 1);
     }
 }

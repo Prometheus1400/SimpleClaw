@@ -22,7 +22,8 @@ use crate::sandbox::{DefaultHostSandbox, DefaultWasmSandbox, HostSandbox, WasmSa
 
 pub(crate) use async_tool_manager::StartedAsyncToolRun;
 pub use async_tool_manager::{
-    AsyncToolRunKind, AsyncToolRunManager, AsyncToolRunSnapshot, AsyncToolRunStatus,
+    AsyncToolRunDetails, AsyncToolRunKind, AsyncToolRunManager, AsyncToolRunSnapshot,
+    AsyncToolRunStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -569,12 +570,17 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Exec(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_direct(ctx, plan).await
+                tool.execute_direct(ctx, plan, session_id).await
             }
             (RegisteredTool::Exec(tool), ToolExecutionKind::HostSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_host_sandboxed(ctx, plan, self.host_sandbox_runtime.as_ref())
-                    .await
+                tool.execute_host_sandboxed(
+                    ctx,
+                    plan,
+                    session_id,
+                    self.host_sandbox_runtime.as_ref(),
+                )
+                .await
             }
             (tool, ToolExecutionKind::Direct) => {
                 tool.execute_direct(ctx, args_json, session_id).await
@@ -600,7 +606,7 @@ mod tests {
     #[async_trait]
     impl Tool for FakeTool {
         fn name(&self) -> &'static str {
-            "process"
+            "background"
         }
 
         fn description(&self) -> &'static str {
@@ -681,7 +687,7 @@ mod tests {
         }
     }
 
-    fn only_process_enabled() -> ToolsConfig {
+    fn only_background_enabled() -> ToolsConfig {
         ToolsConfig {
             read: Some(crate::config::ReadToolConfig {
                 enabled: false,
@@ -695,7 +701,7 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
-            process: Some(crate::config::ProcessToolConfig {
+            background: Some(crate::config::BackgroundToolConfig {
                 enabled: true,
                 ..Default::default()
             }),
@@ -757,7 +763,7 @@ mod tests {
         })));
 
         let active = factory
-            .build_registry(&only_process_enabled(), &[])
+            .build_registry(&only_background_enabled(), &[])
             .expect("fake tool should resolve");
         let definitions = active.definitions();
         assert_eq!(definitions.len(), 1);
@@ -787,8 +793,8 @@ mod tests {
         factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
             name: "clock",
         })));
-        let mut config = only_process_enabled();
-        config.process = Some(crate::config::ProcessToolConfig {
+        let mut config = only_background_enabled();
+        config.background = Some(crate::config::BackgroundToolConfig {
             enabled: false,
             ..Default::default()
         });
@@ -807,8 +813,8 @@ mod tests {
         factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
             name: "clock",
         })));
-        let mut config = only_process_enabled();
-        config.process = Some(crate::config::ProcessToolConfig {
+        let mut config = only_background_enabled();
+        config.background = Some(crate::config::BackgroundToolConfig {
             enabled: false,
             ..Default::default()
         });
@@ -839,8 +845,8 @@ mod tests {
         factory.register_builtin(RegisteredTool::Direct(Arc::new(NamedTool {
             name: "react",
         })));
-        let mut config = only_process_enabled();
-        config.process = Some(crate::config::ProcessToolConfig {
+        let mut config = only_background_enabled();
+        config.background = Some(crate::config::BackgroundToolConfig {
             enabled: false,
             ..Default::default()
         });
