@@ -133,6 +133,7 @@ impl WebSearchTool {
             .run(RunWasmRequest {
                 workspace_root: ctx.workspace_root.clone(),
                 persona_root: ctx.persona_root.clone(),
+                preopened_dirs: Vec::new(),
                 artifact_name: "web_search_tool.wasm",
                 args: Vec::new(),
                 stdin,

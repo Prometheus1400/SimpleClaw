@@ -79,6 +79,7 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: target_config.owner_ids.clone(),
             async_tool_runs: Arc::clone(&self.async_tool_runs),
+            approval_requester: request.approval_requester,
             tool_registry: delegated_tool_registry,
             gateway: None,
             completion_tx: None,
@@ -139,6 +140,7 @@ impl AgentInvoker for DirectAgentInvoker {
             user_id: request.user_id,
             owner_ids: current_config.owner_ids.clone(),
             async_tool_runs: Arc::clone(&self.async_tool_runs),
+            approval_requester: request.approval_requester,
             tool_registry: worker_tool_registry,
             gateway: None,
             completion_tx: None,
@@ -171,6 +173,7 @@ mod tests {
 
     use super::DirectAgentInvoker;
     use crate::agent::{AgentDirectory, AgentRuntimeConfig};
+    use crate::approval::UnavailableApprovalRequester;
     use crate::config::{AgentInnerConfig, ExecutionDefaultsConfig, MemoryRecallConfig};
     use crate::error::FrameworkError;
     use crate::memory::{
@@ -433,6 +436,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "hello".to_owned(),
+                approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
             .err()
@@ -456,6 +460,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "hello".to_owned(),
+                approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
             .err()
@@ -481,6 +486,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "delegate this".to_owned(),
+                approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
             .expect("invoke_agent should succeed");
@@ -510,6 +516,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "delegate this".to_owned(),
+                approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
             .expect("invoke_agent should succeed");
@@ -540,6 +547,7 @@ mod tests {
                 user_id: "user-1".to_owned(),
                 prompt: "do work".to_owned(),
                 max_steps_override: None,
+                approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
             .expect("invoke_worker should succeed");
@@ -574,6 +582,7 @@ mod tests {
                 user_id: "user-1".to_owned(),
                 prompt: "loop".to_owned(),
                 max_steps_override: Some(2),
+                approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
             .expect("invoke_worker should succeed");

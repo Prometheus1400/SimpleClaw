@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::config::GrepToolConfig;
-use crate::error::FrameworkError;
+use crate::error::{FrameworkError, SandboxCapability};
 use crate::sandbox::{RunWasmRequest, WasmSandbox};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
-use super::read::{host_path_to_guest_path, resolve_path_for_read};
+use super::file_access::{
+    FileToolRoute, classify_file_tool_access, classify_wasm_tool_error, resolve_path_for_read,
+};
 
 const MAX_LINE_LENGTH: usize = 2000;
 const DEFAULT_LIMIT: usize = 100;
@@ -26,7 +28,7 @@ pub struct GrepPlan {
     pub pattern: String,
     pub include: Option<String>,
     pub host_path: PathBuf,
-    pub guest_path: Option<String>,
+    pub route: FileToolRoute,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,13 +101,18 @@ impl GrepTool {
                 host_path.display()
             )));
         }
-        let guest_path =
-            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        let route = classify_file_tool_access(
+            &host_path,
+            &ctx.workspace_root,
+            &ctx.persona_root,
+            &self.config.sandbox,
+            SandboxCapability::Read,
+        )?;
         Ok(GrepPlan {
             pattern: pattern.to_owned(),
             include: args.include,
             host_path,
-            guest_path,
+            route,
         })
     }
 
@@ -124,12 +131,12 @@ impl GrepTool {
         plan: GrepPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
-        let guest_path = plan.guest_path.ok_or_else(|| {
-            FrameworkError::Tool("grep path is not representable inside wasm sandbox".to_owned())
-        })?;
         let stdin = serde_json::to_vec(&serde_json::json!({
             "pattern": plan.pattern,
-            "path": guest_path,
+            "path": plan
+                .route
+                .guest_path()
+                .ok_or_else(|| FrameworkError::Tool("grep plan is not sandbox-runnable".to_owned()))?,
             "include": plan.include,
         }))
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize grep args: {e}")))?;
@@ -137,6 +144,7 @@ impl GrepTool {
             .run(RunWasmRequest {
                 workspace_root: ctx.workspace_root.clone(),
                 persona_root: ctx.persona_root.clone(),
+                preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "grep_tool.wasm",
                 args: Vec::new(),
                 stdin,
@@ -144,11 +152,13 @@ impl GrepTool {
             })
             .await?;
         if output.exit_code != 0 {
-            return Err(FrameworkError::Tool(format!(
-                "grep tool failed: exit_code={} stderr={}",
+            return Err(classify_wasm_tool_error(
+                "grep",
+                plan.route.guest_path().unwrap_or(""),
+                SandboxCapability::Read,
                 output.exit_code,
-                output.stderr.trim()
-            )));
+                output.stderr.trim(),
+            ));
         }
         Ok(ToolRunOutput::plain(output.stdout))
     }

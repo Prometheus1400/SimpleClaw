@@ -11,35 +11,39 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::approval::{ApprovalDecision, ApprovalRequest, DynApprovalRequester};
 use crate::channels::InboundMessage;
 use crate::config::{GatewayChannelKind, ToolsConfig};
 use crate::dispatch::ToolExecutionResult;
-use crate::error::FrameworkError;
+use crate::error::{ApprovalDenied, FrameworkError};
 use crate::gateway::Gateway;
 use crate::memory::DynMemory;
 use crate::providers::ToolDefinition;
 use crate::sandbox::{DefaultHostSandbox, DefaultWasmSandbox, HostSandbox, WasmSandbox};
+use crate::tools::builtin::file_access::FileToolRoute;
 
 pub(crate) use async_tool_manager::StartedAsyncToolRun;
 pub use async_tool_manager::{
     AsyncToolRunDetails, AsyncToolRunManager, AsyncToolRunSnapshot, AsyncToolRunStatus,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentInvokeRequest {
     pub target_agent_id: String,
     pub session_id: String,
     pub user_id: String,
     pub prompt: String,
+    pub approval_requester: DynApprovalRequester,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WorkerInvokeRequest {
     pub current_agent_id: String,
     pub session_id: String,
     pub user_id: String,
     pub prompt: String,
     pub max_steps_override: Option<u32>,
+    pub approval_requester: DynApprovalRequester,
 }
 
 #[async_trait]
@@ -115,6 +119,7 @@ pub(crate) struct ToolExecEnv {
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
     pub completion_route: Option<CompletionRoute>,
     pub allow_async_tools: bool,
+    pub approval_requester: DynApprovalRequester,
 }
 
 impl ToolExecEnv {
@@ -716,6 +721,17 @@ impl DefaultToolExecutor {
             host_sandbox_runtime: Arc::new(DefaultHostSandbox),
         }
     }
+
+    #[cfg(test)]
+    fn with_runtimes(
+        wasm_runtime: Arc<dyn WasmSandbox>,
+        host_sandbox_runtime: Arc<dyn HostSandbox>,
+    ) -> Self {
+        Self {
+            wasm_runtime,
+            host_sandbox_runtime,
+        }
+    }
 }
 
 #[async_trait]
@@ -760,9 +776,33 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Read(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
-                    .await
-                    .map(ToolExecutionOutcome::Completed)
+                match &plan.route {
+                    FileToolRoute::Sandboxed { .. } => {
+                        let output = tool
+                            .execute_wasm(ctx, plan.clone(), self.wasm_runtime.as_ref())
+                            .await
+                            .map_err(|err| invariant_sandbox_denial("read", err))?;
+                        Ok(ToolExecutionOutcome::Completed(output))
+                    }
+                    FileToolRoute::NeedsApproval {
+                        capability,
+                        target,
+                        reason,
+                    } => {
+                        request_tool_escalation(
+                            ctx,
+                            session_id,
+                            "read",
+                            capability.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                        tool.execute_direct(ctx, plan)
+                            .await
+                            .map(ToolExecutionOutcome::Completed)
+                    }
+                }
             }
             (RegisteredTool::Edit(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
@@ -772,9 +812,33 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Edit(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
-                    .await
-                    .map(ToolExecutionOutcome::Completed)
+                match &plan.route {
+                    FileToolRoute::Sandboxed { .. } => {
+                        let output = tool
+                            .execute_wasm(ctx, plan.clone(), self.wasm_runtime.as_ref())
+                            .await
+                            .map_err(|err| invariant_sandbox_denial("edit", err))?;
+                        Ok(ToolExecutionOutcome::Completed(output))
+                    }
+                    FileToolRoute::NeedsApproval {
+                        capability,
+                        target,
+                        reason,
+                    } => {
+                        request_tool_escalation(
+                            ctx,
+                            session_id,
+                            "edit",
+                            capability.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                        tool.execute_direct(ctx, plan)
+                            .await
+                            .map(ToolExecutionOutcome::Completed)
+                    }
+                }
             }
             (RegisteredTool::Glob(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
@@ -784,9 +848,33 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Glob(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
-                    .await
-                    .map(ToolExecutionOutcome::Completed)
+                match &plan.route {
+                    FileToolRoute::Sandboxed { .. } => {
+                        let output = tool
+                            .execute_wasm(ctx, plan.clone(), self.wasm_runtime.as_ref())
+                            .await
+                            .map_err(|err| invariant_sandbox_denial("glob", err))?;
+                        Ok(ToolExecutionOutcome::Completed(output))
+                    }
+                    FileToolRoute::NeedsApproval {
+                        capability,
+                        target,
+                        reason,
+                    } => {
+                        request_tool_escalation(
+                            ctx,
+                            session_id,
+                            "glob",
+                            capability.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                        tool.execute_direct(ctx, plan)
+                            .await
+                            .map(ToolExecutionOutcome::Completed)
+                    }
+                }
             }
             (RegisteredTool::Grep(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
@@ -796,9 +884,33 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Grep(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
-                    .await
-                    .map(ToolExecutionOutcome::Completed)
+                match &plan.route {
+                    FileToolRoute::Sandboxed { .. } => {
+                        let output = tool
+                            .execute_wasm(ctx, plan.clone(), self.wasm_runtime.as_ref())
+                            .await
+                            .map_err(|err| invariant_sandbox_denial("grep", err))?;
+                        Ok(ToolExecutionOutcome::Completed(output))
+                    }
+                    FileToolRoute::NeedsApproval {
+                        capability,
+                        target,
+                        reason,
+                    } => {
+                        request_tool_escalation(
+                            ctx,
+                            session_id,
+                            "grep",
+                            capability.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                        tool.execute_direct(ctx, plan)
+                            .await
+                            .map(ToolExecutionOutcome::Completed)
+                    }
+                }
             }
             (RegisteredTool::List(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
@@ -808,9 +920,33 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::List(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
-                    .await
-                    .map(ToolExecutionOutcome::Completed)
+                match &plan.route {
+                    FileToolRoute::Sandboxed { .. } => {
+                        let output = tool
+                            .execute_wasm(ctx, plan.clone(), self.wasm_runtime.as_ref())
+                            .await
+                            .map_err(|err| invariant_sandbox_denial("list", err))?;
+                        Ok(ToolExecutionOutcome::Completed(output))
+                    }
+                    FileToolRoute::NeedsApproval {
+                        capability,
+                        target,
+                        reason,
+                    } => {
+                        request_tool_escalation(
+                            ctx,
+                            session_id,
+                            "list",
+                            capability.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                        tool.execute_direct(ctx, plan)
+                            .await
+                            .map(ToolExecutionOutcome::Completed)
+                    }
+                }
             }
             (RegisteredTool::Exec(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
@@ -818,13 +954,39 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Exec(tool), ToolExecutionKind::HostSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                tool.execute_host_sandboxed(
-                    ctx,
-                    plan,
-                    session_id,
-                    self.host_sandbox_runtime.as_ref(),
-                )
-                .await
+                match tool
+                    .execute_host_sandboxed(
+                        ctx,
+                        plan.clone(),
+                        session_id,
+                        self.host_sandbox_runtime.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(outcome) => Ok(outcome),
+                    Err(err) => {
+                        let denial = err.as_sandbox_permission_denied();
+                        if let Some(denial) = denial {
+                            let reason = format!(
+                                "{} requires unsandboxed {} access",
+                                denial.tool_name,
+                                denial.capability.as_str()
+                            );
+                            request_tool_escalation(
+                                ctx,
+                                session_id,
+                                &denial.tool_name,
+                                denial.capability,
+                                denial.target,
+                                reason,
+                            )
+                            .await?;
+                            tool.execute_direct(ctx, plan, session_id).await
+                        } else {
+                            Err(err)
+                        }
+                    }
+                }
             }
             (RegisteredTool::Summon(tool), ToolExecutionKind::Direct) => {
                 tool.execute_with_trace(ctx, args_json, session_id).await
@@ -844,9 +1006,75 @@ impl ToolExecutor for DefaultToolExecutor {
     }
 }
 
+async fn request_tool_escalation(
+    ctx: &ToolExecEnv,
+    session_id: &str,
+    tool_name: &str,
+    capability: crate::error::SandboxCapability,
+    target: String,
+    reason: String,
+) -> Result<(), FrameworkError> {
+    let request = ApprovalRequest {
+        agent_id: ctx.agent_id.clone(),
+        session_id: session_id.to_owned(),
+        requesting_user_id: ctx.user_id.clone(),
+        tool_name: tool_name.to_owned(),
+        execution_kind: "preflight_escalation".to_owned(),
+        capability,
+        reason,
+        action_summary: target.clone(),
+        diagnostic: format!("preflight escalation required: tool={tool_name} target={target}"),
+    };
+
+    match ctx.approval_requester.request_approval(request).await? {
+        ApprovalDecision::Approved => Ok(()),
+        ApprovalDecision::Denied => Err(FrameworkError::approval_denied(ApprovalDenied {
+            approval_id: "denied".to_owned(),
+            tool_name: tool_name.to_owned(),
+            reason: "user denied sandbox escalation".to_owned(),
+        })),
+        ApprovalDecision::TimedOut => Err(FrameworkError::approval_denied(ApprovalDenied {
+            approval_id: "timed-out".to_owned(),
+            tool_name: tool_name.to_owned(),
+            reason: "approval timed out".to_owned(),
+        })),
+    }
+}
+
+fn invariant_sandbox_denial(tool_name: &str, err: FrameworkError) -> FrameworkError {
+    if let Some(denial) = err.as_sandbox_permission_denied() {
+        return FrameworkError::Tool(format!(
+            "sandbox invariant violated for {tool_name}: preflight classified target as in-sandbox but wasm denied {} access to {} ({})",
+            denial.capability.as_str(),
+            denial.target,
+            denial.diagnostic
+        ));
+    }
+    err
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use tokio::sync::{Mutex, mpsc};
+
     use super::*;
+    use crate::approval::{ApprovalDecision, ApprovalRegistry, GatewayApprovalRequester};
+    use crate::channels::{Channel, ChannelInbound};
+    use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
+    use crate::error::FrameworkError;
+    use crate::memory::{
+        LongTermFactSummary, LongTermForgetResult, MemorizeResult, Memory, MemoryRecallHit,
+        MemoryStoreScope, StoredMessage, StoredRole,
+    };
+    use crate::sandbox::{
+        HostRunResult, PreparedHostCommand, RunHostCommandRequest, RunWasmRequest,
+        SpawnHostCommandRequest, WasmRunResult,
+    };
 
     #[derive(Clone)]
     struct FakeTool {
@@ -937,6 +1165,277 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct NoopMemory;
+
+    #[async_trait]
+    impl Memory for NoopMemory {
+        async fn append_message(
+            &self,
+            _session_id: &str,
+            _role: StoredRole,
+            _content: &str,
+            _username: Option<&str>,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn semantic_query_combined(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _top_k: usize,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+        ) -> Result<Vec<String>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn query_recall_hits(
+            &self,
+            _session_id: &str,
+            _query: &str,
+            _config: &crate::config::MemoryRecallConfig,
+            _history_window: usize,
+            _scope: MemoryStoreScope,
+            _prefer_long_term: bool,
+        ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn semantic_forget_long_term(
+            &self,
+            _query: &str,
+            _similarity_threshold: f32,
+            _max_matches: usize,
+            _kind_filter: Option<&str>,
+            _commit: bool,
+        ) -> Result<LongTermForgetResult, FrameworkError> {
+            Ok(LongTermForgetResult {
+                matches: Vec::new(),
+                deleted_count: 0,
+                similarity_threshold: 0.0,
+                max_matches: 0,
+                kind_filter: None,
+            })
+        }
+
+        async fn recent_messages(
+            &self,
+            _session_id: &str,
+            _limit: usize,
+        ) -> Result<Vec<StoredMessage>, FrameworkError> {
+            Ok(Vec::new())
+        }
+
+        async fn memorize(
+            &self,
+            _session_id: &str,
+            _content: &str,
+            _kind: &str,
+            _importance: u8,
+        ) -> Result<MemorizeResult, FrameworkError> {
+            Ok(MemorizeResult::Inserted)
+        }
+
+        async fn list_long_term_facts(
+            &self,
+            _kind_filter: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<LongTermFactSummary>, FrameworkError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct NoopInvoker;
+
+    #[async_trait]
+    impl AgentInvoker for NoopInvoker {
+        async fn invoke_agent(
+            &self,
+            _request: AgentInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Ok(InvokeOutcome {
+                reply: String::new(),
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn invoke_worker(
+            &self,
+            _request: WorkerInvokeRequest,
+        ) -> Result<InvokeOutcome, FrameworkError> {
+            Ok(InvokeOutcome {
+                reply: String::new(),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureChannel {
+        sent_messages: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Channel for CaptureChannel {
+        async fn send_message(
+            &self,
+            _channel_id: &str,
+            content: &str,
+        ) -> Result<(), FrameworkError> {
+            self.sent_messages.lock().await.push(content.to_owned());
+            Ok(())
+        }
+
+        async fn send_message_with_id(
+            &self,
+            channel_id: &str,
+            content: &str,
+        ) -> Result<Option<String>, FrameworkError> {
+            self.send_message(channel_id, content).await?;
+            Ok(Some("approval-message".to_owned()))
+        }
+
+        async fn edit_message(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            _content: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn broadcast_typing(&self, _channel_id: &str) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+
+        async fn listen(&self) -> Result<ChannelInbound, FrameworkError> {
+            Err(FrameworkError::Tool(
+                "listen should not be called in tool executor tests".to_owned(),
+            ))
+        }
+    }
+
+    struct StubWasmSandbox {
+        calls: AtomicUsize,
+        stderr: String,
+    }
+
+    #[async_trait]
+    impl WasmSandbox for StubWasmSandbox {
+        async fn run(&self, _request: RunWasmRequest) -> Result<WasmRunResult, FrameworkError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(WasmRunResult {
+                stdout: String::new(),
+                stderr: self.stderr.clone(),
+                exit_code: 1,
+            })
+        }
+    }
+
+    struct PanicHostSandbox;
+
+    #[async_trait]
+    impl HostSandbox for PanicHostSandbox {
+        async fn run(
+            &self,
+            _request: RunHostCommandRequest,
+        ) -> Result<HostRunResult, FrameworkError> {
+            panic!("host sandbox should not be used in this test");
+        }
+
+        async fn prepare_spawn(
+            &self,
+            _request: SpawnHostCommandRequest,
+        ) -> Result<PreparedHostCommand, FrameworkError> {
+            panic!("host sandbox should not be used in this test");
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("simpleclaw_tools_{prefix}_{nanos}"));
+        std::fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+
+    fn test_gateway(channel: Arc<dyn Channel>) -> Arc<Gateway> {
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, channel);
+        Arc::new(Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        ))
+    }
+
+    fn test_tool_env(
+        workspace_root: PathBuf,
+        gateway: Arc<Gateway>,
+        approval_registry: Arc<ApprovalRegistry>,
+    ) -> ToolExecEnv {
+        let (completion_tx, _completion_rx) = mpsc::channel(4);
+        let inbound = InboundMessage {
+            trace_id: "trace-1".to_owned(),
+            source_channel: GatewayChannelKind::Discord,
+            target_agent_id: "agent-1".to_owned(),
+            session_key: "sess-1".to_owned(),
+            source_message_id: Some("msg-1".to_owned()),
+            channel_id: "chan-1".to_owned(),
+            guild_id: None,
+            is_dm: true,
+            user_id: "system".to_owned(),
+            username: "system".to_owned(),
+            mentioned_bot: false,
+            invoke: false,
+            content: String::new(),
+        };
+        ToolExecEnv {
+            agent_id: "agent-1".to_owned(),
+            memory: Arc::new(NoopMemory),
+            history_messages: 8,
+            env: BTreeMap::new(),
+            persona_root: workspace_root.clone(),
+            workspace_root,
+            user_id: "owner-1".to_owned(),
+            owner_ids: vec!["owner-1".to_owned()],
+            async_tool_runs: Arc::new(AsyncToolRunManager::new()),
+            invoker: Arc::new(NoopInvoker),
+            gateway: Some(Arc::clone(&gateway)),
+            completion_tx: Some(completion_tx),
+            completion_route: Some(CompletionRoute {
+                trace_id: "trace-1".to_owned(),
+                source_channel: GatewayChannelKind::Discord,
+                target_agent_id: "agent-1".to_owned(),
+                session_key: "sess-1".to_owned(),
+                source_message_id: Some("msg-1".to_owned()),
+                channel_id: "chan-1".to_owned(),
+                guild_id: None,
+                is_dm: true,
+            }),
+            allow_async_tools: true,
+            approval_requester: Arc::new(GatewayApprovalRequester::new(
+                approval_registry,
+                Arc::clone(&gateway),
+                inbound,
+                Duration::from_secs(30),
+            )),
+        }
+    }
+
     fn only_background_enabled() -> ToolsConfig {
         ToolsConfig {
             read: Some(crate::config::ReadToolConfig {
@@ -1012,6 +1511,394 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    fn only_read_enabled() -> ToolsConfig {
+        ToolsConfig {
+            read: Some(crate::config::ReadToolConfig::default()),
+            edit: Some(crate::config::EditToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            glob: Some(crate::config::GlobToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            grep: Some(crate::config::GrepToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            list: Some(crate::config::ListToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            exec: Some(crate::config::ExecToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            background: Some(crate::config::BackgroundToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_search: Some(crate::config::WebSearchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_fetch: Some(crate::config::WebFetchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memory: Some(crate::config::MemoryToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memorize: Some(crate::config::MemorizeToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            forget: Some(crate::config::ForgetToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            summon: Some(crate::config::SummonToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            task: Some(crate::config::TaskToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            clock: Some(crate::config::ClockToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            cron: Some(crate::config::CronToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            react: Some(crate::config::ReactToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            skills: Some(crate::config::SkillsToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn only_edit_enabled() -> ToolsConfig {
+        ToolsConfig {
+            read: Some(crate::config::ReadToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            edit: Some(crate::config::EditToolConfig::default()),
+            glob: Some(crate::config::GlobToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            grep: Some(crate::config::GrepToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            list: Some(crate::config::ListToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            exec: Some(crate::config::ExecToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            background: Some(crate::config::BackgroundToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_search: Some(crate::config::WebSearchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_fetch: Some(crate::config::WebFetchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memory: Some(crate::config::MemoryToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memorize: Some(crate::config::MemorizeToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            forget: Some(crate::config::ForgetToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            summon: Some(crate::config::SummonToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            task: Some(crate::config::TaskToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            clock: Some(crate::config::ClockToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            cron: Some(crate::config::CronToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            react: Some(crate::config::ReactToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            skills: Some(crate::config::SkillsToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn outside_sandbox_edit_requests_approval_and_skips_wasm() {
+        let workspace = unique_temp_dir("approval_retry");
+        let outside = unique_temp_dir("approval_retry_outside");
+        std::fs::write(outside.join("notes.txt"), "hello\n").expect("test file should exist");
+        let approvals = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(CaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let registry = default_factory()
+            .build_registry(&only_edit_enabled(), &[])
+            .expect("tool registry should build");
+        let entry = registry
+            .get("edit")
+            .expect("edit tool should exist")
+            .clone();
+        let wasm = Arc::new(StubWasmSandbox {
+            calls: AtomicUsize::new(0),
+            stderr: "path denied by sandbox".to_owned(),
+        });
+        let executor = DefaultToolExecutor::with_runtimes(wasm.clone(), Arc::new(PanicHostSandbox));
+
+        let approvals_task = {
+            let approvals = Arc::clone(&approvals);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(request) = approvals.pending_requests().await.into_iter().next() {
+                        let _ = approvals
+                            .resolve(
+                                &request.approval_id,
+                                &request.requesting_user_id,
+                                ApprovalDecision::Approved,
+                            )
+                            .await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("approval request was never created");
+            })
+        };
+
+        let outcome = executor
+            .execute(
+                &entry,
+                &ctx,
+                &format!(
+                    r#"{{"filePath":"{}","oldString":"hello","newString":"updated"}}"#,
+                    outside.join("notes.txt").display()
+                ),
+                "sess-1",
+            )
+            .await
+            .expect("approval should allow direct retry");
+        approvals_task.await.expect("approval task should finish");
+
+        let ToolExecutionOutcome::Completed(output) = outcome else {
+            panic!("expected completed tool output");
+        };
+        let sent = channel.sent_messages.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Approval required."));
+        assert_eq!(wasm.calls.load(Ordering::SeqCst), 0);
+        assert!(output.output.contains("Edit applied successfully"));
+        let updated = std::fs::read_to_string(outside.join("notes.txt")).expect("edited file");
+        assert_eq!(updated, "updated\n");
+    }
+
+    #[tokio::test]
+    async fn outside_sandbox_read_returns_approval_denied_when_rejected() {
+        let workspace = unique_temp_dir("approval_deny");
+        let outside = unique_temp_dir("approval_deny_outside");
+        std::fs::write(outside.join("notes.txt"), "hello\n").expect("test file should exist");
+        let approvals = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(CaptureChannel::default());
+        let gateway = test_gateway(channel);
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let registry = default_factory()
+            .build_registry(&only_read_enabled(), &[])
+            .expect("tool registry should build");
+        let entry = registry
+            .get("read")
+            .expect("read tool should exist")
+            .clone();
+        let wasm = Arc::new(StubWasmSandbox {
+            calls: AtomicUsize::new(0),
+            stderr: "path denied by sandbox".to_owned(),
+        });
+        let executor = DefaultToolExecutor::with_runtimes(wasm.clone(), Arc::new(PanicHostSandbox));
+
+        let approvals_task = {
+            let approvals = Arc::clone(&approvals);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(request) = approvals.pending_requests().await.into_iter().next() {
+                        let _ = approvals
+                            .resolve(
+                                &request.approval_id,
+                                &request.requesting_user_id,
+                                ApprovalDecision::Denied,
+                            )
+                            .await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("approval request was never created");
+            })
+        };
+
+        let err = executor
+            .execute(
+                &entry,
+                &ctx,
+                &format!(
+                    r#"{{"filePath":"{}"}}"#,
+                    outside.join("notes.txt").display()
+                ),
+                "sess-1",
+            )
+            .await
+            .expect_err("denied approval should fail");
+        approvals_task.await.expect("approval task should finish");
+
+        assert!(matches!(err, FrameworkError::ApprovalDenied { .. }));
+        assert_eq!(wasm.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn in_sandbox_wasm_denial_is_returned_as_invariant_error() {
+        let workspace = unique_temp_dir("approval_skip");
+        std::fs::write(workspace.join("notes.txt"), "hello\n").expect("test file should exist");
+        let approvals = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(CaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let registry = default_factory()
+            .build_registry(&only_read_enabled(), &[])
+            .expect("tool registry should build");
+        let entry = registry
+            .get("read")
+            .expect("read tool should exist")
+            .clone();
+        let wasm = Arc::new(StubWasmSandbox {
+            calls: AtomicUsize::new(0),
+            stderr: "path denied by sandbox: path=/workspace/notes.txt workspace=/workspace persona=/persona".to_owned(),
+        });
+        let executor = DefaultToolExecutor::with_runtimes(wasm.clone(), Arc::new(PanicHostSandbox));
+
+        let err = executor
+            .execute(&entry, &ctx, r#"{"filePath":"notes.txt"}"#, "sess-1")
+            .await
+            .expect_err("sandbox invariant failures should hard error");
+
+        assert!(
+            err.to_string()
+                .contains("sandbox invariant violated for read")
+        );
+        assert_eq!(wasm.calls.load(Ordering::SeqCst), 1);
+        assert!(approvals.pending_requests().await.is_empty());
+        assert!(channel.sent_messages.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outside_sandbox_edit_ignores_wrong_user_approval_until_requester_approves() {
+        let workspace = unique_temp_dir("approval_wrong_user");
+        let outside = unique_temp_dir("approval_wrong_user_outside");
+        std::fs::write(outside.join("notes.txt"), "hello\n").expect("test file should exist");
+        let approvals = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(CaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let registry = default_factory()
+            .build_registry(&only_edit_enabled(), &[])
+            .expect("tool registry should build");
+        let entry = registry
+            .get("edit")
+            .expect("edit tool should exist")
+            .clone();
+        let wasm = Arc::new(StubWasmSandbox {
+            calls: AtomicUsize::new(0),
+            stderr: "path denied by sandbox".to_owned(),
+        });
+        let executor = DefaultToolExecutor::with_runtimes(wasm.clone(), Arc::new(PanicHostSandbox));
+
+        let approvals_task = {
+            let approvals = Arc::clone(&approvals);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(request) = approvals.pending_requests().await.into_iter().next() {
+                        let wrong_user_resolved = approvals
+                            .resolve(
+                                &request.approval_id,
+                                "intruder-1",
+                                ApprovalDecision::Approved,
+                            )
+                            .await;
+                        assert!(!wrong_user_resolved);
+                        assert_eq!(approvals.pending_requests().await.len(), 1);
+                        let requester_resolved = approvals
+                            .resolve(
+                                &request.approval_id,
+                                &request.requesting_user_id,
+                                ApprovalDecision::Approved,
+                            )
+                            .await;
+                        assert!(requester_resolved);
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("approval request was never created");
+            })
+        };
+
+        let outcome = executor
+            .execute(
+                &entry,
+                &ctx,
+                &format!(
+                    r#"{{"filePath":"{}","oldString":"hello","newString":"updated"}}"#,
+                    outside.join("notes.txt").display()
+                ),
+                "sess-1",
+            )
+            .await
+            .expect("requesting user approval should allow direct retry");
+        approvals_task.await.expect("approval task should finish");
+
+        let ToolExecutionOutcome::Completed(output) = outcome else {
+            panic!("expected completed tool output");
+        };
+        let sent = channel.sent_messages.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Only the requesting user may approve or deny"));
+        assert!(sent[0].contains("owner-1"));
+        assert_eq!(wasm.calls.load(Ordering::SeqCst), 0);
+        assert!(output.output.contains("Edit applied successfully"));
     }
 
     #[test]

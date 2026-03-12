@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::ListToolConfig;
-use crate::error::FrameworkError;
+use crate::error::{FrameworkError, SandboxCapability};
 use crate::sandbox::{RunWasmRequest, WasmSandbox};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
-use super::read::{host_path_to_guest_path, resolve_path_for_read};
+use super::file_access::{
+    FileToolRoute, classify_file_tool_access, classify_wasm_tool_error, resolve_path_for_read,
+};
 
 const LIMIT: usize = 100;
 const IGNORE_PATTERNS: &[&str] = &[
@@ -42,7 +44,7 @@ pub struct ListTool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListPlan {
     pub host_path: PathBuf,
-    pub guest_path: Option<String>,
+    pub route: FileToolRoute,
     pub ignore: Vec<String>,
 }
 
@@ -109,11 +111,16 @@ impl ListTool {
                 host_path.display()
             )));
         }
-        let guest_path =
-            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        let route = classify_file_tool_access(
+            &host_path,
+            &ctx.workspace_root,
+            &ctx.persona_root,
+            &self.config.sandbox,
+            SandboxCapability::Read,
+        )?;
         Ok(ListPlan {
             host_path,
-            guest_path,
+            route,
             ignore: args.ignore.unwrap_or_default(),
         })
     }
@@ -133,11 +140,11 @@ impl ListTool {
         plan: ListPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
-        let guest_path = plan.guest_path.ok_or_else(|| {
-            FrameworkError::Tool("list path is not representable inside wasm sandbox".to_owned())
-        })?;
         let stdin = serde_json::to_vec(&serde_json::json!({
-            "path": guest_path,
+            "path": plan
+                .route
+                .guest_path()
+                .ok_or_else(|| FrameworkError::Tool("list plan is not sandbox-runnable".to_owned()))?,
             "ignore": plan.ignore,
         }))
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize list args: {e}")))?;
@@ -145,6 +152,7 @@ impl ListTool {
             .run(RunWasmRequest {
                 workspace_root: ctx.workspace_root.clone(),
                 persona_root: ctx.persona_root.clone(),
+                preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "list_tool.wasm",
                 args: Vec::new(),
                 stdin,
@@ -152,11 +160,13 @@ impl ListTool {
             })
             .await?;
         if output.exit_code != 0 {
-            return Err(FrameworkError::Tool(format!(
-                "list tool failed: exit_code={} stderr={}",
+            return Err(classify_wasm_tool_error(
+                "list",
+                plan.route.guest_path().unwrap_or(""),
+                SandboxCapability::Read,
                 output.exit_code,
-                output.stderr.trim()
-            )));
+                output.stderr.trim(),
+            ));
         }
         Ok(ToolRunOutput::plain(output.stdout))
     }

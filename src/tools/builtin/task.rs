@@ -29,6 +29,7 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     use super::TaskTool;
+    use crate::approval::UnavailableApprovalRequester;
     use crate::config::DatabaseConfig;
     use crate::error::FrameworkError;
     use crate::memory::MemoryStore;
@@ -86,6 +87,7 @@ mod tests {
             completion_tx: None,
             completion_route: None,
             allow_async_tools: true,
+            approval_requester: Arc::new(UnavailableApprovalRequester),
         }
     }
 
@@ -206,6 +208,7 @@ impl Tool for TaskTool {
                 user_id: ctx.user_id.clone(),
                 prompt: args.prompt.clone(),
                 max_steps_override: self.config.worker_max_steps,
+                approval_requester: Arc::clone(&ctx.approval_requester),
             };
             let started = ctx
                 .async_tool_runs
@@ -235,6 +238,7 @@ impl Tool for TaskTool {
                 user_id: ctx.user_id.clone(),
                 prompt: args.prompt,
                 max_steps_override: self.config.worker_max_steps,
+                approval_requester: Arc::clone(&ctx.approval_requester),
             })
             .await?;
         Ok(ToolExecutionOutcome::Completed(ToolRunOutput {

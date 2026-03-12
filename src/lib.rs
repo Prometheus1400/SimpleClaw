@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 
 mod agent;
+pub mod approval;
 mod auth;
 mod channels;
 mod cli;

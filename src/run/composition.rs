@@ -11,6 +11,7 @@ use crate::agent::{
     AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
     load_system_prompt_for_persona,
 };
+use crate::approval::ApprovalRegistry;
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::config::{AgentEntryConfig, ChannelOutputMode, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
@@ -45,6 +46,7 @@ pub(crate) trait ChannelFactory: Send + Sync {
     async fn create_channels(
         &self,
         loaded: &LoadedConfig,
+        approval_registry: Arc<ApprovalRegistry>,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>>;
 }
 
@@ -60,6 +62,10 @@ pub(crate) trait AsyncToolRunManagerFactory: Send + Sync {
     fn create_async_tool_run_manager(&self) -> Arc<AsyncToolRunManager>;
 }
 
+pub(crate) trait ApprovalRegistryFactory: Send + Sync {
+    fn create_approval_registry(&self) -> Arc<ApprovalRegistry>;
+}
+
 pub(crate) struct RuntimeDependencies {
     pub provider_factory_builder: Arc<dyn ProviderFactoryBuilder>,
     pub memory_factory: Arc<dyn MemoryFactory>,
@@ -67,6 +73,7 @@ pub(crate) struct RuntimeDependencies {
     pub tool_factory_builder: Arc<dyn ToolFactoryBuilder>,
     pub skill_factory_builder: Arc<dyn SkillFactoryBuilder>,
     pub async_tool_run_manager_factory: Arc<dyn AsyncToolRunManagerFactory>,
+    pub approval_registry_factory: Arc<dyn ApprovalRegistryFactory>,
 }
 
 impl Default for RuntimeDependencies {
@@ -78,6 +85,7 @@ impl Default for RuntimeDependencies {
             tool_factory_builder: Arc::new(DefaultToolFactoryBuilder),
             skill_factory_builder: Arc::new(DefaultSkillFactoryBuilder),
             async_tool_run_manager_factory: Arc::new(DefaultAsyncToolRunManagerFactory),
+            approval_registry_factory: Arc::new(DefaultApprovalRegistryFactory),
         }
     }
 }
@@ -137,6 +145,7 @@ impl ChannelFactory for DefaultChannelFactory {
     async fn create_channels(
         &self,
         loaded: &LoadedConfig,
+        approval_registry: Arc<ApprovalRegistry>,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         for (kind, config) in &loaded.global.gateway.channels {
@@ -145,7 +154,7 @@ impl ChannelFactory for DefaultChannelFactory {
             }
             let channel: Arc<dyn Channel> = match kind {
                 GatewayChannelKind::Discord => Arc::new(
-                    DiscordChannel::from_config(config)
+                    DiscordChannel::from_config(config, Arc::clone(&approval_registry))
                         .await
                         .wrap_err("failed to initialize discord channel")?,
                 ),
@@ -177,6 +186,14 @@ struct DefaultAsyncToolRunManagerFactory;
 impl AsyncToolRunManagerFactory for DefaultAsyncToolRunManagerFactory {
     fn create_async_tool_run_manager(&self) -> Arc<AsyncToolRunManager> {
         Arc::new(AsyncToolRunManager::new())
+    }
+}
+
+struct DefaultApprovalRegistryFactory;
+
+impl ApprovalRegistryFactory for DefaultApprovalRegistryFactory {
+    fn create_approval_registry(&self) -> Arc<ApprovalRegistry> {
+        Arc::new(ApprovalRegistry::new())
     }
 }
 
@@ -287,6 +304,7 @@ pub(crate) async fn assemble_runtime_state(
     let async_tool_runs = deps
         .async_tool_run_manager_factory
         .create_async_tool_run_manager();
+    let approval_registry = deps.approval_registry_factory.create_approval_registry();
     let react_loop = Arc::new_cyclic(|react_loop: &Weak<ReactLoop>| {
         let invoker: Arc<dyn crate::tools::AgentInvoker> = Arc::new(DirectAgentInvoker::new(
             react_loop.clone(),
@@ -298,7 +316,10 @@ pub(crate) async fn assemble_runtime_state(
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
 
-    let channels = deps.channel_factory.create_channels(loaded).await?;
+    let channels = deps
+        .channel_factory
+        .create_channels(loaded, Arc::clone(&approval_registry))
+        .await?;
     let output_modes = loaded
         .global
         .gateway
@@ -320,6 +341,7 @@ pub(crate) async fn assemble_runtime_state(
         tool_runtime: Arc::new(ToolRuntime {
             async_tool_runs,
             completion_tx: gateway_tx.clone(),
+            approval_registry,
         }),
     });
 
@@ -351,9 +373,10 @@ pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
         })
         .collect();
     RuntimeServices {
-        _gateway_listeners: state
-            .gateway
-            .start(state.context.tool_runtime.completion_tx.clone()),
+        _gateway_listeners: state.gateway.start(
+            state.context.tool_runtime.completion_tx.clone(),
+            Arc::clone(&state.context.tool_runtime.approval_registry),
+        ),
         _cron_scheduler: super::cron_scheduler::spawn(
             Arc::clone(&state.cron_store),
             state.context.tool_runtime.completion_tx.clone(),
@@ -535,6 +558,7 @@ mod tests {
         async fn create_channels(
             &self,
             _loaded: &LoadedConfig,
+            _approval_registry: Arc<crate::approval::ApprovalRegistry>,
         ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn crate::channels::Channel>>>
         {
             Ok(HashMap::new())

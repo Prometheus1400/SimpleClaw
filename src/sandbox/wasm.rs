@@ -12,7 +12,7 @@ use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 use crate::error::FrameworkError;
-use crate::sandbox::{RunWasmRequest, WasmRunResult, WasmSandbox};
+use crate::sandbox::{RunWasmRequest, WasmPreopenedDir, WasmRunResult, WasmSandbox};
 
 const WASM_STDIO_CAPACITY: usize = 2 * 1024 * 1024;
 const WASM_WORKSPACE_MOUNT: &str = "/workspace";
@@ -32,12 +32,20 @@ impl WasmSandbox for DefaultWasmSandbox {
 async fn run_wasm_guest(request: RunWasmRequest) -> Result<WasmRunResult, FrameworkError> {
     let workspace = normalize_workspace_root(&request.workspace_root)?;
     let persona = normalize_workspace_root(&request.persona_root)?;
+    let preopened_dirs = request.preopened_dirs;
     let artifact_path = resolve_guest_artifact_path(request.artifact_name, &workspace)?;
     let args = request.args;
     let stdin = request.stdin;
 
     let join = spawn_blocking(move || {
-        run_wasm_guest_blocking(&workspace, &persona, &artifact_path, &args, &stdin)
+        run_wasm_guest_blocking(
+            &workspace,
+            &persona,
+            &preopened_dirs,
+            &artifact_path,
+            &args,
+            &stdin,
+        )
     });
 
     let joined = timeout(request.timeout, join).await.map_err(|_| {
@@ -49,6 +57,7 @@ async fn run_wasm_guest(request: RunWasmRequest) -> Result<WasmRunResult, Framew
 fn run_wasm_guest_blocking(
     workspace_root: &Path,
     persona_root: &Path,
+    preopened_dirs: &[WasmPreopenedDir],
     artifact_path: &Path,
     args: &[String],
     stdin: &[u8],
@@ -108,6 +117,22 @@ fn run_wasm_guest_blocking(
                 persona_root.display()
             ))
         })?;
+    for dir in preopened_dirs {
+        wasi_builder
+            .preopened_dir(
+                &dir.host_path,
+                &dir.guest_path,
+                DirPerms::all(),
+                FilePerms::all(),
+            )
+            .map_err(|e| {
+                FrameworkError::Tool(format!(
+                    "wasm guest failed to preopen extra dir: path={} guest_path={} error={e}",
+                    dir.host_path.display(),
+                    dir.guest_path
+                ))
+            })?;
+    }
     wasi_builder
         .preopened_dir(
             isolated_tmp.path(),

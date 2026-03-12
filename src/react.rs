@@ -1,3 +1,4 @@
+use crate::approval::DynApprovalRequester;
 use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
 use crate::gateway::Gateway;
@@ -36,6 +37,7 @@ pub struct RunParams<'a> {
     pub user_id: String,
     pub owner_ids: Vec<String>,
     pub async_tool_runs: Arc<AsyncToolRunManager>,
+    pub approval_requester: DynApprovalRequester,
     pub tool_registry: AgentToolRegistry,
     pub gateway: Option<Arc<Gateway>>,
     pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
@@ -93,6 +95,7 @@ impl ReactLoop {
             completion_tx: params.completion_tx.clone(),
             completion_route: params.completion_route.clone(),
             allow_async_tools: params.allow_async_tools,
+            approval_requester: Arc::clone(&params.approval_requester),
         };
         let tool_registry = params.tool_registry.clone();
         run_loop(
