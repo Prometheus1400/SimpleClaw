@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::ToolSandboxConfig;
 use crate::error::FrameworkError;
 
 pub(crate) use host::DefaultHostSandbox;
@@ -39,7 +38,7 @@ pub(crate) struct WasmRunResult {
 pub(crate) struct RunHostCommandRequest {
     pub command: String,
     pub workspace_root: PathBuf,
-    pub sandbox: ToolSandboxConfig,
+    pub policy: SandboxPolicy,
     pub env: BTreeMap<String, String>,
     pub timeout_seconds: u64,
 }
@@ -48,7 +47,14 @@ pub(crate) struct RunHostCommandRequest {
 pub(crate) struct SpawnHostCommandRequest {
     pub command: String,
     pub workspace_root: PathBuf,
-    pub sandbox: ToolSandboxConfig,
+    pub policy: SandboxPolicy,
+}
+
+/// Tool-agnostic sandbox policy inputs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SandboxPolicy {
+    pub network_enabled: bool,
+    pub extra_writable_paths: Vec<String>,
 }
 
 /// Result from a completed host command run.

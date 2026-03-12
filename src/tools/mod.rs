@@ -1442,7 +1442,7 @@ mod tests {
         let request = crate::sandbox::RunHostCommandRequest {
             command: "echo hello".to_owned(),
             workspace_root: PathBuf::from("/tmp/work"),
-            sandbox: crate::config::ToolSandboxConfig::default(),
+            policy: crate::sandbox::SandboxPolicy::default(),
             env: BTreeMap::new(),
             timeout_seconds: 5,
         };
