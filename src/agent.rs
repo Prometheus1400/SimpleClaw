@@ -22,6 +22,7 @@ use crate::tools::{AgentToolRegistry, AsyncToolRunManager, CompletionRoute};
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeConfig {
     pub agent_id: String,
+    pub agent_name: String,
     pub provider_key: String,
     pub effective_execution: ExecutionDefaultsConfig,
     pub owner_ids: Vec<String>,
@@ -156,6 +157,7 @@ impl AgentRuntime {
             provider_key: &self.config.provider_key,
             system_prompt: &system_prompt,
             agent_id: &self.config.agent_id,
+            agent_name: &self.config.agent_name,
             session_id: memory_session_id,
             max_steps: effective_max_steps,
             history_messages: self.config.effective_execution.history_messages as usize,
@@ -725,6 +727,7 @@ mod tests {
             .expect("tool registry should build");
         AgentRuntimeConfig {
             agent_id: "agent-1".to_owned(),
+            agent_name: "Agent One".to_owned(),
             provider_key: "default".to_owned(),
             effective_execution: ExecutionDefaultsConfig {
                 history_messages: 3,

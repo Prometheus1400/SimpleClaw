@@ -69,6 +69,7 @@ impl AgentInvoker for DirectAgentInvoker {
             provider_key: &target_config.provider_key,
             system_prompt: &target_config.system_prompt,
             agent_id: &request.target_agent_id,
+            agent_name: &target_config.agent_name,
             session_id: &request.session_id,
             max_steps: effective_max_steps,
             history_messages: target_config.effective_execution.history_messages as usize,
@@ -128,6 +129,7 @@ impl AgentInvoker for DirectAgentInvoker {
             provider_key: &current_config.provider_key,
             system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
             agent_id: "task-worker",
+            agent_name: "Task Worker",
             session_id: &request.session_id,
             max_steps: request
                 .max_steps_override
@@ -379,6 +381,7 @@ mod tests {
             .expect("tool registry should build");
         AgentRuntimeConfig {
             agent_id: "default".to_owned(),
+            agent_name: "Default".to_owned(),
             provider_key: "default".to_owned(),
             effective_execution: ExecutionDefaultsConfig {
                 max_steps: 4,

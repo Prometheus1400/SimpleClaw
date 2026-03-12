@@ -196,7 +196,7 @@ impl EventHandler for DiscordHandler {
             }
             ApprovalInteractionResult::Authorized {
                 resolution,
-                success_message,
+                rendered_message,
             } => {
                 if let Err(err) = self.approval_tx.send(resolution).await {
                     tracing::warn!(status = "dropped", error_kind = "approval_queue_closed", error = %err, "discord approval queue closed");
@@ -222,7 +222,7 @@ impl EventHandler for DiscordHandler {
                         &ctx.http,
                         CreateInteractionResponse::UpdateMessage(
                             CreateInteractionResponseMessage::new()
-                                .content(success_message)
+                                .content(rendered_message)
                                 .components(Vec::new()),
                         ),
                     )
@@ -279,7 +279,7 @@ impl Channel for DiscordChannel {
         &self,
         channel_id: &str,
         request: &PendingApprovalRequest,
-    ) -> Result<(), FrameworkError> {
+    ) -> Result<Option<String>, FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
         let message = CreateMessage::new()
             .content(render_approval_request(request))
@@ -294,11 +294,11 @@ impl Channel for DiscordChannel {
                     .label("Deny")
                     .style(ButtonStyle::Danger),
             ])]);
-        channel_id
+        let message = channel_id
             .send_message(&self.http, message)
             .await
             .map_err(|e| FrameworkError::Config(format!("discord approval send failed: {e}")))?;
-        Ok(())
+        Ok(Some(message.id.get().to_string()))
     }
 
     async fn edit_message(
@@ -313,6 +313,20 @@ impl Channel for DiscordChannel {
             .edit_message(&self.http, message_id, EditMessage::new().content(content))
             .await
             .map_err(|e| FrameworkError::Config(format!("discord edit failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn delete_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        let message_id = parse_message_id(message_id)?;
+        channel_id
+            .delete_message(&self.http, message_id)
+            .await
+            .map_err(|e| FrameworkError::Config(format!("discord delete failed: {e}")))?;
         Ok(())
     }
 
@@ -383,15 +397,26 @@ impl Channel for DiscordChannel {
 
 fn render_approval_request(request: &PendingApprovalRequest) -> String {
     format!(
-        "Approval required.\nRequesting user: {}\nTool: {}\nReason: {}\nAction: {}\nCapability: {}\nExecution: {}\nDiagnostic: {}\nOnly the requesting user may approve or deny this request.",
-        request.requesting_user_id,
+        "**Approval required**\n{} wants to run `{}` outside the sandbox.\n\nRequested by: {}\nAction: `{}`\nWhy: {}",
+        request.agent_name,
         request.tool_name,
-        request.reason,
+        format_discord_user(&request.requesting_user_id),
         request.action_summary,
-        request.capability,
-        request.execution_kind,
-        request.diagnostic
+        request.reason
     )
+}
+
+fn render_resolved_approval_request(request: &PendingApprovalRequest) -> String {
+    let _ = request;
+    "**Approval request closed**".to_owned()
+}
+
+fn format_discord_user(user_id: &str) -> String {
+    if user_id.chars().all(|ch| ch.is_ascii_digit()) {
+        format!("<@{user_id}>")
+    } else {
+        user_id.to_owned()
+    }
 }
 
 enum ApprovalInteractionResult {
@@ -406,7 +431,7 @@ enum ApprovalInteractionResult {
     },
     Authorized {
         resolution: ApprovalResolution,
-        success_message: &'static str,
+        rendered_message: String,
     },
 }
 
@@ -419,24 +444,19 @@ fn evaluate_approval_interaction(
 ) -> ApprovalInteractionResult {
     let Some(request) = pending else {
         return ApprovalInteractionResult::Inactive {
-            message: "This approval request is no longer active.",
+            message: "This approval request expired.",
         };
     };
 
     if request.requesting_user_id != actor_user_id {
         return ApprovalInteractionResult::Unauthorized {
-            message: "Only the requesting user can approve or deny this request.",
+            message: "Only the requester can use these buttons.",
             approval_id,
             channel_id,
             user_id: actor_user_id,
         };
     }
 
-    let success_message = match decision {
-        ApprovalDecision::Approved => "Approved.",
-        ApprovalDecision::Denied => "Denied.",
-        ApprovalDecision::TimedOut => "Approval timed out.",
-    };
     ApprovalInteractionResult::Authorized {
         resolution: ApprovalResolution {
             approval_id,
@@ -444,7 +464,7 @@ fn evaluate_approval_interaction(
             channel_id,
             user_id: actor_user_id,
         },
-        success_message,
+        rendered_message: render_resolved_approval_request(&request),
     }
 }
 
@@ -476,6 +496,7 @@ mod approval_tests {
         PendingApprovalRequest {
             approval_id: "approval-1".to_owned(),
             agent_id: "agent-1".to_owned(),
+            agent_name: "Agent One".to_owned(),
             session_id: "sess-1".to_owned(),
             requesting_user_id: "user-1".to_owned(),
             tool_name: "read".to_owned(),
@@ -519,11 +540,11 @@ mod approval_tests {
         match outcome {
             ApprovalInteractionResult::Authorized {
                 resolution,
-                success_message,
+                rendered_message,
             } => {
                 assert_eq!(resolution.approval_id, "approval-1");
                 assert_eq!(resolution.user_id, "user-1");
-                assert_eq!(success_message, "Denied.");
+                assert_eq!(rendered_message, "**Approval request closed**");
             }
             _ => panic!("expected authorized interaction"),
         }
@@ -541,10 +562,31 @@ mod approval_tests {
 
         match outcome {
             ApprovalInteractionResult::Inactive { message } => {
-                assert_eq!(message, "This approval request is no longer active.");
+                assert_eq!(message, "This approval request expired.");
             }
             _ => panic!("expected inactive interaction"),
         }
+    }
+
+    #[test]
+    fn render_approval_request_mentions_numeric_discord_user_ids() {
+        let mut request = pending_request();
+        request.requesting_user_id = "123456789".to_owned();
+
+        let rendered = super::render_approval_request(&request);
+
+        assert!(rendered.contains("Agent One wants to run `read` outside the sandbox."));
+        assert!(rendered.contains("Requested by: <@123456789>"));
+    }
+
+    #[test]
+    fn render_approval_request_hides_internal_metadata() {
+        let rendered = super::render_approval_request(&pending_request());
+
+        assert!(!rendered.contains("agent-1"));
+        assert!(!rendered.contains("preflight_escalation"));
+        assert!(!rendered.contains("read` via"));
+        assert!(!rendered.contains("blocked"));
     }
 }
 

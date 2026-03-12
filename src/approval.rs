@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::channels::InboundMessage;
 use crate::error::{FrameworkError, SandboxCapability};
@@ -29,6 +30,8 @@ pub enum ApprovalDecision {
 pub struct ApprovalRequest {
     /// Agent currently executing the turn.
     pub agent_id: String,
+    /// Human-facing agent name from config.
+    pub agent_name: String,
     /// Session key for the running turn.
     pub session_id: String,
     /// User id that initiated the request and is allowed to resolve it.
@@ -54,6 +57,8 @@ pub struct PendingApprovalRequest {
     pub approval_id: String,
     /// Agent currently executing the turn.
     pub agent_id: String,
+    /// Human-facing agent name from config.
+    pub agent_name: String,
     /// Session key for the running turn.
     pub session_id: String,
     /// User id that initiated the request and is allowed to resolve it.
@@ -115,6 +120,7 @@ impl ApprovalRegistry {
         let routed = PendingApprovalRequest {
             approval_id: approval_id.clone(),
             agent_id: request.agent_id,
+            agent_name: request.agent_name,
             session_id: request.session_id,
             requesting_user_id: request.requesting_user_id,
             tool_name: request.tool_name,
@@ -226,13 +232,29 @@ impl ApprovalRequester for GatewayApprovalRequester {
         request: ApprovalRequest,
     ) -> Result<ApprovalDecision, FrameworkError> {
         let (pending, rx) = self.registry.register(request).await;
-        self.gateway
+        let approval_message_id = self
+            .gateway
             .send_approval_request(&self.inbound, &pending)
             .await?;
-        Ok(self
+        let decision = self
             .registry
             .wait_for_decision(&pending.approval_id, rx, self.timeout)
-            .await)
+            .await;
+        if decision == ApprovalDecision::TimedOut
+            && let Some(message_id) = approval_message_id
+            && let Err(err) = self.gateway.delete_message(&self.inbound, &message_id).await
+        {
+            warn!(
+                status = "failed",
+                error_kind = "approval_message_delete",
+                approval_id = %pending.approval_id,
+                channel_id = %self.inbound.channel_id,
+                message_id,
+                error = %err,
+                "failed to delete expired approval message"
+            );
+        }
+        Ok(decision)
     }
 }
 
@@ -253,12 +275,26 @@ impl ApprovalRequester for UnavailableApprovalRequester {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalDecision, ApprovalRegistry, ApprovalRequest};
+    use std::collections::HashMap;
+    use std::future::pending;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tokio::sync::Mutex;
+
+    use super::{
+        ApprovalDecision, ApprovalRegistry, ApprovalRequest, ApprovalRequester,
+        GatewayApprovalRequester,
+    };
+    use crate::channels::{Channel, ChannelInbound, InboundMessage};
+    use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
     use crate::error::SandboxCapability;
+    use crate::gateway::Gateway;
 
     fn test_request() -> ApprovalRequest {
         ApprovalRequest {
             agent_id: "agent-1".to_owned(),
+            agent_name: "Agent One".to_owned(),
             session_id: "sess-1".to_owned(),
             requesting_user_id: "user-1".to_owned(),
             tool_name: "read".to_owned(),
@@ -267,6 +303,85 @@ mod tests {
             reason: "outside sandbox".to_owned(),
             action_summary: "/tmp/secret.txt".to_owned(),
             diagnostic: "blocked".to_owned(),
+        }
+    }
+
+    fn test_inbound() -> InboundMessage {
+        InboundMessage {
+            trace_id: "trace-1".to_owned(),
+            source_channel: GatewayChannelKind::Discord,
+            target_agent_id: "default".to_owned(),
+            session_key: "agent:default:discord:chan-1".to_owned(),
+            source_message_id: Some("msg-1".to_owned()),
+            channel_id: "chan-1".to_owned(),
+            guild_id: None,
+            is_dm: true,
+            user_id: "user-1".to_owned(),
+            username: "kaleb".to_owned(),
+            mentioned_bot: false,
+            invoke: true,
+            content: "run it".to_owned(),
+        }
+    }
+
+    #[derive(Default)]
+    struct ApprovalChannel {
+        sent_approvals: Mutex<Vec<(String, String)>>,
+        deleted_messages: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl Channel for ApprovalChannel {
+        async fn send_message(
+            &self,
+            _channel_id: &str,
+            _content: &str,
+        ) -> Result<(), crate::error::FrameworkError> {
+            Ok(())
+        }
+
+        async fn send_approval_request(
+            &self,
+            channel_id: &str,
+            request: &crate::approval::PendingApprovalRequest,
+        ) -> Result<Option<String>, crate::error::FrameworkError> {
+            self.sent_approvals.lock().await.push((
+                channel_id.to_owned(),
+                request.approval_id.clone(),
+            ));
+            Ok(Some("approval-message-1".to_owned()))
+        }
+
+        async fn delete_message(
+            &self,
+            channel_id: &str,
+            message_id: &str,
+        ) -> Result<(), crate::error::FrameworkError> {
+            self.deleted_messages
+                .lock()
+                .await
+                .push((channel_id.to_owned(), message_id.to_owned()));
+            Ok(())
+        }
+
+        async fn add_reaction(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<(), crate::error::FrameworkError> {
+            Ok(())
+        }
+
+        async fn broadcast_typing(
+            &self,
+            _channel_id: &str,
+        ) -> Result<(), crate::error::FrameworkError> {
+            Ok(())
+        }
+
+        async fn listen(&self) -> Result<ChannelInbound, crate::error::FrameworkError> {
+            pending::<Result<ChannelInbound, crate::error::FrameworkError>>().await
         }
     }
 
@@ -307,5 +422,35 @@ mod tests {
         let pending_requests = registry.pending_requests().await;
         assert_eq!(pending_requests.len(), 1);
         assert_eq!(pending_requests[0].approval_id, pending.approval_id);
+    }
+
+    #[tokio::test]
+    async fn gateway_requester_deletes_expired_approval_message() {
+        let registry = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(ApprovalChannel::default());
+        let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
+        channels.insert(GatewayChannelKind::Discord, channel.clone());
+        let gateway = Arc::new(Gateway::new(
+            channels,
+            HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
+            RoutingConfig::default(),
+        ));
+        let requester = GatewayApprovalRequester::new(
+            Arc::clone(&registry),
+            gateway,
+            test_inbound(),
+            std::time::Duration::from_millis(10),
+        );
+
+        let decision = requester
+            .request_approval(test_request())
+            .await
+            .expect("approval request should return a timeout");
+
+        assert_eq!(decision, ApprovalDecision::TimedOut);
+        assert_eq!(
+            channel.deleted_messages.lock().await.as_slice(),
+            &[("chan-1".to_owned(), "approval-message-1".to_owned())]
+        );
     }
 }

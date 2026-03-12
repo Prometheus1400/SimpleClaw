@@ -106,6 +106,7 @@ pub struct CompletionRoute {
 #[derive(Clone)]
 pub(crate) struct ToolExecEnv {
     pub agent_id: String,
+    pub agent_name: String,
     pub memory: DynMemory,
     pub history_messages: usize,
     pub env: BTreeMap<String, String>,
@@ -1016,6 +1017,7 @@ async fn request_tool_escalation(
 ) -> Result<(), FrameworkError> {
     let request = ApprovalRequest {
         agent_id: ctx.agent_id.clone(),
+        agent_name: ctx.agent_name.clone(),
         session_id: session_id.to_owned(),
         requesting_user_id: ctx.user_id.clone(),
         tool_name: tool_name.to_owned(),
@@ -1405,6 +1407,7 @@ mod tests {
         };
         ToolExecEnv {
             agent_id: "agent-1".to_owned(),
+            agent_name: "Agent One".to_owned(),
             memory: Arc::new(NoopMemory),
             history_messages: 8,
             env: BTreeMap::new(),
