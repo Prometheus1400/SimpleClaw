@@ -519,7 +519,11 @@ mod approval_tests {
         );
 
         match outcome {
-            ApprovalInteractionResult::Unauthorized { approval_id, user_id, .. } => {
+            ApprovalInteractionResult::Unauthorized {
+                approval_id,
+                user_id,
+                ..
+            } => {
                 assert_eq!(approval_id, "approval-1");
                 assert_eq!(user_id, "user-2");
             }

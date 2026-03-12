@@ -955,37 +955,57 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             (RegisteredTool::Exec(tool), ToolExecutionKind::HostSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
-                match tool
-                    .execute_host_sandboxed(
-                        ctx,
-                        plan.clone(),
-                        session_id,
-                        self.host_sandbox_runtime.as_ref(),
-                    )
-                    .await
-                {
-                    Ok(outcome) => Ok(outcome),
-                    Err(err) => {
-                        let denial = err.as_sandbox_permission_denied();
-                        if let Some(denial) = denial {
-                            let reason = format!(
-                                "{} requires unsandboxed {} access",
-                                denial.tool_name,
-                                denial.capability.as_str()
-                            );
-                            request_tool_escalation(
+                match &plan.route {
+                    crate::tools::builtin::exec::ExecToolRoute::Sandboxed => {
+                        match tool
+                            .execute_host_sandboxed(
                                 ctx,
+                                plan.clone(),
                                 session_id,
-                                &denial.tool_name,
-                                denial.capability,
-                                denial.target,
-                                reason,
+                                self.host_sandbox_runtime.as_ref(),
                             )
-                            .await?;
-                            tool.execute_direct(ctx, plan, session_id).await
-                        } else {
-                            Err(err)
+                            .await
+                        {
+                            Ok(outcome) => Ok(outcome),
+                            Err(err) => {
+                                let denial = err.as_sandbox_permission_denied();
+                                if let Some(denial) = denial {
+                                    let reason = format!(
+                                        "{} requires unsandboxed {} access",
+                                        denial.tool_name,
+                                        denial.capability.as_str()
+                                    );
+                                    request_tool_escalation(
+                                        ctx,
+                                        session_id,
+                                        &denial.tool_name,
+                                        denial.capability,
+                                        denial.target,
+                                        reason,
+                                    )
+                                    .await?;
+                                    tool.execute_direct(ctx, plan, session_id).await
+                                } else {
+                                    Err(err)
+                                }
+                            }
                         }
+                    }
+                    crate::tools::builtin::exec::ExecToolRoute::NeedsApproval {
+                        capability,
+                        target,
+                        reason,
+                    } => {
+                        request_tool_escalation(
+                            ctx,
+                            session_id,
+                            "exec",
+                            capability.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                        tool.execute_direct(ctx, plan, session_id).await
                     }
                 }
             }
@@ -1664,6 +1684,80 @@ mod tests {
         }
     }
 
+    fn only_exec_enabled() -> ToolsConfig {
+        ToolsConfig {
+            read: Some(crate::config::ReadToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            edit: Some(crate::config::EditToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            glob: Some(crate::config::GlobToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            grep: Some(crate::config::GrepToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            list: Some(crate::config::ListToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            exec: Some(crate::config::ExecToolConfig::default()),
+            background: Some(crate::config::BackgroundToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_search: Some(crate::config::WebSearchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            web_fetch: Some(crate::config::WebFetchToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memory: Some(crate::config::MemoryToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            memorize: Some(crate::config::MemorizeToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            forget: Some(crate::config::ForgetToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            summon: Some(crate::config::SummonToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            task: Some(crate::config::TaskToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            clock: Some(crate::config::ClockToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            cron: Some(crate::config::CronToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            react: Some(crate::config::ReactToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            skills: Some(crate::config::SkillsToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+        }
+    }
+
     #[tokio::test]
     async fn outside_sandbox_edit_requests_approval_and_skips_wasm() {
         let workspace = unique_temp_dir("approval_retry");
@@ -1902,6 +1996,72 @@ mod tests {
         assert!(sent[0].contains("owner-1"));
         assert_eq!(wasm.calls.load(Ordering::SeqCst), 0);
         assert!(output.output.contains("Edit applied successfully"));
+    }
+
+    #[tokio::test]
+    async fn exec_preflight_requests_approval_before_unsandboxed_retry() {
+        let workspace = unique_temp_dir("exec_approval");
+        let approvals = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(CaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let mut ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        ctx.env.insert(
+            "SIMPLECLAW_EXEC_DYNAMIC".to_owned(),
+            "printf hello-from-approval".to_owned(),
+        );
+        let registry = default_factory()
+            .build_registry(&only_exec_enabled(), &[])
+            .expect("tool registry should build");
+        let entry = registry
+            .get("exec")
+            .expect("exec tool should exist")
+            .clone();
+        let executor = DefaultToolExecutor::with_runtimes(
+            Arc::new(StubWasmSandbox {
+                calls: AtomicUsize::new(0),
+                stderr: String::new(),
+            }),
+            Arc::new(PanicHostSandbox),
+        );
+
+        let approvals_task = {
+            let approvals = Arc::clone(&approvals);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(request) = approvals.pending_requests().await.into_iter().next() {
+                        let _ = approvals
+                            .resolve(
+                                &request.approval_id,
+                                &request.requesting_user_id,
+                                ApprovalDecision::Approved,
+                            )
+                            .await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("approval request was never created");
+            })
+        };
+
+        let outcome = executor
+            .execute(
+                &entry,
+                &ctx,
+                r#"{"command":"bash -c \"$SIMPLECLAW_EXEC_DYNAMIC\""}"#,
+                "sess-1",
+            )
+            .await
+            .expect("approval should allow unsandboxed direct retry");
+        approvals_task.await.expect("approval task should finish");
+
+        let ToolExecutionOutcome::Completed(output) = outcome else {
+            panic!("expected completed tool output");
+        };
+        assert!(output.output.contains("hello-from-approval"));
+        let sent = channel.sent_messages.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Approval required."));
     }
 
     #[test]

@@ -265,7 +265,9 @@ impl Gateway {
         message_id: &str,
     ) -> Result<(), FrameworkError> {
         let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
-        channel.delete_message(&inbound.channel_id, message_id).await
+        channel
+            .delete_message(&inbound.channel_id, message_id)
+            .await
     }
 
     pub async fn broadcast_typing(&self, inbound: &InboundMessage) -> Result<(), FrameworkError> {
