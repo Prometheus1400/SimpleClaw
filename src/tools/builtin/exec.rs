@@ -1,4 +1,7 @@
 use async_trait::async_trait;
+use regex::Regex;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::config::ExecToolConfig;
 use crate::error::{FrameworkError, SandboxCapability, SandboxPermissionDenied};
@@ -28,6 +31,17 @@ pub struct ExecPlan {
     pub timeout_seconds: u64,
     pub env: std::collections::BTreeMap<String, String>,
     pub workdir: std::path::PathBuf,
+    pub route: ExecToolRoute,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecToolRoute {
+    Sandboxed,
+    NeedsApproval {
+        capability: SandboxCapability,
+        target: String,
+        reason: String,
+    },
 }
 
 #[async_trait]
@@ -118,6 +132,7 @@ impl ExecTool {
             background: args.background,
             timeout_seconds: self.config.timeout_seconds.unwrap_or(20),
             env: ctx.env.clone(),
+            route: classify_exec_command_access(args.command.trim(), &workdir, &self.config)?,
             workdir,
         })
     }
@@ -227,6 +242,433 @@ impl ExecTool {
     }
 }
 
+fn classify_exec_command_access(
+    command: &str,
+    workdir: &Path,
+    config: &ExecToolConfig,
+) -> Result<ExecToolRoute, FrameworkError> {
+    if command_uses_ambiguous_shell_features(command) {
+        return Ok(ExecToolRoute::NeedsApproval {
+            capability: SandboxCapability::Exec,
+            target: command.to_owned(),
+            reason: "command uses shell features that preflight cannot verify safely".to_owned(),
+        });
+    }
+
+    let tokens = tokenize_shell_command(command).unwrap_or_else(|_| Vec::new());
+    if tokens.is_empty() {
+        return Ok(ExecToolRoute::NeedsApproval {
+            capability: SandboxCapability::Exec,
+            target: command.to_owned(),
+            reason: "command could not be parsed safely during exec preflight".to_owned(),
+        });
+    }
+
+    if !config.sandbox.network_enabled.unwrap_or(false)
+        && tokens
+            .iter()
+            .any(|token| token.kind == ShellTokenKind::Word && is_network_tool(token.text.as_str()))
+    {
+        return Ok(ExecToolRoute::NeedsApproval {
+            capability: SandboxCapability::Network,
+            target: command.to_owned(),
+            reason:
+                "command appears to use network tooling outside the default exec sandbox policy"
+                    .to_owned(),
+        });
+    }
+
+    let allowed_roots = allowed_write_roots(workdir, config)?;
+    let mut segments = split_shell_segments(&tokens);
+    for segment in &mut segments {
+        if let Some(route) = classify_segment_write_access(segment, workdir, &allowed_roots)? {
+            return Ok(route);
+        }
+    }
+
+    Ok(ExecToolRoute::Sandboxed)
+}
+
+fn classify_segment_write_access(
+    tokens: &[ShellToken],
+    workdir: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Option<ExecToolRoute>, FrameworkError> {
+    for index in 0..tokens.len() {
+        if !is_redirection_operator(tokens[index].text.as_str()) {
+            continue;
+        }
+        let Some(target) = next_word(tokens, index + 1) else {
+            return Ok(Some(ExecToolRoute::NeedsApproval {
+                capability: SandboxCapability::Write,
+                target: tokens[index].text.clone(),
+                reason: "shell redirection target could not be resolved safely".to_owned(),
+            }));
+        };
+        if let Some(route) = classify_write_target(target, workdir, allowed_roots)? {
+            return Ok(Some(route));
+        }
+    }
+
+    let Some(command_name) = segment_command_name(tokens) else {
+        return Ok(None);
+    };
+
+    if matches!(command_name, "chmod" | "chown" | "mount" | "umount") {
+        return Ok(Some(ExecToolRoute::NeedsApproval {
+            capability: SandboxCapability::Exec,
+            target: command_name.to_owned(),
+            reason: format!("{command_name} is treated as a high-risk exec operation"),
+        }));
+    }
+
+    let path_indexes = write_target_indexes(command_name, tokens);
+    for index in path_indexes {
+        let Some(token) = tokens.get(index) else {
+            continue;
+        };
+        if token.kind != ShellTokenKind::Word || token.text == "-" {
+            continue;
+        }
+        if let Some(route) = classify_write_target(&token.text, workdir, allowed_roots)? {
+            return Ok(Some(route));
+        }
+    }
+
+    Ok(None)
+}
+
+fn classify_write_target(
+    raw_target: &str,
+    workdir: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Option<ExecToolRoute>, FrameworkError> {
+    if raw_target.contains('*') || raw_target.contains('?') || raw_target.contains('[') {
+        return Ok(Some(ExecToolRoute::NeedsApproval {
+            capability: SandboxCapability::Write,
+            target: raw_target.to_owned(),
+            reason: "write target uses glob expansion that preflight cannot verify safely"
+                .to_owned(),
+        }));
+    }
+
+    let resolved = resolve_exec_path(raw_target, workdir)?;
+    if allowed_roots.iter().any(|root| resolved.starts_with(root)) {
+        return Ok(None);
+    }
+
+    Ok(Some(ExecToolRoute::NeedsApproval {
+        capability: SandboxCapability::Write,
+        target: resolved.display().to_string(),
+        reason: format!(
+            "write target is outside the configured exec sandbox roots: {}",
+            render_allowed_roots(allowed_roots)
+        ),
+    }))
+}
+
+fn allowed_write_roots(
+    workdir: &Path,
+    config: &ExecToolConfig,
+) -> Result<Vec<PathBuf>, FrameworkError> {
+    let mut roots = vec![
+        canonicalize_existing_path(workdir)?,
+        canonicalize_existing_path(Path::new("/tmp"))?,
+    ];
+    for root in &config.sandbox.extra_writable_paths {
+        roots.push(resolve_exec_path(root, workdir)?);
+    }
+    Ok(roots)
+}
+
+fn render_allowed_roots(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn resolve_exec_path(raw_path: &str, workdir: &Path) -> Result<PathBuf, FrameworkError> {
+    let normalized = resolve_path_for_read(raw_path, workdir)?;
+    canonicalize_with_existing_ancestor(&normalized)
+}
+
+fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, FrameworkError> {
+    path.canonicalize().map_err(|e| {
+        FrameworkError::Tool(format!("failed to canonicalize {}: {e}", path.display()))
+    })
+}
+
+fn canonicalize_with_existing_ancestor(path: &Path) -> Result<PathBuf, FrameworkError> {
+    if path.exists() {
+        return canonicalize_existing_path(path);
+    }
+
+    let mut suffix = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        let Some(name) = current.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+
+    let mut resolved = canonicalize_existing_path(current)?;
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn command_uses_ambiguous_shell_features(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    lowered.contains("eval ")
+        || lowered.starts_with("eval\t")
+        || lowered.contains("`")
+        || lowered.contains("$(")
+        || lowered.contains("<(")
+        || lowered.contains(">(")
+        || lowered.contains("<<")
+        || dynamic_shell_c_regex().is_match(command)
+}
+
+fn dynamic_shell_c_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r#"(?:^|[;&|]\s*)(?:bash|sh|zsh)\s+-c\s+([\"']).*\$[A-Za-z_{]"#)
+            .expect("dynamic shell regex should compile")
+    })
+}
+
+fn is_network_tool(command_name: &str) -> bool {
+    matches!(
+        command_name,
+        "curl"
+            | "wget"
+            | "nc"
+            | "ncat"
+            | "netcat"
+            | "ssh"
+            | "scp"
+            | "rsync"
+            | "ftp"
+            | "sftp"
+            | "dig"
+            | "nslookup"
+            | "ping"
+    )
+}
+
+fn write_target_indexes(command_name: &str, tokens: &[ShellToken]) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    let Some(command_index) = tokens
+        .iter()
+        .position(|token| token.kind == ShellTokenKind::Word && token.text == command_name)
+    else {
+        return indexes;
+    };
+
+    match command_name {
+        "touch" | "mkdir" | "rm" | "rmdir" | "truncate" => {
+            indexes.extend(non_flag_word_indexes(tokens, command_index + 1));
+        }
+        "cp" | "mv" | "install" => {
+            let words = non_flag_word_indexes(tokens, command_index + 1);
+            if let Some(last) = words.last() {
+                indexes.push(*last);
+            }
+        }
+        "ln" => {
+            let words = non_flag_word_indexes(tokens, command_index + 1);
+            if words.len() >= 2 {
+                indexes.push(*words.last().expect("len checked"));
+            }
+        }
+        "tee" => {
+            indexes.extend(non_flag_word_indexes(tokens, command_index + 1));
+        }
+        _ => {}
+    }
+
+    indexes
+}
+
+fn non_flag_word_indexes(tokens: &[ShellToken], start: usize) -> Vec<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .skip(start)
+        .filter(|(_, token)| token.kind == ShellTokenKind::Word)
+        .filter(|(_, token)| !token.text.starts_with('-'))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn segment_command_name(tokens: &[ShellToken]) -> Option<&str> {
+    for token in tokens {
+        if token.kind != ShellTokenKind::Word {
+            continue;
+        }
+        if is_env_assignment(token.text.as_str()) {
+            continue;
+        }
+        return Some(token.text.as_str());
+    }
+    None
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    token.contains('=') && !token.starts_with('=')
+}
+
+fn next_word(tokens: &[ShellToken], start: usize) -> Option<&str> {
+    tokens
+        .iter()
+        .skip(start)
+        .find(|token| token.kind == ShellTokenKind::Word)
+        .map(|token| token.text.as_str())
+}
+
+fn split_shell_segments(tokens: &[ShellToken]) -> Vec<&[ShellToken]> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if is_command_separator(token.text.as_str()) {
+            if start < index {
+                segments.push(&tokens[start..index]);
+            }
+            start = index + 1;
+        }
+    }
+    if start < tokens.len() {
+        segments.push(&tokens[start..]);
+    }
+    segments
+}
+
+fn is_command_separator(token: &str) -> bool {
+    matches!(token, "&&" | "||" | ";" | "|")
+}
+
+fn is_redirection_operator(token: &str) -> bool {
+    matches!(token, ">" | ">>" | "1>" | "1>>" | "2>" | "2>>")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellToken {
+    kind: ShellTokenKind,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellTokenKind {
+    Word,
+    Operator,
+}
+
+fn tokenize_shell_command(command: &str) -> Result<Vec<ShellToken>, ()> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut index = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            } else if ch == '\\' {
+                index += 1;
+                if let Some(next) = chars.get(index) {
+                    current.push(*next);
+                }
+            } else {
+                current.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                index += 1;
+            }
+            '"' => {
+                in_double = true;
+                index += 1;
+            }
+            '\\' => {
+                index += 1;
+                if let Some(next) = chars.get(index) {
+                    current.push(*next);
+                    index += 1;
+                }
+            }
+            ' ' | '\t' | '\n' => {
+                push_word_token(&mut tokens, &mut current);
+                index += 1;
+            }
+            '&' | '|' | ';' | '>' | '<' => {
+                push_word_token(&mut tokens, &mut current);
+                let operator = if index + 1 < chars.len() {
+                    let next = chars[index + 1];
+                    match (ch, next) {
+                        ('&', '&') | ('|', '|') | ('>', '>') | ('<', '<') => {
+                            index += 1;
+                            format!("{ch}{next}")
+                        }
+                        _ => ch.to_string(),
+                    }
+                } else {
+                    ch.to_string()
+                };
+                tokens.push(ShellToken {
+                    kind: ShellTokenKind::Operator,
+                    text: operator,
+                });
+                index += 1;
+            }
+            _ => {
+                current.push(ch);
+                index += 1;
+            }
+        }
+    }
+
+    if in_single || in_double {
+        return Err(());
+    }
+    push_word_token(&mut tokens, &mut current);
+    Ok(tokens)
+}
+
+fn push_word_token(tokens: &mut Vec<ShellToken>, current: &mut String) {
+    if current.is_empty() {
+        return;
+    }
+    tokens.push(ShellToken {
+        kind: ShellTokenKind::Word,
+        text: std::mem::take(current),
+    });
+}
+
 fn classify_host_sandbox_denial(command: &str, stderr: &str) -> Option<FrameworkError> {
     let lowered = stderr.to_ascii_lowercase();
     let capability = if lowered.contains("network")
@@ -282,10 +724,10 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::Value;
 
-    use super::ExecTool;
+    use super::{ExecTool, ExecToolRoute, classify_exec_command_access};
     use crate::approval::UnavailableApprovalRequester;
-    use crate::config::DatabaseConfig;
-    use crate::error::FrameworkError;
+    use crate::config::{DatabaseConfig, ExecToolConfig};
+    use crate::error::{FrameworkError, SandboxCapability};
     use crate::memory::MemoryStore;
     use crate::tools::{
         AgentInvokeRequest, AgentInvoker, AsyncToolRunManager, InvokeOutcome, Tool, ToolExecEnv,
@@ -569,6 +1011,97 @@ mod tests {
             tool.input_schema_json(),
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
         );
+    }
+
+    #[test]
+    fn exec_preflight_marks_workspace_redirection_as_sandboxed() {
+        let config = ExecToolConfig::default();
+        let root = std::env::temp_dir().join(format!(
+            "simpleclaw_exec_route_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should be created");
+
+        let route = classify_exec_command_access("printf hi > nested.txt", &root, &config)
+            .expect("preflight should succeed");
+
+        assert_eq!(route, ExecToolRoute::Sandboxed);
+    }
+
+    #[test]
+    fn exec_preflight_requests_approval_for_outside_write_target() {
+        let config = ExecToolConfig::default();
+        let root = std::env::temp_dir().join(format!(
+            "simpleclaw_exec_route_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should be created");
+
+        let route =
+            classify_exec_command_access("printf hi > /Users/shared/blocked.txt", &root, &config)
+                .expect("preflight should succeed");
+
+        assert!(matches!(
+            route,
+            ExecToolRoute::NeedsApproval {
+                capability: SandboxCapability::Write,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exec_preflight_requests_approval_for_dynamic_shell() {
+        let config = ExecToolConfig::default();
+        let root = std::env::temp_dir().join(format!(
+            "simpleclaw_exec_route_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should be created");
+
+        let route = classify_exec_command_access("bash -c \"$PAYLOAD\"", &root, &config)
+            .expect("preflight should succeed");
+
+        assert!(matches!(
+            route,
+            ExecToolRoute::NeedsApproval {
+                capability: SandboxCapability::Exec,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exec_preflight_requests_approval_for_network_tools_when_disabled() {
+        let config = ExecToolConfig::default();
+        let root = std::env::temp_dir().join(format!(
+            "simpleclaw_exec_route_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should be created");
+
+        let route = classify_exec_command_access("curl https://example.com", &root, &config)
+            .expect("preflight should succeed");
+
+        assert!(matches!(
+            route,
+            ExecToolRoute::NeedsApproval {
+                capability: SandboxCapability::Network,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

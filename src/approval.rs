@@ -242,7 +242,10 @@ impl ApprovalRequester for GatewayApprovalRequester {
             .await;
         if decision == ApprovalDecision::TimedOut
             && let Some(message_id) = approval_message_id
-            && let Err(err) = self.gateway.delete_message(&self.inbound, &message_id).await
+            && let Err(err) = self
+                .gateway
+                .delete_message(&self.inbound, &message_id)
+                .await
         {
             warn!(
                 status = "failed",
@@ -345,10 +348,10 @@ mod tests {
             channel_id: &str,
             request: &crate::approval::PendingApprovalRequest,
         ) -> Result<Option<String>, crate::error::FrameworkError> {
-            self.sent_approvals.lock().await.push((
-                channel_id.to_owned(),
-                request.approval_id.clone(),
-            ));
+            self.sent_approvals
+                .lock()
+                .await
+                .push((channel_id.to_owned(), request.approval_id.clone()));
             Ok(Some("approval-message-1".to_owned()))
         }
 
@@ -400,11 +403,7 @@ mod tests {
 
         assert!(resolved);
         let decision = registry
-            .wait_for_decision(
-                &pending.approval_id,
-                rx,
-                std::time::Duration::from_secs(1),
-            )
+            .wait_for_decision(&pending.approval_id, rx, std::time::Duration::from_secs(1))
             .await;
         assert_eq!(decision, ApprovalDecision::Approved);
     }
@@ -415,7 +414,11 @@ mod tests {
         let (pending, _rx) = registry.register(test_request()).await;
 
         let resolved = registry
-            .resolve(&pending.approval_id, "other-user", ApprovalDecision::Approved)
+            .resolve(
+                &pending.approval_id,
+                "other-user",
+                ApprovalDecision::Approved,
+            )
             .await;
 
         assert!(!resolved);
