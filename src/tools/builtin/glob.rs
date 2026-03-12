@@ -87,7 +87,8 @@ impl GlobTool {
                 host_path.display()
             )));
         }
-        let guest_path = host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        let guest_path =
+            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
         Ok(GlobPlan {
             pattern: pattern.to_owned(),
             host_path,
@@ -146,8 +147,9 @@ pub(crate) fn run_glob(pattern: &str, root: &Path) -> Result<String, FrameworkEr
     let mut matches: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
 
     while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir)
-            .map_err(|e| FrameworkError::Tool(format!("glob failed to read {}: {e}", dir.display())))?;
+        let entries = fs::read_dir(&dir).map_err(|e| {
+            FrameworkError::Tool(format!("glob failed to read {}: {e}", dir.display()))
+        })?;
         for entry in entries {
             let entry = entry
                 .map_err(|e| FrameworkError::Tool(format!("glob failed to walk directory: {e}")))?;
@@ -158,9 +160,9 @@ pub(crate) fn run_glob(pattern: &str, root: &Path) -> Result<String, FrameworkEr
             if file_type.is_dir() {
                 stack.push(path.clone());
             }
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|e| FrameworkError::Tool(format!("glob failed to compute relative path: {e}")))?;
+            let relative = path.strip_prefix(root).map_err(|e| {
+                FrameworkError::Tool(format!("glob failed to compute relative path: {e}"))
+            })?;
             if pattern.matches_path(relative) {
                 let modified = entry
                     .metadata()

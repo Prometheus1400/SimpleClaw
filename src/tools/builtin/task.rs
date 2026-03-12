@@ -10,10 +10,8 @@ use super::common::parse_task_args;
 const TASK_DESCRIPTION_WITH_BG: &str =
     "Run a delegated worker task using JSON: {prompt, background?}";
 const TASK_DESCRIPTION_SYNC_ONLY: &str = "Run a delegated worker task using JSON: {prompt}";
-const TASK_SCHEMA_WITH_BG: &str =
-    "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"prompt\"]}";
-const TASK_SCHEMA_SYNC_ONLY: &str =
-    "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"}},\"required\":[\"prompt\"]}";
+const TASK_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"prompt\"]}";
+const TASK_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"}},\"required\":[\"prompt\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskTool {
@@ -99,11 +97,7 @@ mod tests {
         let ctx = test_ctx().await;
 
         let output = tool
-            .execute(
-                &ctx,
-                r#"{"prompt":"do work","background":true}"#,
-                "sess-1",
-            )
+            .execute(&ctx, r#"{"prompt":"do work","background":true}"#, "sess-1")
             .await
             .expect("background task should succeed");
         let ToolExecutionOutcome::AsyncStarted(started) = output else {
@@ -138,11 +132,7 @@ mod tests {
         ctx.allow_async_tools = false;
 
         let err = tool
-            .execute(
-                &ctx,
-                r#"{"prompt":"do work","background":true}"#,
-                "sess-1",
-            )
+            .execute(&ctx, r#"{"prompt":"do work","background":true}"#, "sess-1")
             .await
             .err()
             .expect("background task should fail");

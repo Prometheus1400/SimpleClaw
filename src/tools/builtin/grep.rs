@@ -99,7 +99,8 @@ impl GrepTool {
                 host_path.display()
             )));
         }
-        let guest_path = host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
+        let guest_path =
+            host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
         Ok(GrepPlan {
             pattern: pattern.to_owned(),
             include: args.include,
@@ -168,9 +169,9 @@ pub(crate) fn run_grep(
     let files = collect_files(root)?;
     let mut matches = Vec::new();
     for path in files {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|e| FrameworkError::Tool(format!("grep failed to compute relative path: {e}")))?;
+        let relative = path.strip_prefix(root).map_err(|e| {
+            FrameworkError::Tool(format!("grep failed to compute relative path: {e}"))
+        })?;
         if let Some(include_pattern) = include.as_ref()
             && !include_pattern.matches_path(relative)
         {
@@ -186,7 +187,10 @@ pub(crate) fn run_grep(
         for (idx, line) in content.lines().enumerate() {
             if regex.is_match(line) {
                 let line_text = if line.chars().count() > MAX_LINE_LENGTH {
-                    format!("{}...", line.chars().take(MAX_LINE_LENGTH).collect::<String>())
+                    format!(
+                        "{}...",
+                        line.chars().take(MAX_LINE_LENGTH).collect::<String>()
+                    )
                 } else {
                     line.to_owned()
                 };
@@ -231,8 +235,9 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, FrameworkError> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir)
-            .map_err(|e| FrameworkError::Tool(format!("grep failed to read {}: {e}", dir.display())))?;
+        let entries = fs::read_dir(&dir).map_err(|e| {
+            FrameworkError::Tool(format!("grep failed to read {}: {e}", dir.display()))
+        })?;
         for entry in entries {
             let entry = entry
                 .map_err(|e| FrameworkError::Tool(format!("grep failed to walk directory: {e}")))?;

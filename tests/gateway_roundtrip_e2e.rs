@@ -4,6 +4,8 @@ use simpleclaw::testing::{
     ProviderScriptStep, ScriptedToolCall, TestAgentConfig, TestHarnessConfig,
     run_single_gateway_roundtrip,
 };
+use std::env;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn exec_test_guard() -> MutexGuard<'static, ()> {
@@ -29,6 +31,89 @@ fn session_rows(db_path: &std::path::Path, session_id: &str) -> Vec<(String, Str
     .expect("messages query should run")
     .collect::<Result<Vec<_>, _>>()
     .expect("rows should decode")
+}
+
+fn wasm_artifact_search_paths(artifact_name: &str) -> Vec<PathBuf> {
+    let env_candidate = env::var_os("SIMPLECLAW_WASM_ASSETS_DIR")
+        .map(PathBuf::from)
+        .map(|root| root.join(artifact_name));
+    let exe_candidate = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent()
+            .and_then(|bin_dir| bin_dir.parent())
+            .map(|prefix| {
+                prefix
+                    .join("share")
+                    .join("simpleclaw")
+                    .join("wasm")
+                    .join(artifact_name)
+            })
+    });
+    let release_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("release")
+        .join(artifact_name);
+    let debug_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("debug")
+        .join(artifact_name);
+
+    [
+        env_candidate,
+        exe_candidate,
+        Some(release_candidate),
+        Some(debug_candidate),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn assert_wasm_artifacts_available(required_artifacts: &[&str]) {
+    let missing = required_artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let paths = wasm_artifact_search_paths(artifact);
+            paths
+                .iter()
+                .any(|candidate| candidate.is_file())
+                .then_some(())
+                .is_none()
+                .then(|| {
+                    format!(
+                        "{artifact}: searched [{}]",
+                        paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "missing required wasm guests for ignored cross-sandbox test.\n\
+run this test outside the Codex sandbox after building the wasm guests with:\n\
+cargo build --package read_tool --package edit_tool --package glob_tool --package grep_tool --package list_tool --package web_fetch_tool --package web_search_tool --target wasm32-wasip1 --release\n\
+If your artifacts live elsewhere, set SIMPLECLAW_WASM_ASSETS_DIR to that directory.\n\
+{}",
+        missing.join("\n")
+    );
+}
+
+fn assert_tool_response_ok(response: &Value, label: &str) -> String {
+    assert_eq!(
+        response["status"],
+        Value::String("ok".to_owned()),
+        "{label} response={response}"
+    );
+    response["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} response content should be a string: {response}"))
+        .to_owned()
 }
 
 #[tokio::test]
@@ -323,6 +408,110 @@ async fn gateway_roundtrip_exec_tool_call_returns_pwd_output_on_repeated_runs() 
         assert!(nested.contains("\"exitCode\":0"), "nested={nested}");
         assert!(nested.contains("\"stdout\":\"/"), "nested={nested}");
     }
+}
+
+// Manual test: this exercises the host-sandboxed exec to WASM-sandboxed
+// filesystem tool boundary and must be run outside the Codex sandbox.
+#[tokio::test]
+#[ignore = "must be run outside the Codex sandbox"]
+async fn gateway_roundtrip_host_exec_output_is_visible_to_wasm_fs_tools() {
+    let _guard = exec_test_guard();
+    assert_wasm_artifacts_available(&["list_tool.wasm", "grep_tool.wasm", "glob_tool.wasm"]);
+    let token = "boundary-token-123";
+    let agent = TestAgentConfig::new(
+        "default",
+        "Default",
+        "default",
+        vec![
+            ProviderScriptStep::ToolCall(ScriptedToolCall {
+                id: Some("call-exec-create-boundary".to_owned()),
+                name: "exec".to_owned(),
+                args_json: format!(
+                    r#"{{"command":"mkdir -p boundary && printf '%s\n' {token} > boundary/visible.txt"}}"#
+                ),
+            }),
+            ProviderScriptStep::Reply("created".to_owned()),
+            ProviderScriptStep::ToolCall(ScriptedToolCall {
+                id: Some("call-list-boundary".to_owned()),
+                name: "list".to_owned(),
+                args_json: r#"{"path":"boundary"}"#.to_owned(),
+            }),
+            ProviderScriptStep::Reply("listed".to_owned()),
+            ProviderScriptStep::ToolCall(ScriptedToolCall {
+                id: Some("call-grep-boundary".to_owned()),
+                name: "grep".to_owned(),
+                args_json: format!(r#"{{"pattern":"{token}","path":"boundary"}}"#),
+            }),
+            ProviderScriptStep::Reply("grepped".to_owned()),
+            ProviderScriptStep::ToolCall(ScriptedToolCall {
+                id: Some("call-glob-boundary".to_owned()),
+                name: "glob".to_owned(),
+                args_json: r#"{"pattern":"boundary/*.txt","path":"."}"#.to_owned(),
+            }),
+            ProviderScriptStep::Reply("globbed".to_owned()),
+        ],
+    )
+    .with_exec_tool(Some(10), false, true)
+    .with_list_tool(true)
+    .with_grep_tool(true)
+    .with_glob_tool(true);
+
+    let config = TestHarnessConfig {
+        route_via_gateway_listener: true,
+        inbound_content: "create boundary file".to_owned(),
+        follow_up_inbound_contents: vec![
+            "list boundary".to_owned(),
+            "grep boundary".to_owned(),
+            "glob boundary".to_owned(),
+        ],
+        agents: vec![agent],
+        ..TestHarnessConfig::default()
+    };
+    let result = run_single_gateway_roundtrip(config)
+        .await
+        .expect("integration harness should run");
+
+    assert_eq!(result.provider_call_count, 8);
+    assert_eq!(result.outbound_messages.len(), 4);
+    assert_eq!(result.outbound_messages[0].content, "created");
+    assert_eq!(result.outbound_messages[1].content, "listed");
+    assert_eq!(result.outbound_messages[2].content, "grepped");
+    assert_eq!(result.outbound_messages[3].content, "globbed");
+    assert_eq!(result.observed_tool_responses.len(), 4);
+
+    let exec_response = &result.observed_tool_responses[0];
+    let exec_nested = assert_tool_response_ok(exec_response, "exec");
+    assert!(
+        exec_nested.contains("\"exitCode\":0"),
+        "nested={exec_nested}"
+    );
+
+    let list_response = &result.observed_tool_responses[1];
+    let list_nested = assert_tool_response_ok(list_response, "list");
+    assert!(list_nested.contains("boundary/\n"), "nested={list_nested}");
+    assert!(
+        list_nested.contains("  visible.txt\n"),
+        "nested={list_nested}"
+    );
+
+    let grep_response = &result.observed_tool_responses[2];
+    let grep_nested = assert_tool_response_ok(grep_response, "grep");
+    assert!(
+        grep_nested.contains("Found 1 matches"),
+        "nested={grep_nested}"
+    );
+    assert!(
+        grep_nested.contains("/workspace/boundary/visible.txt:"),
+        "nested={grep_nested}"
+    );
+    assert!(grep_nested.contains(token), "nested={grep_nested}");
+
+    let glob_response = &result.observed_tool_responses[3];
+    let glob_nested = assert_tool_response_ok(glob_response, "glob");
+    assert!(
+        glob_nested.contains("/workspace/boundary/visible.txt"),
+        "nested={glob_nested}"
+    );
 }
 
 #[tokio::test]
