@@ -38,8 +38,8 @@ pub use providers::{
 pub use routing::RoutingConfig;
 #[allow(unused_imports)]
 pub use tools::{
-    ClockToolConfig, CronToolConfig, EditToolConfig, ExecToolConfig, ForgetToolConfig,
-    MemorizeToolConfig, MemoryToolConfig, ProcessToolConfig, ReactToolConfig, ReadToolConfig,
+    BackgroundToolConfig, ClockToolConfig, CronToolConfig, EditToolConfig, ExecToolConfig,
+    ForgetToolConfig, MemorizeToolConfig, MemoryToolConfig, ReactToolConfig, ReadToolConfig,
     SkillsToolConfig, SummonToolConfig, TaskToolConfig, ToolSandboxConfig, ToolsConfig,
     WebFetchToolConfig, WebSearchProvider, WebSearchToolConfig, WebSearchToolRuntimeConfig,
 };
@@ -631,7 +631,7 @@ channels:
                 "read".to_owned(),
                 "edit".to_owned(),
                 "exec".to_owned(),
-                "process".to_owned(),
+                "background".to_owned(),
             ]
         );
     }

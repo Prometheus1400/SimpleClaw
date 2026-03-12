@@ -26,7 +26,7 @@ pub struct ToolsConfig {
     pub read: Option<ReadToolConfig>,
     pub edit: Option<EditToolConfig>,
     pub exec: Option<ExecToolConfig>,
-    pub process: Option<ProcessToolConfig>,
+    pub background: Option<BackgroundToolConfig>,
     pub web_search: Option<WebSearchToolConfig>,
     pub web_fetch: Option<WebFetchToolConfig>,
     pub memory: Option<MemoryToolConfig>,
@@ -97,8 +97,13 @@ impl ToolsConfig {
         if self.exec.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("exec".to_owned());
         }
-        if self.process.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
-            names.push("process".to_owned());
+        if self
+            .background
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(true)
+        {
+            names.push("background".to_owned());
         }
         names
     }
@@ -108,7 +113,7 @@ impl ToolsConfig {
             "read" => serde_json::to_value(self.read.clone().unwrap_or_default()).ok(),
             "edit" => serde_json::to_value(self.edit.clone().unwrap_or_default()).ok(),
             "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok(),
-            "process" => serde_json::to_value(self.process.clone().unwrap_or_default()).ok(),
+            "background" => serde_json::to_value(self.background.clone().unwrap_or_default()).ok(),
             "web_search" => Some(
                 serde_json::to_value(self.web_search.clone().unwrap_or_default().to_runtime()?)
                     .map_err(|err| {
@@ -137,7 +142,7 @@ impl ToolsConfig {
             "read" => self.read.clone().unwrap_or_default().owner_restricted,
             "edit" => self.edit.clone().unwrap_or_default().owner_restricted,
             "exec" => self.exec.clone().unwrap_or_default().owner_restricted,
-            "process" => self.process.clone().unwrap_or_default().owner_restricted,
+            "background" => self.background.clone().unwrap_or_default().owner_restricted,
             "web_search" => self.web_search.clone().unwrap_or_default().owner_restricted,
             "web_fetch" => self.web_fetch.clone().unwrap_or_default().owner_restricted,
             "memory" => self.memory.clone().unwrap_or_default().owner_restricted,
@@ -160,7 +165,9 @@ impl ToolsConfig {
                 "read" => next.read.get_or_insert_with(Default::default).enabled = false,
                 "edit" => next.edit.get_or_insert_with(Default::default).enabled = false,
                 "exec" => next.exec.get_or_insert_with(Default::default).enabled = false,
-                "process" => next.process.get_or_insert_with(Default::default).enabled = false,
+                "background" => {
+                    next.background.get_or_insert_with(Default::default).enabled = false
+                }
                 "web_search" => {
                     next.web_search.get_or_insert_with(Default::default).enabled = false
                 }
@@ -276,14 +283,14 @@ impl Default for ExecToolConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub struct ProcessToolConfig {
+pub struct BackgroundToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default = "default_owner_restricted")]
     pub owner_restricted: bool,
 }
 
-impl Default for ProcessToolConfig {
+impl Default for BackgroundToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),

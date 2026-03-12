@@ -67,8 +67,8 @@ flowchart LR
 - `ToolDispatcher` (`src/dispatch.rs`):
   - `NativeDispatcher`: consumes provider-native function/tool calls.
   - `XmlDispatcher`: fallback protocol using `<tool_call>` blocks in text.
-- `ToolExecEnv` (`src/tools/mod.rs`): execution context passed to tools (identity, sandbox mode, memory, process manager, completion route).
-- `ProcessManager` (`src/tools/mod.rs`): background process lifecycle + completion watcher that re-injects synthetic inbound events.
+- `ToolExecEnv` (`src/tools/mod.rs`): execution context passed to tools (identity, sandbox mode, memory, async run manager, completion route).
+- `AsyncToolRunManager` (`src/tools/mod.rs`): background run lifecycle + completion watcher that re-injects synthetic inbound events.
 
 ### Provider and memory
 - `ProviderFactory` / `ProviderRegistry` (`src/providers/registry.rs`): provider instantiation from config (`gemini`, `moonshot`).
@@ -156,12 +156,12 @@ sequenceDiagram
 - `tools.summon.allowed` is a strict allowlist. Empty or omitted means no summon targets are allowed.
 - Sandbox gate (`tools/sandbox.rs`) enforces sandbox-aware tools when `sandbox=on`.
 
-### 5) Background process completion is an inbound event
+### 5) Background run completion is an inbound event
 - `exec` with `background=true` registers a completion watcher.
 - On completion, watcher sends a synthetic `InboundMessage` with:
   - `user_id="system"`
   - `invoke=true`
-  - content: `[background process completed] ...`
+  - content: `[async tool run completed] ...`
 - This re-enters the same session pipeline and can trigger follow-up model behavior.
 
 ## Tooling Architecture
@@ -189,7 +189,7 @@ Built-in tools are registered in `src/tools/builtin/mod.rs`:
 - `memory`, `memorize`, `forget`
 - `summon`, `task`
 - `web_search`, `web_fetch`, `clock`
-- `read`, `edit`, `exec`, `process`
+- `read`, `edit`, `exec`, `background`
 
 Skill tools are loaded from `skills/<skill_id>/SKILL.md` (agent persona first, then global `~/.simpleclaw/skills`).
 

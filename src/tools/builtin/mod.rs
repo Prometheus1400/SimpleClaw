@@ -1,3 +1,4 @@
+mod background;
 mod clock;
 mod common;
 pub(crate) mod cron;
@@ -6,7 +7,6 @@ pub(crate) mod exec;
 mod forget;
 mod memorize;
 mod memory;
-mod process;
 mod react;
 pub(crate) mod read;
 mod summon;
@@ -50,7 +50,7 @@ pub(crate) fn builtin_tools() -> Vec<RegisteredTool> {
         RegisteredTool::Edit(std::sync::Arc::new(edit::EditTool::default())),
         RegisteredTool::Exec(std::sync::Arc::new(exec::ExecTool::default())),
         RegisteredTool::Direct(
-            std::sync::Arc::new(process::ProcessTool::Lifecycle) as std::sync::Arc<dyn Tool>
+            std::sync::Arc::new(background::BackgroundTool::Lifecycle) as std::sync::Arc<dyn Tool>
         ),
     ]
 }

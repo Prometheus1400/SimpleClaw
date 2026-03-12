@@ -245,12 +245,12 @@ pub(super) fn parse_exec_args(args_json: &str) -> ExecArgs {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct ProcessArgs {
+pub(super) struct BackgroundArgs {
     pub action: String,
     pub run_id: Option<String>,
 }
 
-pub(super) fn parse_process_args(args_json: &str) -> ProcessArgs {
+pub(super) fn parse_background_args(args_json: &str) -> BackgroundArgs {
     if let Ok(value) = serde_json::from_str::<Value>(args_json) {
         let action = value
             .get("action")
@@ -262,9 +262,9 @@ pub(super) fn parse_process_args(args_json: &str) -> ProcessArgs {
             .or_else(|| value.get("runId"))
             .and_then(|v| v.as_str())
             .map(str::to_owned);
-        return ProcessArgs { action, run_id };
+        return BackgroundArgs { action, run_id };
     }
-    ProcessArgs {
+    BackgroundArgs {
         action: "list".to_owned(),
         run_id: None,
     }
@@ -307,22 +307,24 @@ pub(super) fn command_output_to_json(exit_code: i32, stdout: &str, stderr: &str)
 }
 
 pub(super) fn snapshot_to_json(snapshot: &AsyncToolRunSnapshot) -> Value {
-    let process = snapshot
-        .process
-        .as_ref()
-        .expect("process tool only renders process-backed async tool runs");
+    let details = match &snapshot.details {
+        crate::tools::AsyncToolRunDetails::Process(process) => json!({
+            "command": process.command,
+            "pid": process.pid,
+            "exitCode": process.exit_code,
+            "stdout": truncate_for_tool_output(process.stdout.trim(), 8_000),
+            "stderr": truncate_for_tool_output(process.stderr.trim(), 4_000),
+        }),
+    };
     let mut payload = json!({
         "status": snapshot.status.as_str(),
         "runId": snapshot.run_id,
         "tool": snapshot.tool_name,
         "kind": snapshot.kind.as_str(),
-        "command": process.command,
-        "pid": process.pid,
+        "summary": snapshot.summary,
         "startedAt": snapshot.started_at.to_rfc3339(),
         "finishedAt": snapshot.finished_at.map(|dt| dt.to_rfc3339()),
-        "exitCode": process.exit_code,
-        "stdout": truncate_for_tool_output(process.stdout.trim(), 8_000),
-        "stderr": truncate_for_tool_output(process.stderr.trim(), 4_000),
+        "details": details,
     });
     if snapshot.status == AsyncToolRunStatus::Running {
         payload["status"] = Value::String("running".to_owned());
@@ -345,7 +347,7 @@ fn truncate_for_tool_output(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_exec_args, parse_forget_args, parse_process_args, parse_task_args};
+    use super::{parse_background_args, parse_exec_args, parse_forget_args, parse_task_args};
 
     #[test]
     fn parse_exec_args_accepts_background_flag() {
@@ -355,9 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_process_args_accepts_run_id_camel_case() {
-        let args = parse_process_args(r#"{"action":"poll","runId":"abc"}"#);
-        assert_eq!(args.action, "poll");
+    fn parse_background_args_accepts_run_id_camel_case() {
+        let args = parse_background_args(r#"{"action":"status","runId":"abc"}"#);
+        assert_eq!(args.action, "status");
         assert_eq!(args.run_id.as_deref(), Some("abc"));
     }
 

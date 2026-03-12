@@ -51,10 +51,10 @@ impl Tool for ExecTool {
         &self,
         ctx: &ToolExecEnv,
         args_json: &str,
-        _session_id: &str,
+        session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         let plan = self.plan(ctx, args_json)?;
-        self.execute_direct(ctx, plan).await
+        self.execute_direct(ctx, plan, session_id).await
     }
 }
 
@@ -91,6 +91,7 @@ impl ExecTool {
         &self,
         ctx: &ToolExecEnv,
         plan: ExecPlan,
+        session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         if plan.background {
             let started = ctx
@@ -98,6 +99,8 @@ impl ExecTool {
                 .start_process(
                     "exec",
                     &plan.command,
+                    &ctx.agent_id,
+                    session_id,
                     Some(&plan.workspace_root),
                     &plan.env,
                     ctx.completion_tx.clone(),
@@ -123,6 +126,7 @@ impl ExecTool {
         &self,
         ctx: &ToolExecEnv,
         plan: ExecPlan,
+        session_id: &str,
         runtime: &dyn HostSandbox,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         if plan.background {
@@ -138,6 +142,8 @@ impl ExecTool {
                 .start_prepared_process(
                     "exec",
                     &plan.command,
+                    &ctx.agent_id,
+                    session_id,
                     prepared,
                     &plan.env,
                     ctx.completion_tx.clone(),
@@ -359,7 +365,10 @@ mod tests {
         let run_id = parsed["runId"]
             .as_str()
             .expect("accepted response should include run id");
-        let sessions = ctx.async_tool_runs.list().await;
+        let sessions = ctx
+            .async_tool_runs
+            .list_for_session(&ctx.agent_id, "sess-1")
+            .await;
         assert!(sessions.iter().any(|snapshot| snapshot.run_id == run_id));
     }
 

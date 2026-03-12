@@ -324,7 +324,7 @@ mod tests {
             "read",
             "edit",
             "exec",
-            "process",
+            "background",
             "skills",
         ];
         let allowed: HashSet<&str> = allowed.iter().copied().collect();
