@@ -30,8 +30,8 @@ pub trait Channel: Send + Sync {
         &self,
         channel_id: &str,
         request: &PendingApprovalRequest,
-    ) -> Result<(), FrameworkError> {
-        self.send_message(channel_id, &format_approval_request(request))
+    ) -> Result<Option<String>, FrameworkError> {
+        self.send_message_with_id(channel_id, &format_approval_request(request))
             .await
     }
     async fn send_message_with_id(
@@ -50,6 +50,15 @@ pub trait Channel: Send + Sync {
     ) -> Result<(), FrameworkError> {
         Err(FrameworkError::Tool(
             "channel does not support editing messages".to_owned(),
+        ))
+    }
+    async fn delete_message(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+    ) -> Result<(), FrameworkError> {
+        Err(FrameworkError::Tool(
+            "channel does not support deleting messages".to_owned(),
         ))
     }
     async fn add_reaction(

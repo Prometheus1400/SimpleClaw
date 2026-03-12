@@ -204,6 +204,7 @@ mod tests {
             .expect("memory should initialize");
         ToolExecEnv {
             agent_id: "test-agent".to_owned(),
+            agent_name: "Test Agent".to_owned(),
             memory: Arc::new(memory),
             history_messages: 10,
             env: std::collections::BTreeMap::new(),

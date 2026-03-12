@@ -27,6 +27,7 @@ pub struct RunParams<'a> {
     pub provider_key: &'a str,
     pub system_prompt: &'a str,
     pub agent_id: &'a str,
+    pub agent_name: &'a str,
     pub session_id: &'a str,
     pub max_steps: u32,
     pub history_messages: usize,
@@ -82,6 +83,7 @@ impl ReactLoop {
         let invoker = Arc::clone(&self.invoker);
         let tool_env = ToolExecEnv {
             agent_id: params.agent_id.to_owned(),
+            agent_name: params.agent_name.to_owned(),
             memory: params.memory.clone(),
             history_messages: params.history_messages,
             env: params.execution_env.clone(),

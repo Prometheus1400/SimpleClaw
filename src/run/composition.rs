@@ -283,6 +283,7 @@ pub(crate) async fn assemble_runtime_state(
             agent.id.clone(),
             AgentRuntimeConfig {
                 agent_id: agent.id.clone(),
+                agent_name: agent.name.clone(),
                 provider_key,
                 effective_execution,
                 owner_ids: loaded.global.execution.owner_ids.clone(),

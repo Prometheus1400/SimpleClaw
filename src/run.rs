@@ -1562,6 +1562,7 @@ mod tests {
             .expect("tool registry should build");
         let runtime_config = AgentRuntimeConfig {
             agent_id: "default".to_owned(),
+            agent_name: "Default".to_owned(),
             provider_key: "default".to_owned(),
             effective_execution: ExecutionDefaultsConfig::default(),
             owner_ids: vec!["user-1".to_owned()],

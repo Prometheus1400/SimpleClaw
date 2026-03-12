@@ -195,7 +195,7 @@ impl Gateway {
         &self,
         inbound: &InboundMessage,
         request: &PendingApprovalRequest,
-    ) -> Result<(), FrameworkError> {
+    ) -> Result<Option<String>, FrameworkError> {
         let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
         channel
             .send_approval_request(&inbound.channel_id, request)
@@ -257,6 +257,15 @@ impl Gateway {
     ) -> Result<(), FrameworkError> {
         let channel = transport::channel_for_source(&self.channels, source_channel)?;
         channel.add_reaction(channel_id, message_id, emoji).await
+    }
+
+    pub async fn delete_message(
+        &self,
+        inbound: &InboundMessage,
+        message_id: &str,
+    ) -> Result<(), FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel.delete_message(&inbound.channel_id, message_id).await
     }
 
     pub async fn broadcast_typing(&self, inbound: &InboundMessage) -> Result<(), FrameworkError> {
