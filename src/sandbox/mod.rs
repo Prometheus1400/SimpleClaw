@@ -113,7 +113,9 @@ impl PreparedHostCommand {
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
-            .map_err(|e| FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}")))?;
+            .map_err(|e| {
+                FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}"))
+            })?;
         Ok(SpawnedHostCommand {
             child,
             cleanup: HostSandboxCleanup {

@@ -166,16 +166,18 @@ impl Tool for CronTool {
 
                 store.create_job(&job)?;
 
-                Ok(ToolExecutionOutcome::completed(json!({
-                    "status": "created",
-                    "id": job.id,
-                    "schedule": job.schedule,
-                    "description": job.description,
-                    "prompt": job.prompt,
-                    "guardCommand": job.guard_command,
-                    "guardTimeoutSeconds": job.guard_timeout_seconds
-                })
-                .to_string()))
+                Ok(ToolExecutionOutcome::completed(
+                    json!({
+                        "status": "created",
+                        "id": job.id,
+                        "schedule": job.schedule,
+                        "description": job.description,
+                        "prompt": job.prompt,
+                        "guardCommand": job.guard_command,
+                        "guardTimeoutSeconds": job.guard_timeout_seconds
+                    })
+                    .to_string(),
+                ))
             }
             CronAction::Delete => {
                 let id = args

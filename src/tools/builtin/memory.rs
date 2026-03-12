@@ -61,12 +61,14 @@ impl Tool for MemoryTool {
                 if results.is_empty() {
                     return Ok(ToolExecutionOutcome::completed("no memory hits".to_owned()));
                 }
-                Ok(ToolExecutionOutcome::completed(results
-                    .iter()
-                    .enumerate()
-                    .map(|(i, hit)| format!("{}. {}", i + 1, hit))
-                    .collect::<Vec<_>>()
-                    .join("\n")))
+                Ok(ToolExecutionOutcome::completed(
+                    results
+                        .iter()
+                        .enumerate()
+                        .map(|(i, hit)| format!("{}. {}", i + 1, hit))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ))
             }
             MemoryAction::List { kind, limit } => {
                 let facts = ctx

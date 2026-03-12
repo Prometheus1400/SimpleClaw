@@ -2,9 +2,7 @@ use async_trait::async_trait;
 
 use crate::config::ExecToolConfig;
 use crate::error::FrameworkError;
-use crate::sandbox::{
-    HostSandbox, RunHostCommandRequest, SandboxPolicy, SpawnHostCommandRequest,
-};
+use crate::sandbox::{HostSandbox, RunHostCommandRequest, SandboxPolicy, SpawnHostCommandRequest};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::{command_output_to_json, exec_shell_command, parse_exec_args};

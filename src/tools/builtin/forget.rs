@@ -57,17 +57,19 @@ impl Tool for ForgetTool {
             })
             .collect::<Vec<_>>();
 
-        Ok(ToolExecutionOutcome::completed(json!({
-            "status": if args.commit { "deleted" } else { "preview" },
-            "query": args.query,
-            "similarity_threshold": result.similarity_threshold,
-            "max_matches": result.max_matches,
-            "kind": result.kind_filter,
-            "match_count": result.matches.len(),
-            "deleted_count": result.deleted_count,
-            "matches": matches,
-        })
-        .to_string()))
+        Ok(ToolExecutionOutcome::completed(
+            json!({
+                "status": if args.commit { "deleted" } else { "preview" },
+                "query": args.query,
+                "similarity_threshold": result.similarity_threshold,
+                "max_matches": result.max_matches,
+                "kind": result.kind_filter,
+                "match_count": result.matches.len(),
+                "deleted_count": result.deleted_count,
+                "matches": matches,
+            })
+            .to_string(),
+        ))
     }
 }
 
