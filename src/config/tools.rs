@@ -25,6 +25,9 @@ fn default_cron_guard_timeout_seconds() -> Option<u64> {
 pub struct ToolsConfig {
     pub read: Option<ReadToolConfig>,
     pub edit: Option<EditToolConfig>,
+    pub glob: Option<GlobToolConfig>,
+    pub grep: Option<GrepToolConfig>,
+    pub list: Option<ListToolConfig>,
     pub exec: Option<ExecToolConfig>,
     pub background: Option<BackgroundToolConfig>,
     pub web_search: Option<WebSearchToolConfig>,
@@ -94,6 +97,15 @@ impl ToolsConfig {
         if self.edit.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("edit".to_owned());
         }
+        if self.glob.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("glob".to_owned());
+        }
+        if self.grep.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("grep".to_owned());
+        }
+        if self.list.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("list".to_owned());
+        }
         if self.exec.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
             names.push("exec".to_owned());
         }
@@ -112,6 +124,9 @@ impl ToolsConfig {
         let value = match name {
             "read" => serde_json::to_value(self.read.clone().unwrap_or_default()).ok(),
             "edit" => serde_json::to_value(self.edit.clone().unwrap_or_default()).ok(),
+            "glob" => serde_json::to_value(self.glob.clone().unwrap_or_default()).ok(),
+            "grep" => serde_json::to_value(self.grep.clone().unwrap_or_default()).ok(),
+            "list" => serde_json::to_value(self.list.clone().unwrap_or_default()).ok(),
             "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok(),
             "background" => serde_json::to_value(self.background.clone().unwrap_or_default()).ok(),
             "web_search" => Some(
@@ -141,6 +156,9 @@ impl ToolsConfig {
         let owner_restricted = match name {
             "read" => self.read.clone().unwrap_or_default().owner_restricted,
             "edit" => self.edit.clone().unwrap_or_default().owner_restricted,
+            "glob" => self.glob.clone().unwrap_or_default().owner_restricted,
+            "grep" => self.grep.clone().unwrap_or_default().owner_restricted,
+            "list" => self.list.clone().unwrap_or_default().owner_restricted,
             "exec" => self.exec.clone().unwrap_or_default().owner_restricted,
             "background" => self.background.clone().unwrap_or_default().owner_restricted,
             "web_search" => self.web_search.clone().unwrap_or_default().owner_restricted,
@@ -164,6 +182,9 @@ impl ToolsConfig {
             match *name {
                 "read" => next.read.get_or_insert_with(Default::default).enabled = false,
                 "edit" => next.edit.get_or_insert_with(Default::default).enabled = false,
+                "glob" => next.glob.get_or_insert_with(Default::default).enabled = false,
+                "grep" => next.grep.get_or_insert_with(Default::default).enabled = false,
+                "list" => next.list.get_or_insert_with(Default::default).enabled = false,
                 "exec" => next.exec.get_or_insert_with(Default::default).enabled = false,
                 "background" => {
                     next.background.get_or_insert_with(Default::default).enabled = false
@@ -259,6 +280,72 @@ impl Default for EditToolConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
+pub struct GlobToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
+    pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
+}
+
+impl Default for GlobToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
+            timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GrepToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
+    pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
+}
+
+impl Default for GrepToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
+            timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ListToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
+    pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
+}
+
+impl Default for ListToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
+            timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExecToolConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -311,6 +398,7 @@ pub struct WebSearchToolConfig {
     #[serde(default)]
     pub api_key: Option<Secret<String>>,
     pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,6 +412,7 @@ pub struct WebSearchToolRuntimeConfig {
     pub provider: WebSearchProvider,
     pub api_key: Option<String>,
     pub timeout_seconds: Option<u64>,
+    pub sandbox: ToolSandboxConfig,
 }
 
 impl Default for WebSearchToolConfig {
@@ -334,6 +423,7 @@ impl Default for WebSearchToolConfig {
             provider: WebSearchProvider::default(),
             api_key: None,
             timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
         }
     }
 }
@@ -346,6 +436,7 @@ impl Default for WebSearchToolRuntimeConfig {
             provider: WebSearchProvider::default(),
             api_key: None,
             timeout_seconds: None,
+            sandbox: ToolSandboxConfig::default(),
         }
     }
 }
@@ -370,6 +461,7 @@ impl WebSearchToolConfig {
             provider: self.provider,
             api_key,
             timeout_seconds: self.timeout_seconds,
+            sandbox: self.sandbox.clone(),
         })
     }
 }
@@ -391,6 +483,7 @@ pub struct WebFetchToolConfig {
     pub owner_restricted: bool,
     pub timeout_seconds: Option<u64>,
     pub max_chars: Option<u32>,
+    pub sandbox: ToolSandboxConfig,
 }
 
 impl Default for WebFetchToolConfig {
@@ -400,6 +493,7 @@ impl Default for WebFetchToolConfig {
             owner_restricted: default_owner_restricted(),
             timeout_seconds: None,
             max_chars: None,
+            sandbox: ToolSandboxConfig::default(),
         }
     }
 }
@@ -585,7 +679,9 @@ impl Default for SkillsToolConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{SummonToolConfig, TaskToolConfig, WebSearchProvider, WebSearchToolConfig};
+    use super::{
+        SummonToolConfig, TaskToolConfig, ToolSandboxConfig, WebSearchProvider, WebSearchToolConfig,
+    };
     use crate::secrets::Secret;
 
     #[test]
@@ -596,6 +692,7 @@ mod tests {
             provider: WebSearchProvider::Brave,
             api_key: Some(Secret::from_name("BRAVE_API_KEY")),
             timeout_seconds: Some(20),
+            sandbox: ToolSandboxConfig::default(),
         };
 
         let err = config

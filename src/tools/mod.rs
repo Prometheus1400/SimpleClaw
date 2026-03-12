@@ -194,8 +194,13 @@ where
 
 #[derive(Clone)]
 pub(crate) enum RegisteredTool {
+    WebSearch(Arc<builtin::web_search::WebSearchTool>),
+    WebFetch(Arc<builtin::web_fetch::WebFetchTool>),
     Read(Arc<builtin::read::ReadTool>),
     Edit(Arc<builtin::edit::EditTool>),
+    Glob(Arc<builtin::glob::GlobTool>),
+    Grep(Arc<builtin::grep::GrepTool>),
+    List(Arc<builtin::list::ListTool>),
     Exec(Arc<builtin::exec::ExecTool>),
     Summon(Arc<builtin::summon::SummonTool>),
     Task(Arc<builtin::task::TaskTool>),
@@ -205,8 +210,13 @@ pub(crate) enum RegisteredTool {
 impl RegisteredTool {
     fn name(&self) -> &str {
         match self {
+            Self::WebSearch(tool) => tool.name(),
+            Self::WebFetch(tool) => tool.name(),
             Self::Read(tool) => tool.name(),
             Self::Edit(tool) => tool.name(),
+            Self::Glob(tool) => tool.name(),
+            Self::Grep(tool) => tool.name(),
+            Self::List(tool) => tool.name(),
             Self::Exec(tool) => tool.name(),
             Self::Summon(tool) => tool.name(),
             Self::Task(tool) => tool.name(),
@@ -216,8 +226,13 @@ impl RegisteredTool {
 
     fn metadata(&self) -> ToolMetadata<'_> {
         match self {
+            Self::WebSearch(tool) => tool.metadata(),
+            Self::WebFetch(tool) => tool.metadata(),
             Self::Read(tool) => tool.metadata(),
             Self::Edit(tool) => tool.metadata(),
+            Self::Glob(tool) => tool.metadata(),
+            Self::Grep(tool) => tool.metadata(),
+            Self::List(tool) => tool.metadata(),
             Self::Exec(tool) => tool.metadata(),
             Self::Summon(tool) => tool.metadata(),
             Self::Task(tool) => tool.metadata(),
@@ -236,6 +251,20 @@ impl RegisteredTool {
 
     fn configure_clone(&self, config: Option<Value>) -> Result<Self, FrameworkError> {
         match self {
+            Self::WebSearch(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::WebSearch(Arc::new(next)))
+            }
+            Self::WebFetch(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::WebFetch(Arc::new(next)))
+            }
             Self::Read(tool) => {
                 let mut next = (**tool).clone();
                 if let Some(config) = config {
@@ -249,6 +278,27 @@ impl RegisteredTool {
                     next.configure(config)?;
                 }
                 Ok(Self::Edit(Arc::new(next)))
+            }
+            Self::Glob(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Glob(Arc::new(next)))
+            }
+            Self::Grep(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::Grep(Arc::new(next)))
+            }
+            Self::List(tool) => {
+                let mut next = (**tool).clone();
+                if let Some(config) = config {
+                    next.configure(config)?;
+                }
+                Ok(Self::List(Arc::new(next)))
             }
             Self::Exec(tool) => {
                 let mut next = (**tool).clone();
@@ -292,8 +342,13 @@ impl RegisteredTool {
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         match self {
+            Self::WebSearch(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::WebFetch(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Read(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Edit(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Glob(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::Grep(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
+            Self::List(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Exec(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Summon(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
             Self::Task(tool) => tool.execute_with_trace(ctx, args_json, session_id).await,
@@ -530,6 +585,71 @@ fn select_execution_kind(
                 ToolExecutionKind::Direct
             }
         }
+        "glob" => {
+            if tools_config
+                .glob
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        "grep" => {
+            if tools_config
+                .grep
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        "list" => {
+            if tools_config
+                .list
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        "web_search" => {
+            if tools_config
+                .web_search
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
+        "web_fetch" => {
+            if tools_config
+                .web_fetch
+                .clone()
+                .unwrap_or_default()
+                .sandbox
+                .enabled
+            {
+                ToolExecutionKind::WasmSandbox
+            } else {
+                ToolExecutionKind::Direct
+            }
+        }
         "exec" => {
             if tools_config
                 .exec
@@ -608,6 +728,30 @@ impl ToolExecutor for DefaultToolExecutor {
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
         match (&*entry.tool, entry.execution_kind) {
+            (RegisteredTool::WebSearch(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(args_json)?;
+                tool.execute_direct(plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::WebSearch(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::WebFetch(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(args_json)?;
+                tool.execute_direct(plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::WebFetch(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
             (RegisteredTool::Read(tool), ToolExecutionKind::Direct) => {
                 let plan = tool.plan(ctx, args_json)?;
                 tool.execute_direct(ctx, plan)
@@ -627,6 +771,42 @@ impl ToolExecutor for DefaultToolExecutor {
                     .map(ToolExecutionOutcome::Completed)
             }
             (RegisteredTool::Edit(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::Glob(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_direct(ctx, plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::Glob(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::Grep(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_direct(ctx, plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::Grep(tool), ToolExecutionKind::WasmSandbox) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::List(tool), ToolExecutionKind::Direct) => {
+                let plan = tool.plan(ctx, args_json)?;
+                tool.execute_direct(ctx, plan)
+                    .await
+                    .map(ToolExecutionOutcome::Completed)
+            }
+            (RegisteredTool::List(tool), ToolExecutionKind::WasmSandbox) => {
                 let plan = tool.plan(ctx, args_json)?;
                 tool.execute_wasm(ctx, plan, self.wasm_runtime.as_ref())
                     .await
@@ -764,6 +944,18 @@ mod tests {
                 ..Default::default()
             }),
             edit: Some(crate::config::EditToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            glob: Some(crate::config::GlobToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            grep: Some(crate::config::GrepToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            list: Some(crate::config::ListToolConfig {
                 enabled: false,
                 ..Default::default()
             }),

@@ -7,7 +7,8 @@ use tracing::{debug, warn};
 
 use crate::config::{WebSearchProvider, WebSearchToolRuntimeConfig};
 use crate::error::FrameworkError;
-use crate::tools::{Tool, ToolExecEnv, ToolExecutionOutcome};
+use crate::sandbox::{RunWasmRequest, WasmSandbox};
+use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
 use super::common::parse_simple_text_arg;
 
@@ -19,6 +20,12 @@ const DUCKDUCKGO_SEARCH_URL: &str = "https://api.duckduckgo.com/";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebSearchTool {
     config: WebSearchToolRuntimeConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSearchPlan {
+    pub query: String,
+    pub timeout_seconds: u64,
 }
 
 #[async_trait]
@@ -42,12 +49,25 @@ impl Tool for WebSearchTool {
         Ok(())
     }
 
+    fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
+        &[ToolExecutionKind::Direct, ToolExecutionKind::WasmSandbox]
+    }
+
     async fn execute(
         &self,
         _ctx: &ToolExecEnv,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
+        let plan = self.plan(args_json)?;
+        self.execute_direct(plan)
+            .await
+            .map(ToolExecutionOutcome::Completed)
+    }
+}
+
+impl WebSearchTool {
+    pub fn plan(&self, args_json: &str) -> Result<WebSearchPlan, FrameworkError> {
         let query = parse_simple_text_arg(args_json).trim().to_owned();
         if query.is_empty() {
             return Err(FrameworkError::Tool(
@@ -60,6 +80,16 @@ impl Tool for WebSearchTool {
             .timeout_seconds
             .unwrap_or(DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS);
 
+        Ok(WebSearchPlan {
+            query,
+            timeout_seconds,
+        })
+    }
+
+    pub async fn execute_direct(
+        &self,
+        plan: WebSearchPlan,
+    ) -> Result<ToolRunOutput, FrameworkError> {
         let output = match self.config.provider {
             WebSearchProvider::Brave => {
                 let api_key = self
@@ -74,14 +104,49 @@ impl Tool for WebSearchTool {
                                 .to_owned(),
                         )
                     })?;
-                search_brave(&query, timeout_seconds, api_key).await?
+                search_brave(&plan.query, plan.timeout_seconds, api_key).await?
             }
-            WebSearchProvider::Duckduckgo => search_duckduckgo(&query, timeout_seconds).await?,
+            WebSearchProvider::Duckduckgo => {
+                search_duckduckgo(&plan.query, plan.timeout_seconds).await?
+            }
         };
 
         serde_json::to_string(&output)
-            .map(ToolExecutionOutcome::completed)
+            .map(ToolRunOutput::plain)
             .map_err(|e| FrameworkError::Tool(format!("search serialization failed: {e}")))
+    }
+
+    pub async fn execute_wasm(
+        &self,
+        ctx: &ToolExecEnv,
+        plan: WebSearchPlan,
+        runtime: &dyn WasmSandbox,
+    ) -> Result<ToolRunOutput, FrameworkError> {
+        let stdin = serde_json::to_vec(&serde_json::json!({
+            "query": plan.query,
+            "timeout_seconds": plan.timeout_seconds,
+            "provider": self.config.provider,
+            "api_key": self.config.api_key.clone(),
+        }))
+        .map_err(|e| FrameworkError::Tool(format!("failed to serialize web_search args: {e}")))?;
+        let output = runtime
+            .run(RunWasmRequest {
+                workspace_root: ctx.workspace_root.clone(),
+                persona_root: ctx.persona_root.clone(),
+                artifact_name: "web_search_tool.wasm",
+                args: Vec::new(),
+                stdin,
+                timeout: std::time::Duration::from_secs(plan.timeout_seconds),
+            })
+            .await?;
+        if output.exit_code != 0 {
+            return Err(FrameworkError::Tool(format!(
+                "web_search tool failed: exit_code={} stderr={}",
+                output.exit_code,
+                output.stderr.trim()
+            )));
+        }
+        Ok(ToolRunOutput::plain(output.stdout))
     }
 }
 

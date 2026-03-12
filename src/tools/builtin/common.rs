@@ -259,6 +259,7 @@ pub(super) struct ExecArgs {
     pub command: String,
     #[serde(default)]
     pub background: bool,
+    pub workdir: Option<String>,
 }
 
 pub(super) fn parse_exec_args(args_json: &str) -> ExecArgs {
@@ -268,21 +269,29 @@ pub(super) fn parse_exec_args(args_json: &str) -> ExecArgs {
                 .get("background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let workdir = value
+                .get("workdir")
+                .or_else(|| value.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
             return ExecArgs {
                 command: command.to_owned(),
                 background,
+                workdir,
             };
         }
         if let Some(s) = value.as_str() {
             return ExecArgs {
                 command: s.to_owned(),
                 background: false,
+                workdir: None,
             };
         }
     }
     ExecArgs {
         command: args_json.trim_matches('"').to_owned(),
         background: false,
+        workdir: None,
     }
 }
 
@@ -404,6 +413,17 @@ mod tests {
         let args = parse_exec_args(r#"{"command":"sleep 1","background":true}"#);
         assert_eq!(args.command, "sleep 1");
         assert!(args.background);
+        assert!(args.workdir.is_none());
+    }
+
+    #[test]
+    fn parse_exec_args_accepts_workdir_aliases() {
+        let args = parse_exec_args(r#"{"command":"pwd","workdir":"./nested"}"#);
+        assert_eq!(args.command, "pwd");
+        assert_eq!(args.workdir.as_deref(), Some("./nested"));
+
+        let args = parse_exec_args(r#"{"command":"pwd","cwd":"./nested"}"#);
+        assert_eq!(args.workdir.as_deref(), Some("./nested"));
     }
 
     #[test]

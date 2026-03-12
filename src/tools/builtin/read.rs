@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use sandbox_common::{normalize_absolute_path, persona_relative_path_allowed};
+use serde::Deserialize;
+use std::fs;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,7 +14,8 @@ use crate::sandbox::{
 };
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
-use super::common::parse_simple_text_arg;
+const DEFAULT_READ_LIMIT: usize = 2000;
+const MAX_LINE_LENGTH: usize = 2000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadTool {
@@ -23,6 +26,16 @@ pub struct ReadTool {
 pub struct ReadPlan {
     pub host_path: PathBuf,
     pub guest_path: Option<String>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadArgs {
+    #[serde(rename = "filePath")]
+    file_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
 }
 
 #[async_trait]
@@ -32,11 +45,11 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read local file using JSON: {path}"
+        "Read a file or directory using JSON: {filePath, offset?, limit?}."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
+        "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":1},\"limit\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"filePath\"]}"
     }
 
     fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
@@ -64,13 +77,35 @@ impl Tool for ReadTool {
 
 impl ReadTool {
     pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ReadPlan, FrameworkError> {
-        let raw_path = parse_simple_text_arg(args_json);
-        let host_path = resolve_path_for_read(&raw_path, &ctx.workspace_root)?;
+        let args: ReadArgs = serde_json::from_str(args_json)
+            .map_err(|e| FrameworkError::Tool(format!("read requires JSON object args: {e}")))?;
+        let file_path = args.file_path.trim();
+        if file_path.is_empty() {
+            return Err(FrameworkError::Tool(
+                "read requires a non-empty filePath".to_owned(),
+            ));
+        }
+        let offset = args.offset.unwrap_or(1);
+        if offset == 0 {
+            return Err(FrameworkError::Tool(
+                "read offset must be greater than or equal to 1".to_owned(),
+            ));
+        }
+        let limit = args.limit.unwrap_or(DEFAULT_READ_LIMIT);
+        if limit == 0 {
+            return Err(FrameworkError::Tool(
+                "read limit must be greater than or equal to 1".to_owned(),
+            ));
+        }
+
+        let host_path = resolve_path_for_read(file_path, &ctx.workspace_root)?;
         let guest_path =
             host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
         Ok(ReadPlan {
             host_path,
             guest_path,
+            offset,
+            limit,
         })
     }
 
@@ -79,8 +114,12 @@ impl ReadTool {
         _ctx: &ToolExecEnv,
         plan: ReadPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
-        let content = std::fs::read_to_string(plan.host_path)?;
-        Ok(ToolRunOutput::plain(content))
+        let rendered = if plan.host_path.is_dir() {
+            render_directory_output(&plan.host_path, plan.offset, plan.limit)?
+        } else {
+            render_file_output(&plan.host_path, plan.offset, plan.limit)?
+        };
+        Ok(ToolRunOutput::plain(rendered))
     }
 
     pub async fn execute_wasm(
@@ -92,13 +131,19 @@ impl ReadTool {
         let guest_path = plan.guest_path.ok_or_else(|| {
             FrameworkError::Tool("read path is not representable inside wasm sandbox".to_owned())
         })?;
+        let stdin = serde_json::to_vec(&serde_json::json!({
+            "path": guest_path,
+            "offset": plan.offset,
+            "limit": plan.limit,
+        }))
+        .map_err(|e| FrameworkError::Tool(format!("failed to serialize read args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
                 workspace_root: ctx.workspace_root.clone(),
                 persona_root: ctx.persona_root.clone(),
                 artifact_name: "read_tool.wasm",
-                args: vec![guest_path],
-                stdin: Vec::new(),
+                args: Vec::new(),
+                stdin,
                 timeout: Duration::from_secs(self.config.timeout_seconds.unwrap_or(10)),
             })
             .await?;
@@ -111,6 +156,124 @@ impl ReadTool {
         }
         Ok(ToolRunOutput::plain(output.stdout))
     }
+}
+
+fn render_file_output(path: &Path, offset: usize, limit: usize) -> Result<String, FrameworkError> {
+    let content = fs::read_to_string(path)?;
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    if total_lines == 0 {
+        if offset != 1 {
+            return Err(FrameworkError::Tool(format!(
+                "Offset {offset} is out of range for this file (0 lines)"
+            )));
+        }
+    } else if offset > total_lines {
+        return Err(FrameworkError::Tool(format!(
+            "Offset {offset} is out of range for this file ({total_lines} lines)"
+        )));
+    }
+
+    let start = offset.saturating_sub(1);
+    let selected = lines
+        .iter()
+        .skip(start)
+        .take(limit)
+        .enumerate()
+        .map(|(idx, line)| {
+            let value = if line.chars().count() > MAX_LINE_LENGTH {
+                format!("{}...", line.chars().take(MAX_LINE_LENGTH).collect::<String>())
+            } else {
+                (*line).to_owned()
+            };
+            format!("{}: {}", idx + offset, value)
+        })
+        .collect::<Vec<_>>();
+
+    let last_read_line = if selected.is_empty() {
+        offset.saturating_sub(1)
+    } else {
+        offset + selected.len() - 1
+    };
+    let has_more = last_read_line < total_lines;
+    let mut output = vec![
+        format!("<path>{}</path>", path.display()),
+        "<type>file</type>".to_owned(),
+        "<content>".to_owned(),
+    ];
+    output.extend(selected);
+
+    if has_more {
+        output.push(String::new());
+        output.push(format!(
+            "(Showing lines {}-{} of {}. Use offset={} to continue.)",
+            offset,
+            last_read_line,
+            total_lines,
+            last_read_line + 1
+        ));
+    } else {
+        output.push(String::new());
+        output.push(format!("(End of file - total {} lines)", total_lines));
+    }
+    output.push("</content>".to_owned());
+    Ok(output.join("\n"))
+}
+
+fn render_directory_output(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<String, FrameworkError> {
+    let mut entries = fs::read_dir(path)?
+        .map(|entry| {
+            let entry = entry.map_err(FrameworkError::Io)?;
+            let mut name = entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| FrameworkError::Tool("directory entry is not utf-8".to_owned()))?
+                .to_owned();
+            if entry.file_type().map_err(FrameworkError::Io)?.is_dir() {
+                name.push('/');
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, FrameworkError>>()?;
+    entries.sort();
+
+    if offset == 0 {
+        return Err(FrameworkError::Tool(
+            "read offset must be greater than or equal to 1".to_owned(),
+        ));
+    }
+    let start = offset - 1;
+    let selected = entries
+        .iter()
+        .skip(start)
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let truncated = start + selected.len() < entries.len();
+
+    let mut output = vec![
+        format!("<path>{}</path>", path.display()),
+        "<type>directory</type>".to_owned(),
+        "<entries>".to_owned(),
+        selected.join("\n"),
+    ];
+    if truncated {
+        output.push(format!(
+            "\n(Showing {} of {} entries. Use offset={} to continue.)",
+            selected.len(),
+            entries.len(),
+            offset + selected.len()
+        ));
+    } else {
+        output.push(format!("\n({} entries)", entries.len()));
+    }
+    output.push("</entries>".to_owned());
+    Ok(output.join("\n"))
 }
 
 pub(super) fn host_path_to_guest_path(

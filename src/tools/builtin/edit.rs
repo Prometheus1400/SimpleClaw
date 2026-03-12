@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use sandbox_common::{EditArgs, apply_edit_command_at_path};
-#[cfg(test)]
-use sandbox_common::{apply_create as shared_apply_create, apply_replace as shared_apply_replace};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::config::EditToolConfig;
@@ -23,6 +23,18 @@ pub struct EditPlan {
     pub guest_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EditArgs {
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "oldString")]
+    pub old_string: String,
+    #[serde(rename = "newString")]
+    pub new_string: String,
+    #[serde(rename = "replaceAll", default)]
+    pub replace_all: bool,
+}
+
 #[async_trait]
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
@@ -30,11 +42,11 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Edit local files using JSON: {command,path,...}. Supports create/replace/insert/delete/append with optional dry_run."
+        "Edit a file using JSON: {filePath, oldString, newString, replaceAll?}."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\",\"insert\",\"delete\",\"append\"]},\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},\"new_text\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\",\"minimum\":1},\"replace_all\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"dry_run\":{\"type\":\"boolean\"}},\"required\":[\"command\",\"path\"]}"
+        "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"},\"oldString\":{\"type\":\"string\"},\"newString\":{\"type\":\"string\"},\"replaceAll\":{\"type\":\"boolean\"}},\"required\":[\"filePath\",\"oldString\",\"newString\"]}"
     }
 
     fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {
@@ -64,7 +76,17 @@ impl EditTool {
     pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<EditPlan, FrameworkError> {
         let args: EditArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
-        let host_path = resolve_path_for_read(&args.path, &ctx.workspace_root)?;
+        if args.file_path.trim().is_empty() {
+            return Err(FrameworkError::Tool(
+                "edit requires a non-empty filePath".to_owned(),
+            ));
+        }
+        if args.old_string == args.new_string {
+            return Err(FrameworkError::Tool(
+                "No changes to apply: oldString and newString are identical.".to_owned(),
+            ));
+        }
+        let host_path = resolve_path_for_read(&args.file_path, &ctx.workspace_root)?;
         let guest_path =
             host_path_to_guest_path(&host_path, &ctx.workspace_root, &ctx.persona_root).ok();
         Ok(EditPlan {
@@ -79,9 +101,8 @@ impl EditTool {
         _ctx: &ToolExecEnv,
         plan: EditPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
-        let output = apply_edit_command_at_path(&plan.args, &plan.host_path)
-            .map_err(|e| FrameworkError::Tool(e.to_string()))?;
-        Ok(ToolRunOutput::plain(output))
+        apply_edit_at_path(&plan.host_path, &plan.args)
+            .map(|output| ToolRunOutput::plain(output.to_owned()))
     }
 
     pub async fn execute_wasm(
@@ -93,10 +114,13 @@ impl EditTool {
         let guest_path = plan.guest_path.ok_or_else(|| {
             FrameworkError::Tool("edit path is not representable inside wasm sandbox".to_owned())
         })?;
-        let mut guest_args = plan.args.clone();
-        guest_args.path = guest_path;
-        let stdin = serde_json::to_vec(&guest_args)
-            .map_err(|e| FrameworkError::Tool(format!("failed to serialize edit args: {e}")))?;
+        let stdin = serde_json::to_vec(&serde_json::json!({
+            "filePath": guest_path,
+            "oldString": plan.args.old_string,
+            "newString": plan.args.new_string,
+            "replaceAll": plan.args.replace_all,
+        }))
+        .map_err(|e| FrameworkError::Tool(format!("failed to serialize edit args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
                 workspace_root: ctx.workspace_root.clone(),
@@ -118,32 +142,68 @@ impl EditTool {
     }
 }
 
-#[cfg(test)]
-fn apply_create(
-    path: &std::path::Path,
-    path_display: &str,
-    args: &EditArgs,
-) -> Result<String, FrameworkError> {
-    shared_apply_create(path, path_display, args).map_err(FrameworkError::Tool)
+fn apply_edit_at_path(path: &Path, args: &EditArgs) -> Result<&'static str, FrameworkError> {
+    if args.old_string.is_empty() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &args.new_string)?;
+        return Ok("Edit applied successfully.");
+    }
+
+    let original = fs::read_to_string(path)
+        .map_err(|e| FrameworkError::Tool(format!("File {} not found: {e}", path.display())))?;
+    let ending = detect_line_ending(&original);
+    let old_string = convert_to_line_ending(&normalize_line_endings(&args.old_string), ending);
+    let new_string = convert_to_line_ending(&normalize_line_endings(&args.new_string), ending);
+
+    let occurrences = original.match_indices(&old_string).count();
+    if occurrences == 0 {
+        return Err(FrameworkError::Tool(
+            "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.".to_owned(),
+        ));
+    }
+    if occurrences > 1 && !args.replace_all {
+        return Err(FrameworkError::Tool(
+            "Found multiple matches for oldString. Provide more surrounding context to make the match unique."
+                .to_owned(),
+        ));
+    }
+
+    let updated = if args.replace_all {
+        original.replace(&old_string, &new_string)
+    } else {
+        original.replacen(&old_string, &new_string, 1)
+    };
+    fs::write(path, updated)?;
+    Ok("Edit applied successfully.")
 }
 
-#[cfg(test)]
-fn apply_replace(
-    path: &std::path::Path,
-    path_display: &str,
-    args: &EditArgs,
-) -> Result<String, FrameworkError> {
-    shared_apply_replace(path, path_display, args).map_err(FrameworkError::Tool)
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn detect_line_ending(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn convert_to_line_ending(text: &str, ending: &str) -> String {
+    if ending == "\n" {
+        text.to_owned()
+    } else {
+        text.replace('\n', "\r\n")
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{EditArgs, apply_edit_at_path};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    use serde_json::{Value, json};
-
-    use super::{EditArgs, apply_create, apply_replace, resolve_path_for_read};
 
     fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -153,152 +213,39 @@ mod tests {
         std::env::temp_dir().join(format!("simpleclaw_edit_{prefix}_{nanos}"))
     }
 
-    fn args(value: Value) -> EditArgs {
-        serde_json::from_value(value).expect("args should parse")
-    }
-
     #[test]
-    fn create_and_replace_roundtrip() {
-        let workspace = unique_test_dir("create_replace");
+    fn create_file_when_old_string_is_empty() {
+        let workspace = unique_test_dir("create");
         fs::create_dir_all(&workspace).expect("should create workspace");
         let path = workspace.join("notes.txt");
 
-        apply_create(
-            &path,
-            &path.display().to_string(),
-            &args(json!({
-                "command": "create",
-                "path": "notes.txt",
-                "content": "hello world\n"
-            })),
-        )
-        .expect("create should work");
-        apply_replace(
-            &path,
-            &path.display().to_string(),
-            &args(json!({
-                "command": "replace",
-                "path": "notes.txt",
-                "old_text": "world",
-                "new_text": "team"
-            })),
-        )
-        .expect("replace should work");
-
-        let content = fs::read_to_string(path).expect("should read notes");
-        assert_eq!(content, "hello team\n");
-        let _ = fs::remove_dir_all(workspace);
+        let args = EditArgs {
+            file_path: path.display().to_string(),
+            old_string: String::new(),
+            new_string: "hello\n".to_owned(),
+            replace_all: false,
+        };
+        apply_edit_at_path(&path, &args).expect("edit should succeed");
+        assert_eq!(fs::read_to_string(&path).expect("should read"), "hello\n");
     }
 
     #[test]
-    fn replace_requires_replace_all_when_ambiguous() {
-        let workspace = unique_test_dir("replace_ambiguous");
+    fn replace_requires_unique_match_without_replace_all() {
+        let workspace = unique_test_dir("replace");
         fs::create_dir_all(&workspace).expect("should create workspace");
         let path = workspace.join("notes.txt");
-        fs::write(&path, "a b a b\n").expect("should write notes");
+        fs::write(&path, "a b a\n").expect("write should succeed");
 
-        let err = apply_replace(
-            &path,
-            &path.display().to_string(),
-            &args(json!({
-                "command": "replace",
-                "path": "notes.txt",
-                "old_text": "a",
-                "new_text": "z"
-            })),
-        )
-        .expect_err("replace should fail without replace_all");
-        assert!(err.to_string().contains("set replace_all=true"));
-        let _ = fs::remove_dir_all(workspace);
-    }
-
-    #[test]
-    fn dry_run_does_not_mutate_file() {
-        let workspace = unique_test_dir("dry_run");
-        fs::create_dir_all(&workspace).expect("should create workspace");
-        let path = workspace.join("doc.txt");
-        fs::write(&path, "alpha beta\n").expect("should write doc");
-
-        let out = apply_replace(
-            &path,
-            &path.display().to_string(),
-            &args(json!({
-                "command": "replace",
-                "path": "doc.txt",
-                "old_text": "beta",
-                "new_text": "gamma",
-                "dry_run": true
-            })),
-        )
-        .expect("dry run should succeed");
-        let parsed: Value = serde_json::from_str(&out).expect("output should be json");
-        assert_eq!(parsed["status"], "dry_run");
-        let content = fs::read_to_string(path).expect("should read doc");
-        assert_eq!(content, "alpha beta\n");
-        let _ = fs::remove_dir_all(workspace);
-    }
-
-    #[test]
-    fn resolve_path_normalizes_outside_workspace_path() {
-        let workspace = unique_test_dir("sandbox_workspace");
-        let outside = unique_test_dir("sandbox_outside");
-        fs::create_dir_all(&workspace).expect("should create workspace");
-        fs::create_dir_all(&outside).expect("should create outside dir");
-        fs::write(outside.join("secrets.txt"), "secret").expect("should write secret");
-
-        let resolved = resolve_path_for_read(
-            outside.join("secrets.txt").to_string_lossy().as_ref(),
-            &workspace,
-        )
-        .expect("outside path should normalize");
-        assert_eq!(resolved, outside.join("secrets.txt"));
-
-        let _ = fs::remove_dir_all(workspace);
-        let _ = fs::remove_dir_all(outside);
-    }
-
-    #[test]
-    fn create_dry_run_does_not_write_file() {
-        let workspace = unique_test_dir("create_dry_run");
-        fs::create_dir_all(&workspace).expect("should create workspace");
-        let path = workspace.join("draft.txt");
-
-        let out = apply_create(
-            &path,
-            &path.display().to_string(),
-            &args(json!({
-                "command": "create",
-                "path": "draft.txt",
-                "content": "hello",
-                "dry_run": true
-            })),
-        )
-        .expect("create dry run should succeed");
-
-        let parsed: Value = serde_json::from_str(&out).expect("output should be json");
-        assert_eq!(parsed["status"], "dry_run");
-        assert!(!path.exists());
-        let _ = fs::remove_dir_all(workspace);
-    }
-
-    #[test]
-    fn resolve_path_normalizes_persona_simpleclaw_path() {
-        let workspace = unique_test_dir("persona_workspace");
-        let persona = unique_test_dir("persona_root");
-        fs::create_dir_all(&workspace).expect("should create workspace");
-        fs::create_dir_all(persona.join(".simpleclaw")).expect("should create persona state");
-
-        let resolved = resolve_path_for_read(
-            persona
-                .join(".simpleclaw/secret.db")
-                .to_string_lossy()
-                .as_ref(),
-            &workspace,
-        )
-        .expect("persona path should normalize");
-        assert_eq!(resolved, persona.join(".simpleclaw/secret.db"));
-
-        let _ = fs::remove_dir_all(workspace);
-        let _ = fs::remove_dir_all(persona);
+        let args = EditArgs {
+            file_path: path.display().to_string(),
+            old_string: "a".to_owned(),
+            new_string: "z".to_owned(),
+            replace_all: false,
+        };
+        let err = apply_edit_at_path(&path, &args).expect_err("edit should fail");
+        assert!(
+            err.to_string()
+                .contains("Found multiple matches for oldString")
+        );
     }
 }

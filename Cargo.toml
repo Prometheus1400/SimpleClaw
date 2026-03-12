@@ -8,6 +8,11 @@ members = [
   "sandbox/common",
   "sandbox/read_tool",
   "sandbox/edit_tool",
+  "sandbox/glob_tool",
+  "sandbox/grep_tool",
+  "sandbox/list_tool",
+  "sandbox/web_fetch_tool",
+  "sandbox/web_search_tool",
 ]
 default-members = ["."]
 
@@ -33,6 +38,7 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 fastembed = "5"
 sqlite-vec = "0.1"
 regex = "1"
+glob = "0.3"
 wasmtime = "21"
 wasmtime-wasi = "21"
 cap-std = "3"

@@ -145,6 +145,27 @@ fn validate_tools_config(agent_id: &str, tools: &ToolsConfig) -> Result<(), Fram
             edit.timeout_seconds,
         )?;
     }
+    if let Some(glob) = &tools.glob {
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.glob.timeout_seconds",
+            glob.timeout_seconds,
+        )?;
+    }
+    if let Some(grep) = &tools.grep {
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.grep.timeout_seconds",
+            grep.timeout_seconds,
+        )?;
+    }
+    if let Some(list) = &tools.list {
+        validate_optional_nonzero_u64(
+            agent_id,
+            "tools.list.timeout_seconds",
+            list.timeout_seconds,
+        )?;
+    }
     if let Some(exec) = &tools.exec {
         validate_optional_nonzero_u64(
             agent_id,

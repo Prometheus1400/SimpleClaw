@@ -60,6 +60,11 @@ cargo build \
   --manifest-path "${ROOT_DIR}/Cargo.toml" \
   --package read_tool \
   --package edit_tool \
+  --package glob_tool \
+  --package grep_tool \
+  --package list_tool \
+  --package web_fetch_tool \
+  --package web_search_tool \
   --target wasm32-wasip1 \
   "${CARGO_PROFILE_ARGS[@]}" \
   --target-dir "${WASM_TARGET_DIR}"
@@ -67,9 +72,14 @@ cargo build \
 install -m 0755 "${MAIN_TARGET_DIR}/${BUILD_PROFILE}/simpleclaw" "${BIN_DIR}/simpleclaw"
 install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/read_tool.wasm" "${WASM_DIR}/read_tool.wasm"
 install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/edit_tool.wasm" "${WASM_DIR}/edit_tool.wasm"
+install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/glob_tool.wasm" "${WASM_DIR}/glob_tool.wasm"
+install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/grep_tool.wasm" "${WASM_DIR}/grep_tool.wasm"
+install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/list_tool.wasm" "${WASM_DIR}/list_tool.wasm"
+install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/web_fetch_tool.wasm" "${WASM_DIR}/web_fetch_tool.wasm"
+install -m 0644 "${WASM_TARGET_DIR}/wasm32-wasip1/${BUILD_PROFILE}/web_search_tool.wasm" "${WASM_DIR}/web_search_tool.wasm"
 (
   cd "${WASM_DIR}"
-  shasum -a 256 read_tool.wasm edit_tool.wasm > SHA256SUMS
+  shasum -a 256 read_tool.wasm edit_tool.wasm glob_tool.wasm grep_tool.wasm list_tool.wasm web_fetch_tool.wasm web_search_tool.wasm > SHA256SUMS
 )
 
 echo

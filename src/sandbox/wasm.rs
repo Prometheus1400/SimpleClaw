@@ -217,7 +217,7 @@ fn resolve_guest_artifact_path(
         .collect::<Vec<_>>()
         .join(", ");
     Err(FrameworkError::Tool(format!(
-        "missing wasm artifact: name={artifact_name} searched=[{searched_paths}] (build with: cargo build --package read_tool --package edit_tool --target wasm32-wasip1 --release)"
+        "missing wasm artifact: name={artifact_name} searched=[{searched_paths}] (build with: cargo build --package read_tool --package edit_tool --package glob_tool --package grep_tool --package list_tool --package web_fetch_tool --package web_search_tool --target wasm32-wasip1 --release)"
     )))
 }
 
