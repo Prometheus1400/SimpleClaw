@@ -53,7 +53,7 @@ impl Tool for WebFetchTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -93,7 +93,7 @@ impl WebFetchTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: WebFetchPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -105,8 +105,8 @@ impl WebFetchTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize web_fetch args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: Vec::new(),
                 artifact_name: "web_fetch_tool.wasm",
                 args: Vec::new(),

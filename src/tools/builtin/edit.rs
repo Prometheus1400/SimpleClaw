@@ -63,7 +63,7 @@ impl Tool for EditTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -75,7 +75,7 @@ impl Tool for EditTool {
 }
 
 impl EditTool {
-    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<EditPlan, FrameworkError> {
+    pub fn plan(&self, ctx: &ToolExecEnv<'_>, args_json: &str) -> Result<EditPlan, FrameworkError> {
         let args: EditArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("edit requires JSON object args: {e}")))?;
         if args.file_path.trim().is_empty() {
@@ -105,7 +105,7 @@ impl EditTool {
 
     pub async fn execute_direct(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         plan: EditPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
         apply_edit_at_path(&plan.host_path, &plan.args)
@@ -114,7 +114,7 @@ impl EditTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: EditPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -130,8 +130,8 @@ impl EditTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize edit args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "edit_tool.wasm",
                 args: Vec::new(),

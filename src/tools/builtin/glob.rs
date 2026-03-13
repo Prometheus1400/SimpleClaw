@@ -60,7 +60,7 @@ impl Tool for GlobTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -72,7 +72,7 @@ impl Tool for GlobTool {
 }
 
 impl GlobTool {
-    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<GlobPlan, FrameworkError> {
+    pub fn plan(&self, ctx: &ToolExecEnv<'_>, args_json: &str) -> Result<GlobPlan, FrameworkError> {
         let args: GlobArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("glob requires JSON object args: {e}")))?;
         let pattern = args.pattern.trim();
@@ -105,7 +105,7 @@ impl GlobTool {
 
     pub async fn execute_direct(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         plan: GlobPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let output = run_glob(&plan.pattern, &plan.host_path)?;
@@ -114,7 +114,7 @@ impl GlobTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: GlobPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -128,8 +128,8 @@ impl GlobTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize glob args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "glob_tool.wasm",
                 args: Vec::new(),

@@ -25,6 +25,7 @@ mod telemetry;
 /// Public test harness helpers for black-box integration tests.
 pub mod testing;
 mod tools;
+mod turn;
 
 use clap::Parser;
 use color_eyre::eyre::WrapErr;

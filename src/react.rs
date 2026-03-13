@@ -1,13 +1,14 @@
 use crate::approval::DynApprovalRequester;
+use crate::channels::InboundMessage;
 use crate::dispatch::{DispatchAction, ToolDispatcher, ToolExecutionResult};
 use crate::error::FrameworkError;
 use crate::gateway::Gateway;
+use crate::memory::Memory;
 use crate::providers::ProviderFactory;
 use crate::providers::{Message, Provider, ProviderResponse, Role, StreamEvent};
 use crate::reply_policy::no_reply_prompt_instruction;
 use crate::tools::AsyncToolRunManager;
 use crate::tools::{AgentInvoker, AgentToolRegistry, CompletionRoute, ToolExecEnv};
-use crate::{channels::InboundMessage, memory::DynMemory};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,20 +32,20 @@ pub struct RunParams<'a> {
     pub session_id: &'a str,
     pub max_steps: u32,
     pub history_messages: usize,
-    pub execution_env: BTreeMap<String, String>,
-    pub memory: DynMemory,
-    pub persona_root: std::path::PathBuf,
-    pub workspace_root: std::path::PathBuf,
-    pub user_id: String,
-    pub owner_ids: Vec<String>,
-    pub async_tool_runs: Arc<AsyncToolRunManager>,
+    pub execution_env: &'a BTreeMap<String, String>,
+    pub memory: &'a dyn Memory,
+    pub persona_root: &'a std::path::Path,
+    pub workspace_root: &'a std::path::Path,
+    pub user_id: &'a str,
+    pub owner_ids: &'a [String],
+    pub async_tool_runs: &'a Arc<AsyncToolRunManager>,
     pub approval_requester: DynApprovalRequester,
-    pub tool_registry: AgentToolRegistry,
-    pub gateway: Option<Arc<Gateway>>,
-    pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
-    pub completion_route: Option<CompletionRoute>,
-    pub source_message_id: Option<String>,
-    pub on_text_delta: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub tool_registry: &'a AgentToolRegistry,
+    pub gateway: Option<&'a Gateway>,
+    pub completion_tx: Option<&'a mpsc::Sender<InboundMessage>>,
+    pub completion_route: Option<&'a CompletionRoute>,
+    pub source_message_id: Option<&'a str>,
+    pub on_text_delta: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     pub allow_async_tools: bool,
 }
 
@@ -80,32 +81,31 @@ impl ReactLoop {
             .provider_factory
             .supports_native_tools(params.provider_key);
         let dispatcher = resolve_dispatcher(supports_native);
-        let invoker = Arc::clone(&self.invoker);
         let tool_env = ToolExecEnv {
-            agent_id: params.agent_id.to_owned(),
-            agent_name: params.agent_name.to_owned(),
-            memory: params.memory.clone(),
+            agent_id: params.agent_id,
+            agent_name: params.agent_name,
+            memory: params.memory,
             history_messages: params.history_messages,
-            env: params.execution_env.clone(),
-            persona_root: params.persona_root.clone(),
-            workspace_root: params.workspace_root.clone(),
-            user_id: params.user_id.clone(),
-            owner_ids: params.owner_ids.clone(),
-            async_tool_runs: Arc::clone(&params.async_tool_runs),
-            invoker,
-            gateway: params.gateway.clone(),
-            completion_tx: params.completion_tx.clone(),
-            completion_route: params.completion_route.clone(),
+            env: params.execution_env,
+            persona_root: params.persona_root,
+            workspace_root: params.workspace_root,
+            user_id: params.user_id,
+            owner_ids: params.owner_ids,
+            async_tool_runs: &params.async_tool_runs,
+            invoker: &self.invoker,
+            gateway: params.gateway,
+            completion_tx: params.completion_tx,
+            completion_route: params.completion_route,
             allow_async_tools: params.allow_async_tools,
             approval_requester: Arc::clone(&params.approval_requester),
         };
-        let tool_registry = params.tool_registry.clone();
+        let tool_registry = params.tool_registry;
         run_loop(
             provider,
             dispatcher,
             params,
             &tool_env,
-            &tool_registry,
+            tool_registry,
             &mut history,
         )
         .await
@@ -116,7 +116,7 @@ async fn run_loop(
     provider: &dyn Provider,
     dispatcher: &dyn ToolDispatcher,
     params: RunParams<'_>,
-    tool_env: &ToolExecEnv,
+    tool_env: &ToolExecEnv<'_>,
     active_tools: &AgentToolRegistry,
     history: &mut Vec<Message>,
 ) -> Result<RunOutcome, FrameworkError> {

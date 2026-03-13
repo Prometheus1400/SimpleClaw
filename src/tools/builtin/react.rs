@@ -33,7 +33,7 @@ impl Tool for ReactTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {

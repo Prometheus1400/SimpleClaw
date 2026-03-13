@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -17,7 +17,7 @@ use crate::config::{GatewayChannelKind, ToolsConfig};
 use crate::dispatch::ToolExecutionResult;
 use crate::error::{ApprovalDenied, FrameworkError};
 use crate::gateway::Gateway;
-use crate::memory::DynMemory;
+use crate::memory::Memory;
 use crate::providers::ToolDefinition;
 use crate::sandbox::{DefaultHostSandbox, DefaultWasmSandbox, HostSandbox, WasmSandbox};
 use crate::tools::builtin::file_access::FileToolRoute;
@@ -103,27 +103,26 @@ pub struct CompletionRoute {
     pub is_dm: bool,
 }
 
-#[derive(Clone)]
-pub(crate) struct ToolExecEnv {
-    pub agent_id: String,
-    pub agent_name: String,
-    pub memory: DynMemory,
+pub(crate) struct ToolExecEnv<'a> {
+    pub agent_id: &'a str,
+    pub agent_name: &'a str,
+    pub memory: &'a dyn Memory,
     pub history_messages: usize,
-    pub env: BTreeMap<String, String>,
-    pub persona_root: PathBuf,
-    pub workspace_root: PathBuf,
-    pub user_id: String,
-    pub owner_ids: Vec<String>,
-    pub async_tool_runs: Arc<AsyncToolRunManager>,
-    pub invoker: Arc<dyn AgentInvoker>,
-    pub gateway: Option<Arc<Gateway>>,
-    pub completion_tx: Option<mpsc::Sender<InboundMessage>>,
-    pub completion_route: Option<CompletionRoute>,
+    pub env: &'a BTreeMap<String, String>,
+    pub persona_root: &'a Path,
+    pub workspace_root: &'a Path,
+    pub user_id: &'a str,
+    pub owner_ids: &'a [String],
+    pub async_tool_runs: &'a Arc<AsyncToolRunManager>,
+    pub invoker: &'a Arc<dyn AgentInvoker>,
+    pub gateway: Option<&'a Gateway>,
+    pub completion_tx: Option<&'a mpsc::Sender<InboundMessage>>,
+    pub completion_route: Option<&'a CompletionRoute>,
     pub allow_async_tools: bool,
     pub approval_requester: DynApprovalRequester,
 }
 
-impl ToolExecEnv {
+impl ToolExecEnv<'_> {
     pub fn owner_allowed(user_id: &str, owner_ids: &[String]) -> bool {
         !owner_ids.is_empty() && owner_ids.iter().any(|owner_id| owner_id == user_id)
     }
@@ -170,14 +169,14 @@ pub(crate) trait Tool: Send + Sync + ToolClone {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError>;
 
     async fn execute_with_trace(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -343,7 +342,7 @@ impl RegisteredTool {
 
     async fn execute_direct(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -675,13 +674,21 @@ fn select_execution_kind(
 }
 
 pub(crate) trait ToolAuthorizer: Send + Sync {
-    fn authorize(&self, entry: &AgentToolEntry, ctx: &ToolExecEnv) -> Result<(), FrameworkError>;
+    fn authorize(
+        &self,
+        entry: &AgentToolEntry,
+        ctx: &ToolExecEnv<'_>,
+    ) -> Result<(), FrameworkError>;
 }
 
 pub(crate) struct DefaultToolAuthorizer;
 
 impl ToolAuthorizer for DefaultToolAuthorizer {
-    fn authorize(&self, entry: &AgentToolEntry, ctx: &ToolExecEnv) -> Result<(), FrameworkError> {
+    fn authorize(
+        &self,
+        entry: &AgentToolEntry,
+        ctx: &ToolExecEnv<'_>,
+    ) -> Result<(), FrameworkError> {
         if !entry.owner_restricted {
             return Ok(());
         }
@@ -704,7 +711,7 @@ pub(crate) trait ToolExecutor: Send + Sync {
     async fn execute(
         &self,
         entry: &AgentToolEntry,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError>;
@@ -740,7 +747,7 @@ impl ToolExecutor for DefaultToolExecutor {
     async fn execute(
         &self,
         entry: &AgentToolEntry,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -1028,7 +1035,7 @@ impl ToolExecutor for DefaultToolExecutor {
 }
 
 async fn request_tool_escalation(
-    ctx: &ToolExecEnv,
+    ctx: &ToolExecEnv<'_>,
     session_id: &str,
     tool_name: &str,
     capability: crate::error::SandboxCapability,
@@ -1036,10 +1043,10 @@ async fn request_tool_escalation(
     reason: String,
 ) -> Result<(), FrameworkError> {
     let request = ApprovalRequest {
-        agent_id: ctx.agent_id.clone(),
-        agent_name: ctx.agent_name.clone(),
+        agent_id: ctx.agent_id.to_owned(),
+        agent_name: ctx.agent_name.to_owned(),
         session_id: session_id.to_owned(),
-        requesting_user_id: ctx.user_id.clone(),
+        requesting_user_id: ctx.user_id.to_owned(),
         tool_name: tool_name.to_owned(),
         execution_kind: "preflight_escalation".to_owned(),
         capability,
@@ -1119,7 +1126,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _ctx: &ToolExecEnv,
+            _ctx: &ToolExecEnv<'_>,
             _args_json: &str,
             _session_id: &str,
         ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -1148,7 +1155,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _ctx: &ToolExecEnv,
+            _ctx: &ToolExecEnv<'_>,
             _args_json: &str,
             _session_id: &str,
         ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -1179,7 +1186,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _ctx: &ToolExecEnv,
+            _ctx: &ToolExecEnv<'_>,
             _args_json: &str,
             _session_id: &str,
         ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -1408,7 +1415,8 @@ mod tests {
         workspace_root: PathBuf,
         gateway: Arc<Gateway>,
         approval_registry: Arc<ApprovalRegistry>,
-    ) -> ToolExecEnv {
+        env_map: BTreeMap<String, String>,
+    ) -> ToolExecEnv<'static> {
         let (completion_tx, _completion_rx) = mpsc::channel(4);
         let inbound = InboundMessage {
             trace_id: "trace-1".to_owned(),
@@ -1425,30 +1433,41 @@ mod tests {
             invoke: false,
             content: String::new(),
         };
+        let memory = Box::leak(Box::new(NoopMemory));
+        let env = Box::leak(Box::new(env_map));
+        let persona_root = Box::leak(Box::new(workspace_root.clone()));
+        let workspace_root = Box::leak(Box::new(workspace_root));
+        let owner_ids = Box::leak(Box::new(vec!["owner-1".to_owned()]));
+        let async_tool_runs = Box::leak(Box::new(Arc::new(AsyncToolRunManager::new())));
+        let invoker: &'static Arc<dyn AgentInvoker> =
+            Box::leak(Box::new(Arc::new(NoopInvoker) as Arc<dyn AgentInvoker>));
+        let gateway_ref: &'static Gateway = Box::leak(Box::new((*gateway).clone()));
+        let completion_tx = Box::leak(Box::new(completion_tx));
+        let completion_route = Box::leak(Box::new(CompletionRoute {
+            trace_id: "trace-1".to_owned(),
+            source_channel: GatewayChannelKind::Discord,
+            target_agent_id: "agent-1".to_owned(),
+            session_key: "sess-1".to_owned(),
+            source_message_id: Some("msg-1".to_owned()),
+            channel_id: "chan-1".to_owned(),
+            guild_id: None,
+            is_dm: true,
+        }));
         ToolExecEnv {
-            agent_id: "agent-1".to_owned(),
-            agent_name: "Agent One".to_owned(),
-            memory: Arc::new(NoopMemory),
+            agent_id: "agent-1",
+            agent_name: "Agent One",
+            memory,
             history_messages: 8,
-            env: BTreeMap::new(),
-            persona_root: workspace_root.clone(),
+            env,
+            persona_root,
             workspace_root,
-            user_id: "owner-1".to_owned(),
-            owner_ids: vec!["owner-1".to_owned()],
-            async_tool_runs: Arc::new(AsyncToolRunManager::new()),
-            invoker: Arc::new(NoopInvoker),
-            gateway: Some(Arc::clone(&gateway)),
+            user_id: "owner-1",
+            owner_ids,
+            async_tool_runs,
+            invoker,
+            gateway: Some(gateway_ref),
             completion_tx: Some(completion_tx),
-            completion_route: Some(CompletionRoute {
-                trace_id: "trace-1".to_owned(),
-                source_channel: GatewayChannelKind::Discord,
-                target_agent_id: "agent-1".to_owned(),
-                session_key: "sess-1".to_owned(),
-                source_message_id: Some("msg-1".to_owned()),
-                channel_id: "chan-1".to_owned(),
-                guild_id: None,
-                is_dm: true,
-            }),
+            completion_route: Some(completion_route),
             allow_async_tools: true,
             approval_requester: Arc::new(GatewayApprovalRequester::new(
                 approval_registry,
@@ -1766,7 +1785,7 @@ mod tests {
         let approvals = Arc::new(ApprovalRegistry::new());
         let channel = Arc::new(CaptureChannel::default());
         let gateway = test_gateway(channel.clone());
-        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals), BTreeMap::new());
         let registry = default_factory()
             .build_registry(&only_edit_enabled(), &[])
             .expect("tool registry should build");
@@ -1834,7 +1853,7 @@ mod tests {
         let approvals = Arc::new(ApprovalRegistry::new());
         let channel = Arc::new(CaptureChannel::default());
         let gateway = test_gateway(channel);
-        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals), BTreeMap::new());
         let registry = default_factory()
             .build_registry(&only_read_enabled(), &[])
             .expect("tool registry should build");
@@ -1893,7 +1912,7 @@ mod tests {
         let approvals = Arc::new(ApprovalRegistry::new());
         let channel = Arc::new(CaptureChannel::default());
         let gateway = test_gateway(channel.clone());
-        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals), BTreeMap::new());
         let registry = default_factory()
             .build_registry(&only_read_enabled(), &[])
             .expect("tool registry should build");
@@ -1929,7 +1948,7 @@ mod tests {
         let approvals = Arc::new(ApprovalRegistry::new());
         let channel = Arc::new(CaptureChannel::default());
         let gateway = test_gateway(channel.clone());
-        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
+        let ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals), BTreeMap::new());
         let registry = default_factory()
             .build_registry(&only_edit_enabled(), &[])
             .expect("tool registry should build");
@@ -2004,10 +2023,14 @@ mod tests {
         let approvals = Arc::new(ApprovalRegistry::new());
         let channel = Arc::new(CaptureChannel::default());
         let gateway = test_gateway(channel.clone());
-        let mut ctx = test_tool_env(workspace, gateway, Arc::clone(&approvals));
-        ctx.env.insert(
-            "SIMPLECLAW_EXEC_DYNAMIC".to_owned(),
-            "printf hello-from-approval".to_owned(),
+        let ctx = test_tool_env(
+            workspace,
+            gateway,
+            Arc::clone(&approvals),
+            BTreeMap::from([(
+                "SIMPLECLAW_EXEC_DYNAMIC".to_owned(),
+                "printf hello-from-approval".to_owned(),
+            )]),
         );
         let registry = default_factory()
             .build_registry(&only_exec_enabled(), &[])

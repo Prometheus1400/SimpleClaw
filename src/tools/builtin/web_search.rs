@@ -55,7 +55,7 @@ impl Tool for WebSearchTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -118,7 +118,7 @@ impl WebSearchTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: WebSearchPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -131,8 +131,8 @@ impl WebSearchTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize web_search args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: Vec::new(),
                 artifact_name: "web_search_tool.wasm",
                 args: Vec::new(),

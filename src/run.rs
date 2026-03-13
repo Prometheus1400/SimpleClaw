@@ -16,6 +16,7 @@ use crate::cli::{Cli, MemoryMode};
 use crate::config::{AgentEntryConfig, ChannelOutputMode, LoadedConfig};
 use crate::paths::AppPaths;
 use crate::reply_policy::is_no_reply;
+use crate::turn::{TurnDisposition, TurnEngine, TurnRequest, TurnRuntime};
 
 pub(crate) mod composition;
 mod cron_scheduler;
@@ -442,28 +443,8 @@ pub(crate) async fn handle_inbound_once(
         return Ok(());
     };
 
-    if !inbound.invoke {
-        tracing::debug!(status = "recording_context", "passive inbound");
-        if let Err(err) = runtime
-            .record_context(&inbound, &memory_session_id, state.context.agents.as_ref())
-            .await
-        {
-            tracing::error!(
-                status = "failed",
-                error_kind = "memory_write",
-                error = %err,
-                "passive context persist failed"
-            );
-        }
-        info!(
-            status = "completed",
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "inbound lifecycle"
-        );
-        return Ok(());
-    }
-
-    if inbound.user_id != "system"
+    if inbound.invoke
+        && inbound.user_id != "system"
         && let Err(err) = state.gateway.broadcast_typing(&inbound).await
     {
         tracing::warn!(
@@ -495,16 +476,35 @@ pub(crate) async fn handle_inbound_once(
         }) as Arc<dyn Fn(&str) + Send + Sync>
     });
 
-    match runtime
-        .run(
-            &inbound,
-            &memory_session_id,
-            state.context.as_ref(),
-            on_text_delta,
-        )
+    let turn_runtime = TurnRuntime {
+        gateway: &state.gateway,
+        directory: state.directory.as_ref(),
+        react_loop: state.react_loop.as_ref(),
+        async_tool_runs: &state.async_tool_runs,
+        approval_registry: &state.approval_registry,
+        completion_tx: &state.completion_tx,
+    };
+    let turn_engine = TurnEngine::new(runtime.config(), turn_runtime);
+
+    match turn_engine
+        .execute(TurnRequest {
+            inbound: &inbound,
+            memory_session_id: &memory_session_id,
+            on_text_delta: on_text_delta.as_deref(),
+        })
         .await
     {
-        Ok(outcome) => {
+        Ok(TurnDisposition::ContextRecorded) => {
+            tracing::debug!(status = "recording_context", "passive inbound");
+        }
+        Ok(TurnDisposition::NoReply) => {
+            tracing::debug!(
+                status = "suppressed",
+                reason = "no_reply_sentinel",
+                "outbound reply"
+            );
+        }
+        Ok(TurnDisposition::Replied(outcome)) => {
             if is_no_reply(&outcome.reply) {
                 tracing::debug!(
                     status = "suppressed",
@@ -907,9 +907,7 @@ mod tests {
         finalize_streaming_display, handle_inbound_once, query_long_memory, query_short_memory,
         spawn_streaming_display_update,
     };
-    use crate::agent::{
-        AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
-    };
+    use crate::agent::{AgentDirectory, AgentRuntime, AgentRuntimeConfig};
     use crate::approval::ApprovalRegistry;
     use crate::channels::{Channel, ChannelInbound, InboundMessage};
     use crate::config::{
@@ -1591,21 +1589,17 @@ mod tests {
             .expect("clock should be monotonic enough for tests")
             .as_nanos();
         let cron_path = std::env::temp_dir().join(format!("simpleclaw_run_cron_{nanos}.db"));
-        let context = Arc::new(RuntimeContext {
-            react_loop,
-            gateway: Arc::clone(&gateway),
-            agents,
-            tool_runtime: Arc::new(ToolRuntime {
-                async_tool_runs: Arc::new(AsyncToolRunManager::new()),
-                completion_tx: gateway_tx.clone(),
-                approval_registry: Arc::new(ApprovalRegistry::new()),
-            }),
-        });
+        let async_tool_runs = Arc::new(AsyncToolRunManager::new());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
 
         RuntimeState {
             gateway,
+            directory: agents,
+            react_loop,
+            async_tool_runs,
+            approval_registry,
+            completion_tx: gateway_tx,
             runtimes: HashMap::from([("default".to_owned(), AgentRuntime::new(runtime_config))]),
-            context,
             cron_store: Arc::new(std::sync::Mutex::new(
                 crate::tools::builtin::cron::CronStore::open(&cron_path)
                     .expect("cron store should open"),
@@ -1715,23 +1709,21 @@ mod tests {
             HashMap::from([(GatewayChannelKind::Discord, ChannelOutputMode::Streaming)]),
             RoutingConfig::default(),
         ));
-        let context = Arc::new(RuntimeContext {
-            react_loop: Arc::new(ReactLoop::new(
-                ProviderFactory::from_parts(HashMap::new()),
-                Arc::new(NoopInvoker),
-            )),
-            gateway: Arc::clone(&gateway),
-            agents: Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
-            tool_runtime: Arc::new(ToolRuntime {
-                async_tool_runs: Arc::new(AsyncToolRunManager::new()),
-                completion_tx: gateway_tx.clone(),
-                approval_registry: Arc::new(ApprovalRegistry::new()),
-            }),
-        });
+        let react_loop = Arc::new(ReactLoop::new(
+            ProviderFactory::from_parts(HashMap::new()),
+            Arc::new(NoopInvoker),
+        ));
+        let directory = Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new()));
+        let async_tool_runs = Arc::new(AsyncToolRunManager::new());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
         let state = RuntimeState {
             gateway,
+            directory,
+            react_loop,
+            async_tool_runs,
+            approval_registry,
+            completion_tx: gateway_tx,
             runtimes: HashMap::new(),
-            context,
             cron_store: Arc::new(std::sync::Mutex::new(
                 crate::tools::builtin::cron::CronStore::open(
                     &std::env::temp_dir().join("simpleclaw_run_unknown_agent_cron.db"),

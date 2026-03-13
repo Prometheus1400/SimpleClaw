@@ -72,7 +72,7 @@ impl Tool for GrepTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -84,7 +84,7 @@ impl Tool for GrepTool {
 }
 
 impl GrepTool {
-    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<GrepPlan, FrameworkError> {
+    pub fn plan(&self, ctx: &ToolExecEnv<'_>, args_json: &str) -> Result<GrepPlan, FrameworkError> {
         let args: GrepArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("grep requires JSON object args: {e}")))?;
         let pattern = args.pattern.trim();
@@ -118,7 +118,7 @@ impl GrepTool {
 
     pub async fn execute_direct(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         plan: GrepPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let output = run_grep(&plan.pattern, &plan.host_path, plan.include.as_deref())?;
@@ -127,7 +127,7 @@ impl GrepTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: GrepPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -142,8 +142,8 @@ impl GrepTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize grep args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "grep_tool.wasm",
                 args: Vec::new(),

@@ -78,7 +78,7 @@ impl Tool for ExecTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -99,7 +99,7 @@ impl ExecTool {
         }
     }
 
-    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ExecPlan, FrameworkError> {
+    pub fn plan(&self, ctx: &ToolExecEnv<'_>, args_json: &str) -> Result<ExecPlan, FrameworkError> {
         let args = parse_exec_args(args_json);
         if args.command.trim().is_empty() {
             return Err(FrameworkError::Tool(
@@ -119,7 +119,7 @@ impl ExecTool {
         let workdir = if let Some(workdir) = args.workdir.as_deref() {
             resolve_path_for_read(workdir, &ctx.workspace_root)?
         } else {
-            ctx.workspace_root.clone()
+            ctx.workspace_root.to_path_buf()
         };
         if !workdir.is_dir() {
             return Err(FrameworkError::Tool(format!(
@@ -139,7 +139,7 @@ impl ExecTool {
 
     pub async fn execute_direct(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: ExecPlan,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -153,8 +153,8 @@ impl ExecTool {
                     session_id,
                     Some(&plan.workdir),
                     &plan.env,
-                    ctx.completion_tx.clone(),
-                    ctx.completion_route.clone(),
+                    ctx.completion_tx.cloned(),
+                    ctx.completion_route.cloned(),
                 )
                 .await?;
             return Ok(ToolExecutionOutcome::AsyncStarted(started));
@@ -174,7 +174,7 @@ impl ExecTool {
 
     pub async fn execute_host_sandboxed(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: ExecPlan,
         session_id: &str,
         runtime: &dyn HostSandbox,
@@ -196,8 +196,8 @@ impl ExecTool {
                     session_id,
                     prepared,
                     &plan.env,
-                    ctx.completion_tx.clone(),
-                    ctx.completion_route.clone(),
+                    ctx.completion_tx.cloned(),
+                    ctx.completion_route.cloned(),
                 )
                 .await?;
             return Ok(ToolExecutionOutcome::AsyncStarted(started));
@@ -697,7 +697,13 @@ mod tests {
         }
     }
 
-    async fn test_ctx() -> ToolExecEnv {
+    async fn test_ctx() -> ToolExecEnv<'static> {
+        test_ctx_with_env(std::collections::BTreeMap::new()).await
+    }
+
+    async fn test_ctx_with_env(
+        env_map: std::collections::BTreeMap<String, String>,
+    ) -> ToolExecEnv<'static> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -709,18 +715,26 @@ mod tests {
         let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
             .await
             .expect("memory should initialize");
+        let memory = Box::leak(Box::new(memory));
+        let env = Box::leak(Box::new(env_map));
+        let persona_root = Box::leak(Box::new(PathBuf::from(&root)));
+        let workspace_root = Box::leak(Box::new(PathBuf::from(&root)));
+        let owner_ids = Box::leak(Box::new(vec!["user-1".to_owned()]));
+        let async_tool_runs = Box::leak(Box::new(Arc::new(AsyncToolRunManager::new())));
+        let invoker: &'static Arc<dyn AgentInvoker> =
+            Box::leak(Box::new(Arc::new(NoopInvoker) as Arc<dyn AgentInvoker>));
         ToolExecEnv {
-            agent_id: "test-agent".to_owned(),
-            agent_name: "Test Agent".to_owned(),
-            memory: Arc::new(memory),
+            agent_id: "test-agent",
+            agent_name: "Test Agent",
+            memory,
             history_messages: 10,
-            env: std::collections::BTreeMap::new(),
-            persona_root: PathBuf::from(&root),
-            workspace_root: PathBuf::from(&root),
-            user_id: "user-1".to_owned(),
-            owner_ids: vec!["user-1".to_owned()],
-            async_tool_runs: Arc::new(AsyncToolRunManager::new()),
-            invoker: Arc::new(NoopInvoker),
+            env,
+            persona_root,
+            workspace_root,
+            user_id: "user-1",
+            owner_ids,
+            async_tool_runs,
+            invoker,
             gateway: None,
             completion_tx: None,
             completion_route: None,
@@ -800,11 +814,11 @@ mod tests {
         let mut tool = ExecTool::default();
         tool.configure(serde_json::json!({ "sandbox": { "enabled": false } }))
             .expect("config should apply");
-        let mut ctx = test_ctx().await;
-        ctx.env.insert(
+        let ctx = test_ctx_with_env(std::collections::BTreeMap::from([(
             "SIMPLECLAW_EXEC_TEST_TOKEN".to_owned(),
             "from-config".to_owned(),
-        );
+        )]))
+        .await;
 
         let output = tool
             .execute(
@@ -1050,11 +1064,11 @@ mod tests {
             "sandbox": { "enabled": false }
         }))
         .expect("config should apply");
-        let mut ctx = test_ctx().await;
-        ctx.env.insert(
+        let ctx = test_ctx_with_env(std::collections::BTreeMap::from([(
             "SIMPLECLAW_EXEC_BG_TOKEN".to_owned(),
             "background-value".to_owned(),
-        );
+        )]))
+        .await;
         let output_path = ctx.workspace_root.join("bg-env.txt");
 
         let command = format!(

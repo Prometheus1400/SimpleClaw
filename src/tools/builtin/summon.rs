@@ -49,7 +49,7 @@ impl Tool for SummonTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -58,7 +58,7 @@ impl Tool for SummonTool {
 
     async fn execute_with_trace(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -97,7 +97,7 @@ impl Tool for SummonTool {
             let request = AgentInvokeRequest {
                 target_agent_id: args.agent,
                 session_id: session_id.to_owned(),
-                user_id: ctx.user_id.clone(),
+                user_id: ctx.user_id.to_owned(),
                 prompt: handoff.clone(),
                 approval_requester: Arc::clone(&ctx.approval_requester),
             };
@@ -108,8 +108,8 @@ impl Tool for SummonTool {
                     &handoff,
                     &ctx.agent_id,
                     session_id,
-                    ctx.completion_tx.clone(),
-                    ctx.completion_route.clone(),
+                    ctx.completion_tx.cloned(),
+                    ctx.completion_route.cloned(),
                     async move {
                         invoker
                             .invoke_agent(request)
@@ -126,7 +126,7 @@ impl Tool for SummonTool {
             .invoke_agent(AgentInvokeRequest {
                 target_agent_id: args.agent,
                 session_id: session_id.to_owned(),
-                user_id: ctx.user_id.clone(),
+                user_id: ctx.user_id.to_owned(),
                 prompt: handoff,
                 approval_requester: Arc::clone(&ctx.approval_requester),
             })
@@ -190,7 +190,7 @@ mod tests {
         }
     }
 
-    async fn test_ctx() -> ToolExecEnv {
+    async fn test_ctx() -> ToolExecEnv<'static> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -202,18 +202,26 @@ mod tests {
         let memory = MemoryStore::new_without_embedder(&short, &long, &DatabaseConfig::default())
             .await
             .expect("memory should initialize");
+        let memory = Box::leak(Box::new(memory));
+        let env = Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let persona_root = Box::leak(Box::new(PathBuf::from(&root)));
+        let workspace_root = Box::leak(Box::new(PathBuf::from(&root)));
+        let owner_ids = Box::leak(Box::new(vec!["user-1".to_owned()]));
+        let async_tool_runs = Box::leak(Box::new(Arc::new(AsyncToolRunManager::new())));
+        let invoker: &'static Arc<dyn AgentInvoker> =
+            Box::leak(Box::new(Arc::new(TestInvoker) as Arc<dyn AgentInvoker>));
         ToolExecEnv {
-            agent_id: "test-agent".to_owned(),
-            agent_name: "Test Agent".to_owned(),
-            memory: Arc::new(memory),
+            agent_id: "test-agent",
+            agent_name: "Test Agent",
+            memory,
             history_messages: 10,
-            env: std::collections::BTreeMap::new(),
-            persona_root: PathBuf::from(&root),
-            workspace_root: PathBuf::from(&root),
-            user_id: "user-1".to_owned(),
-            owner_ids: vec!["user-1".to_owned()],
-            async_tool_runs: Arc::new(AsyncToolRunManager::new()),
-            invoker: Arc::new(TestInvoker),
+            env,
+            persona_root,
+            workspace_root,
+            user_id: "user-1",
+            owner_ids,
+            async_tool_runs,
+            invoker,
             gateway: None,
             completion_tx: None,
             completion_route: None,
