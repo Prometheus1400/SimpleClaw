@@ -291,15 +291,18 @@ impl AgentRuntime {
             return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
-        let trimmed_query = query.trim();
-        if trimmed_query.is_empty() {
+        let normalized_query =
+            normalize_recall_query(query, &self.config.agent_name, &self.config.agent_id);
+        if normalized_query.is_empty()
+            || count_recall_words(&normalized_query) < config.recall_word_count_threshold as usize
+        {
             return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
 
         let hits = match memory
             .query_recall_hits(
                 session_id,
-                trimmed_query,
+                &normalized_query,
                 &config,
                 self.config.effective_execution.history_messages as usize,
                 MemoryStoreScope::Combined,
@@ -326,7 +329,11 @@ impl AgentRuntime {
 
         debug!(status = "completed", "memory recall");
 
-        let recalled = format_recalled_memory(&hits, config.max_chars as usize);
+        let recalled = format_recalled_memory(
+            &hits,
+            config.long_term_max_chars as usize,
+            config.short_term_max_chars as usize,
+        );
         if recalled.section.is_empty() {
             return PromptBuild::without_recall(self.config.system_prompt.clone());
         }
@@ -355,41 +362,29 @@ impl PromptBuild {
     }
 }
 
-fn format_recalled_memory(hits: &[MemoryRecallHit], max_chars: usize) -> PromptBuildMemorySection {
-    if hits.is_empty() || max_chars == 0 {
+fn format_recalled_memory(
+    hits: &[MemoryRecallHit],
+    long_term_max_chars: usize,
+    short_term_max_chars: usize,
+) -> PromptBuildMemorySection {
+    if hits.is_empty() || (long_term_max_chars == 0 && short_term_max_chars == 0) {
         return PromptBuildMemorySection::default();
     }
 
-    let base = "# POTENTIALLY RELEVANT MEMORY\nUse this as optional background context. It may be stale or incomplete; prioritize the current user message and conversation.";
-    let mut section = base.to_owned();
-    let mut short_hits = 0;
-    let mut long_hits = 0;
-    for (index, hit) in hits.iter().enumerate() {
-        let line = format!(
-            "\n{}. [{}] {}",
-            index + 1,
-            memory_hit_label(hit),
-            hit.content.trim()
-        );
-        if section.len() + line.len() > max_chars {
-            break;
-        }
-        section.push_str(&line);
-        match hit.store {
-            MemoryHitStore::LongTerm => long_hits += 1,
-            MemoryHitStore::ShortTerm => short_hits += 1,
-        }
-    }
+    let long_hits = hits
+        .iter()
+        .filter(|hit| matches!(hit.store, MemoryHitStore::LongTerm))
+        .cloned()
+        .collect::<Vec<_>>();
+    let short_hits = hits
+        .iter()
+        .filter(|hit| matches!(hit.store, MemoryHitStore::ShortTerm))
+        .cloned()
+        .collect::<Vec<_>>();
 
-    if section == base {
-        PromptBuildMemorySection::default()
-    } else {
-        PromptBuildMemorySection {
-            section,
-            short_hits,
-            long_hits,
-        }
-    }
+    let long_section = build_long_term_memory_section(&long_hits, long_term_max_chars);
+    let short_section = build_short_term_memory_section(&short_hits, short_term_max_chars);
+    join_memory_sections(&[long_section, short_section])
 }
 
 #[derive(Default)]
@@ -399,15 +394,195 @@ struct PromptBuildMemorySection {
     long_hits: usize,
 }
 
-fn memory_hit_label(hit: &MemoryRecallHit) -> String {
-    match hit.store {
-        MemoryHitStore::LongTerm => {
-            format!("long-term/{}", hit.kind.as_deref().unwrap_or("general"))
+fn build_long_term_memory_section(
+    hits: &[MemoryRecallHit],
+    max_chars: usize,
+) -> PromptBuildMemorySection {
+    if hits.is_empty() || max_chars == 0 {
+        return PromptBuildMemorySection::default();
+    }
+
+    let base = "# REMEMBERED FACTS\nPersistent facts from long-term memory. Prioritize the current conversation over these.";
+    let mut section = base.to_owned();
+    let mut long_hits = 0;
+    for (index, hit) in hits.iter().enumerate() {
+        let line = format!(
+            "\n{}. [{}] {}",
+            index + 1,
+            hit.kind.as_deref().unwrap_or("general"),
+            hit.content.trim()
+        );
+        if section.len() + line.len() > max_chars {
+            break;
         }
-        MemoryHitStore::ShortTerm => {
-            format!("short-term/{}", hit.kind.as_deref().unwrap_or("message"))
+        section.push_str(&line);
+        long_hits += 1;
+    }
+
+    if long_hits == 0 {
+        PromptBuildMemorySection::default()
+    } else {
+        PromptBuildMemorySection {
+            section,
+            short_hits: 0,
+            long_hits,
         }
     }
+}
+
+fn build_short_term_memory_section(
+    hits: &[MemoryRecallHit],
+    max_chars: usize,
+) -> PromptBuildMemorySection {
+    if hits.is_empty() || max_chars == 0 {
+        return PromptBuildMemorySection::default();
+    }
+
+    let base =
+        "# RECALLED CONVERSATIONS\nExcerpts from earlier in this session that may be relevant.";
+    let mut section = base.to_owned();
+    let mut short_hits = 0;
+    for hit in hits {
+        let excerpt = render_short_term_excerpt(hit);
+        if section.len() + excerpt.len() > max_chars {
+            break;
+        }
+        section.push_str(&excerpt);
+        short_hits += 1;
+    }
+
+    if short_hits == 0 {
+        PromptBuildMemorySection::default()
+    } else {
+        PromptBuildMemorySection {
+            section,
+            short_hits,
+            long_hits: 0,
+        }
+    }
+}
+
+fn render_short_term_excerpt(hit: &MemoryRecallHit) -> String {
+    let mut excerpt = format!(
+        "\n\n--- excerpt (similarity: {:.2}) ---",
+        hit.raw_similarity
+    );
+    if let Some(messages) = hit.context_messages.as_ref() {
+        for message in messages {
+            excerpt.push('\n');
+            excerpt.push_str(&render_context_message(message));
+        }
+    } else {
+        excerpt.push_str(&format!("\n{}", hit.content.trim()));
+    }
+    excerpt.push_str("\n---");
+    excerpt
+}
+
+fn render_context_message(message: &crate::memory::ShortTermContextMessage) -> String {
+    match message.role {
+        StoredRole::User => {
+            let speaker = message
+                .username
+                .as_deref()
+                .map(str::trim)
+                .filter(|username| !username.is_empty())
+                .unwrap_or("user");
+            format!("[{speaker}]: {}", message.content.trim())
+        }
+        StoredRole::Assistant => format!("[assistant]: {}", message.content.trim()),
+        StoredRole::System => format!("[system]: {}", message.content.trim()),
+        StoredRole::Tool => format!("[tool]: {}", message.content.trim()),
+    }
+}
+
+fn join_memory_sections(sections: &[PromptBuildMemorySection]) -> PromptBuildMemorySection {
+    let mut joined = PromptBuildMemorySection::default();
+    for section in sections {
+        if section.section.is_empty() {
+            continue;
+        }
+        let candidate = if joined.section.is_empty() {
+            section.section.clone()
+        } else {
+            format!("{}\n\n{}", joined.section, section.section)
+        };
+        joined.section = candidate;
+        joined.short_hits += section.short_hits;
+        joined.long_hits += section.long_hits;
+    }
+    joined
+}
+
+fn normalize_recall_query(query: &str, agent_name: &str, agent_id: &str) -> String {
+    let mut remaining = query.trim();
+    if remaining.is_empty() {
+        return String::new();
+    }
+
+    loop {
+        let next = strip_leading_discord_mention(remaining)
+            .or_else(|| strip_leading_at_name(remaining, agent_name))
+            .or_else(|| strip_leading_name_token(remaining, agent_name))
+            .or_else(|| strip_leading_name_token(remaining, agent_id));
+        let Some(stripped) = next else {
+            break;
+        };
+        if stripped == remaining {
+            break;
+        }
+        remaining = stripped.trim_start_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ':' | ',' | '!' | '?' | '.' | ';' | '-')
+        });
+        if remaining.is_empty() {
+            break;
+        }
+    }
+
+    remaining.trim().to_owned()
+}
+
+fn strip_leading_discord_mention(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix("<@")?;
+    let close = rest.find('>')?;
+    Some(&rest[close + 1..])
+}
+
+fn strip_leading_at_name<'a>(value: &'a str, name: &str) -> Option<&'a str> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return None;
+    }
+    let rest = value.strip_prefix('@')?;
+    strip_leading_name_token(rest, trimmed_name)
+}
+
+fn strip_leading_name_token<'a>(value: &'a str, name: &str) -> Option<&'a str> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return None;
+    }
+    let prefix_len = starts_with_name_token(value, trimmed_name)?;
+    Some(&value[prefix_len..])
+}
+
+fn starts_with_name_token(value: &str, name: &str) -> Option<usize> {
+    if value.len() < name.len() || !value[..name.len()].eq_ignore_ascii_case(name) {
+        return None;
+    }
+    if value.len() == name.len() {
+        return Some(name.len());
+    }
+    let next = value[name.len()..].chars().next()?;
+    if next.is_whitespace() || matches!(next, ':' | ',' | '!' | '?' | '.') {
+        Some(name.len())
+    } else {
+        None
+    }
+}
+
+fn count_recall_words(value: &str) -> usize {
+    value.split_whitespace().count()
 }
 
 fn inject_caller_context(base: &str, inbound: &InboundMessage) -> String {
@@ -472,7 +647,7 @@ mod tests {
 
     use super::{
         AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
-        format_recalled_memory, inject_caller_context,
+        count_recall_words, format_recalled_memory, inject_caller_context, normalize_recall_query,
     };
 
     #[derive(Default)]
@@ -480,6 +655,7 @@ mod tests {
         appended: Mutex<Vec<(String, StoredRole, String, Option<String>)>>,
         recent_messages: Mutex<Vec<StoredMessage>>,
         recall_hits: Mutex<Vec<MemoryRecallHit>>,
+        recall_queries: Mutex<Vec<String>>,
     }
 
     impl FakeMemory {
@@ -493,6 +669,10 @@ mod tests {
 
         async fn set_recall_hits(&self, hits: Vec<MemoryRecallHit>) {
             *self.recall_hits.lock().await = hits;
+        }
+
+        async fn recall_queries(&self) -> Vec<String> {
+            self.recall_queries.lock().await.clone()
         }
     }
 
@@ -534,6 +714,7 @@ mod tests {
             _scope: MemoryStoreScope,
             _prefer_long_term: bool,
         ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
+            self.recall_queries.lock().await.push(_query.to_owned());
             Ok(self.recall_hits.lock().await.clone())
         }
 
@@ -786,37 +967,108 @@ mod tests {
     }
 
     #[test]
-    fn format_recalled_memory_caps_output_by_char_limit() {
+    fn format_recalled_memory_splits_sections_and_renders_context() {
         let hits = vec![
             MemoryRecallHit {
                 store: MemoryHitStore::LongTerm,
                 content: "Prefers concise responses".to_owned(),
                 kind: Some("prefs".to_owned()),
                 importance: Some(5),
+                context_messages: None,
                 raw_similarity: 0.91,
                 final_score: 0.88,
             },
             MemoryRecallHit {
-                store: MemoryHitStore::LongTerm,
-                content: "Asked about runtime memory config".to_owned(),
-                kind: Some("context".to_owned()),
-                importance: Some(3),
+                store: MemoryHitStore::ShortTerm,
+                content: "[alice] What's the project status?".to_owned(),
+                kind: Some("user".to_owned()),
+                importance: None,
+                context_messages: Some(vec![
+                    crate::memory::ShortTermContextMessage {
+                        role: StoredRole::User,
+                        content: "What's the project status?".to_owned(),
+                        username: Some("alice".to_owned()),
+                    },
+                    crate::memory::ShortTermContextMessage {
+                        role: StoredRole::Assistant,
+                        content: "The project is on track.".to_owned(),
+                        username: None,
+                    },
+                ]),
                 raw_similarity: 0.89,
-                final_score: 0.78,
+                final_score: 0.89,
             },
         ];
 
-        let section = format_recalled_memory(&hits, 280);
-        assert!(section.section.starts_with("# POTENTIALLY RELEVANT MEMORY"));
-        assert!(section.section.contains("optional background context"));
-        assert!(section.section.contains("1. [long-term/prefs]"));
-        assert!(!section.section.contains("score="));
+        let section = format_recalled_memory(&hits, 500, 500);
+        assert!(section.section.contains("# REMEMBERED FACTS"));
         assert!(
-            section.section.contains("2."),
-            "both items should fit without score metadata"
+            section
+                .section
+                .contains("1. [prefs] Prefers concise responses")
         );
-        assert_eq!(section.short_hits, 0);
-        assert_eq!(section.long_hits, 2);
+        assert!(section.section.contains("# RECALLED CONVERSATIONS"));
+        assert!(
+            section
+                .section
+                .contains("--- excerpt (similarity: 0.89) ---")
+        );
+        assert!(
+            section
+                .section
+                .contains("[alice]: What's the project status?")
+        );
+        assert!(
+            section
+                .section
+                .contains("[assistant]: The project is on track.")
+        );
+        assert_eq!(section.short_hits, 1);
+        assert_eq!(section.long_hits, 1);
+    }
+
+    #[test]
+    fn format_recalled_memory_respects_independent_short_term_budget() {
+        let hits = vec![MemoryRecallHit {
+            store: MemoryHitStore::ShortTerm,
+            content: "[alice] Follow-up".to_owned(),
+            kind: Some("user".to_owned()),
+            importance: None,
+            context_messages: Some(vec![crate::memory::ShortTermContextMessage {
+                role: StoredRole::User,
+                content: "Follow-up".to_owned(),
+                username: Some("alice".to_owned()),
+            }]),
+            raw_similarity: 0.85,
+            final_score: 0.85,
+        }];
+
+        let section = format_recalled_memory(&hits, 0, 240);
+        assert!(!section.section.contains("# REMEMBERED FACTS"));
+        assert!(section.section.contains("# RECALLED CONVERSATIONS"));
+        assert_eq!(section.short_hits, 1);
+        assert_eq!(section.long_hits, 0);
+    }
+
+    #[test]
+    fn normalize_recall_query_strips_mentions_and_agent_names() {
+        assert_eq!(
+            normalize_recall_query(
+                "<@123> Agent One, what's the status?",
+                "Agent One",
+                "agent-1"
+            ),
+            "what's the status?"
+        );
+        assert_eq!(
+            normalize_recall_query("@Agent One hi there", "Agent One", "agent-1"),
+            "hi there"
+        );
+        assert_eq!(
+            normalize_recall_query("agent-1: check logs", "Agent One", "agent-1"),
+            "check logs"
+        );
+        assert_eq!(count_recall_words("prod broke"), 2);
     }
 
     #[test]
@@ -911,6 +1163,7 @@ mod tests {
                 content: "Prefers short answers".to_owned(),
                 kind: Some("preferences".to_owned()),
                 importance: Some(5),
+                context_messages: None,
                 raw_similarity: 0.9,
                 final_score: 0.85,
             }])
@@ -920,6 +1173,10 @@ mod tests {
         let provider: Arc<dyn Provider> = provider_impl.clone();
         let mut config = test_runtime_config();
         config.effective_execution.memory_recall.enabled = true;
+        config
+            .effective_execution
+            .memory_recall
+            .recall_word_count_threshold = 1;
         let context = test_runtime_context(memory, test_react_loop(provider));
         let runtime = AgentRuntime::new(config);
 
@@ -938,7 +1195,49 @@ mod tests {
         assert_eq!(appended[0].1, StoredRole::User);
 
         let prompts = provider_impl.system_prompts().await;
-        assert!(prompts[0].contains("# POTENTIALLY RELEVANT MEMORY"));
+        assert!(prompts[0].contains("# REMEMBERED FACTS"));
         assert!(prompts[0].contains("Prefers short answers"));
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_skips_all_recall_for_short_stripped_queries() {
+        let memory_impl = Arc::new(FakeMemory::default());
+        memory_impl
+            .set_recall_hits(vec![MemoryRecallHit {
+                store: MemoryHitStore::LongTerm,
+                content: "Should not appear".to_owned(),
+                kind: Some("preferences".to_owned()),
+                importance: Some(5),
+                context_messages: None,
+                raw_similarity: 0.9,
+                final_score: 0.85,
+            }])
+            .await;
+        let provider_impl = Arc::new(RecordingProvider::new("reply"));
+        let memory: DynMemory = memory_impl.clone();
+        let provider: Arc<dyn Provider> = provider_impl.clone();
+        let mut config = test_runtime_config();
+        config.effective_execution.memory_recall.enabled = true;
+        config
+            .effective_execution
+            .memory_recall
+            .recall_word_count_threshold = 3;
+        let context = test_runtime_context(memory, test_react_loop(provider));
+        let runtime = AgentRuntime::new(config);
+        let mut inbound = test_inbound(false, None);
+        inbound.content = "<@123> Agent One hi".to_owned();
+
+        let outcome = runtime
+            .run(&inbound, "sess-3", &context, None)
+            .await
+            .expect("runtime should succeed");
+
+        assert_eq!(outcome.reply, "reply");
+        assert!(!outcome.memory_recall_used);
+        assert!(memory_impl.recall_queries().await.is_empty());
+
+        let prompts = provider_impl.system_prompts().await;
+        assert!(!prompts[0].contains("# REMEMBERED FACTS"));
+        assert!(!prompts[0].contains("# RECALLED CONVERSATIONS"));
     }
 }

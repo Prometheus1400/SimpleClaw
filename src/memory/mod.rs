@@ -24,7 +24,7 @@ use recall::{parse_memory_kind, rank_recall_hits};
 use schema::register_sqlite_vec;
 pub use types::{
     LongTermFactSummary, LongTermForgetMatch, LongTermForgetResult, MemorizeResult, MemoryHitStore,
-    MemoryRecallHit, MemoryStoreScope, StoredMessage, StoredRole,
+    MemoryRecallHit, MemoryStoreScope, ShortTermContextMessage, StoredMessage, StoredRole,
 };
 
 pub type DynMemory = Arc<dyn Memory>;
@@ -354,7 +354,10 @@ impl MemoryStore {
             top_k: top_k_u32,
             min_score: 0.0,
             long_term_weight: 1.0,
-            max_chars: 4000,
+            recall_word_count_threshold: 1,
+            short_term_context_radius: 2,
+            long_term_max_chars: 4000,
+            short_term_max_chars: 4000,
         };
         let hits = self
             .query_recall_hits(session_id, query, &config, history_window, scope, false)
@@ -411,7 +414,13 @@ impl MemoryStore {
             MemoryStoreScope::Combined | MemoryStoreScope::ShortTerm
         ) {
             short_term_hits = self
-                .fetch_short_term_candidates(session_id, query_blob, sql_limit, history_window)
+                .fetch_short_term_candidates(
+                    session_id,
+                    query_blob,
+                    sql_limit,
+                    history_window,
+                    config.short_term_context_radius as usize,
+                )
                 .await?;
         }
 
@@ -480,6 +489,7 @@ impl MemoryStore {
                         content,
                         kind: Some(kind),
                         importance: Some(importance),
+                        context_messages: None,
                         raw_similarity: similarity,
                         final_score: with_importance * long_term_weight,
                     });
@@ -497,6 +507,7 @@ impl MemoryStore {
         query_blob: Vec<u8>,
         sql_limit: i64,
         history_window: usize,
+        context_radius: usize,
     ) -> Result<Vec<MemoryRecallHit>, FrameworkError> {
         let session = session_id.to_owned();
         let conn = self
@@ -525,29 +536,49 @@ impl MemoryStore {
                 Ok((id, role, content, username, distance))
             })?;
 
-            let mut out = Vec::new();
+            let mut matches = Vec::new();
             for row in mapped {
                 let (id, role, content, username, distance) = row?;
                 if excluded.contains(&id) {
                     continue;
                 }
                 let similarity = 1.0 - (distance * distance / 2.0);
-                let rendered_content = if role == "user" {
-                    username
-                        .map(|name| name.trim().to_owned())
-                        .filter(|name| !name.is_empty())
-                        .map(|name| format!("[{name}] {content}"))
-                        .unwrap_or(content)
-                } else {
-                    content
-                };
+                matches.push(ShortTermMatch {
+                    id,
+                    role,
+                    content,
+                    username,
+                    similarity,
+                });
+            }
+
+            if matches.is_empty() {
+                return Ok::<Vec<MemoryRecallHit>, rusqlite::Error>(Vec::new());
+            }
+
+            let spans = merge_short_term_context_spans(&matches, context_radius);
+            let span_messages =
+                fetch_short_term_context_messages(conn, &session, &spans, &excluded)?;
+
+            let mut out = Vec::with_capacity(matches.len());
+            for item in matches {
+                let context_messages = span_messages
+                    .iter()
+                    .find(|(span, _)| span.contains(item.id))
+                    .map(|(_, messages)| messages.clone())
+                    .filter(|messages| !messages.is_empty());
                 out.push(MemoryRecallHit {
                     store: MemoryHitStore::ShortTerm,
-                    content: rendered_content,
-                    kind: Some(role),
+                    content: render_short_term_message(
+                        &item.role,
+                        &item.content,
+                        item.username.as_deref(),
+                    ),
+                    kind: Some(item.role),
                     importance: None,
-                    raw_similarity: similarity,
-                    final_score: similarity,
+                    context_messages,
+                    raw_similarity: item.similarity,
+                    final_score: item.similarity,
                 });
             }
             Ok::<Vec<MemoryRecallHit>, rusqlite::Error>(out)
@@ -1001,6 +1032,114 @@ impl MemoryStore {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ShortTermMatch {
+    id: i64,
+    role: String,
+    content: String,
+    username: Option<String>,
+    similarity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContextSpan {
+    start_id: i64,
+    end_id: i64,
+}
+
+impl ContextSpan {
+    fn contains(self, id: i64) -> bool {
+        self.start_id <= id && id <= self.end_id
+    }
+}
+
+fn merge_short_term_context_spans(
+    matches: &[ShortTermMatch],
+    context_radius: usize,
+) -> Vec<ContextSpan> {
+    let radius = context_radius as i64;
+    let mut spans = matches
+        .iter()
+        .map(|item| ContextSpan {
+            start_id: item.id.saturating_sub(radius),
+            end_id: item.id.saturating_add(radius),
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|span| span.start_id);
+
+    let mut merged: Vec<ContextSpan> = Vec::new();
+    for span in spans {
+        if let Some(last) = merged.last_mut()
+            && span.start_id <= last.end_id.saturating_add(1)
+        {
+            last.end_id = last.end_id.max(span.end_id);
+        } else {
+            merged.push(span);
+        }
+    }
+    merged
+}
+
+fn fetch_short_term_context_messages(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    spans: &[ContextSpan],
+    excluded: &HashSet<i64>,
+) -> Result<Vec<(ContextSpan, Vec<ShortTermContextMessage>)>, rusqlite::Error> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content, username
+             FROM messages
+             WHERE session_id = ?1
+               AND id BETWEEN ?2 AND ?3
+               AND (role = 'user' OR role = 'assistant')
+             ORDER BY id",
+        )?;
+        let mapped = stmt.query_map(params![session_id, span.start_id, span.end_id], |row| {
+            let id: i64 = row.get(0)?;
+            let role_raw: String = row.get(1)?;
+            let role = StoredRole::from_db_str(&role_raw).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    "invalid role".into(),
+                )
+            })?;
+            Ok::<Option<ShortTermContextMessage>, rusqlite::Error>(if excluded.contains(&id) {
+                None
+            } else {
+                Some(ShortTermContextMessage {
+                    role,
+                    content: row.get(2)?,
+                    username: row.get(3)?,
+                })
+            })
+        })?;
+
+        let mut messages = Vec::new();
+        for row in mapped {
+            if let Some(message) = row? {
+                messages.push(message);
+            }
+        }
+        out.push((*span, messages));
+    }
+    Ok(out)
+}
+
+fn render_short_term_message(role: &str, content: &str, username: Option<&str>) -> String {
+    if role == "user" {
+        username
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("[{name}] {content}"))
+            .unwrap_or_else(|| content.to_owned())
+    } else {
+        content.to_owned()
+    }
+}
+
 fn has_recent_long_term_fact(
     conn: &rusqlite::Connection,
     kind: &str,
@@ -1045,7 +1184,12 @@ fn fetch_recent_short_term_ids(
 
 #[cfg(test)]
 mod tests {
-    use super::{fetch_recent_short_term_ids, has_recent_long_term_fact};
+    use super::{
+        ContextSpan, ShortTermMatch, fetch_recent_short_term_ids,
+        fetch_short_term_context_messages, has_recent_long_term_fact,
+        merge_short_term_context_spans,
+    };
+    use crate::memory::StoredRole;
     use rusqlite::Connection;
 
     #[test]
@@ -1138,5 +1282,97 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&4));
         assert!(ids.contains(&3));
+    }
+
+    #[test]
+    fn merge_short_term_context_spans_combines_overlapping_ranges() {
+        let matches = vec![
+            ShortTermMatch {
+                id: 10,
+                role: "user".to_owned(),
+                content: "first".to_owned(),
+                username: Some("alice".to_owned()),
+                similarity: 0.9,
+            },
+            ShortTermMatch {
+                id: 12,
+                role: "assistant".to_owned(),
+                content: "second".to_owned(),
+                username: None,
+                similarity: 0.88,
+            },
+            ShortTermMatch {
+                id: 20,
+                role: "user".to_owned(),
+                content: "third".to_owned(),
+                username: Some("bob".to_owned()),
+                similarity: 0.87,
+            },
+        ];
+
+        let spans = merge_short_term_context_spans(&matches, 2);
+        assert_eq!(
+            spans,
+            vec![
+                ContextSpan {
+                    start_id: 8,
+                    end_id: 14
+                },
+                ContextSpan {
+                    start_id: 18,
+                    end_id: 22
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn fetch_short_term_context_messages_excludes_history_window_ids() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                username TEXT,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("messages table should be created");
+
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','user','one','alice','t')",
+            [],
+        )
+        .expect("insert should succeed");
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','assistant','two',NULL,'t')",
+            [],
+        )
+        .expect("insert should succeed");
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, username, created_at) VALUES ('s1','user','three','bob','t')",
+            [],
+        )
+        .expect("insert should succeed");
+
+        let excluded = [3].into_iter().collect();
+        let spans = [ContextSpan {
+            start_id: 1,
+            end_id: 3,
+        }];
+        let windows = fetch_short_term_context_messages(&conn, "s1", &spans, &excluded)
+            .expect("query should succeed");
+
+        assert_eq!(windows.len(), 1);
+        let messages = &windows[0].1;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, StoredRole::User);
+        assert_eq!(messages[0].username.as_deref(), Some("alice"));
+        assert_eq!(messages[1].role, StoredRole::Assistant);
+        assert_eq!(messages[1].content, "two");
     }
 }

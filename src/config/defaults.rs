@@ -80,8 +80,20 @@ pub(super) fn default_memory_recall_long_term_weight() -> f32 {
     0.65
 }
 
-pub(super) fn default_memory_recall_max_chars() -> u32 {
-    1200
+pub(super) fn default_memory_recall_recall_word_count_threshold() -> u32 {
+    3
+}
+
+pub(super) fn default_memory_recall_short_term_context_radius() -> u32 {
+    2
+}
+
+pub(super) fn default_memory_recall_long_term_max_chars() -> u32 {
+    720
+}
+
+pub(super) fn default_memory_recall_short_term_max_chars() -> u32 {
+    480
 }
 
 pub(super) fn default_safe_error_reply() -> String {
