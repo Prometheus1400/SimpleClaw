@@ -232,7 +232,7 @@ pub(crate) async fn assemble_runtime_state(
     }
 
     let mut agent_configs_map: HashMap<String, AgentRuntimeConfig> = HashMap::new();
-    let mut skill_factory = deps.skill_factory_builder.create_skill_factory(app_paths);
+    let skill_factory = deps.skill_factory_builder.create_skill_factory(app_paths);
     let cron_store = Arc::new(std::sync::Mutex::new(CronStore::open(
         &app_paths.cron_db_path,
     )?));
@@ -264,18 +264,29 @@ pub(crate) async fn assemble_runtime_state(
             .get(&provider_key)
             .map_err(color_eyre::Report::from)?;
 
-        let system_prompt = load_system_prompt_for_persona(&agent.persona).wrap_err_with(|| {
-            format!(
-                "failed to assemble layered system prompt for agent '{}'",
-                agent.id
-            )
-        })?;
-        let skill_tools = skill_factory
+        let mut system_prompt =
+            load_system_prompt_for_persona(&agent.persona).wrap_err_with(|| {
+                format!(
+                    "failed to assemble layered system prompt for agent '{}'",
+                    agent.id
+                )
+            })?;
+        let skill_catalog = skill_factory
             .load_for_agent(&agent.id, &agent_config, &agent.persona)
-            .wrap_err_with(|| format!("failed to load skill tools for agent '{}'", agent.id))?;
+            .wrap_err_with(|| format!("failed to load skills for agent '{}'", agent.id))?;
+        let skill_stats = skill_catalog.stats;
+        let skill_prompt_section = skill_catalog.prompt_section();
+        if !skill_prompt_section.is_empty() {
+            system_prompt = format!("{system_prompt}\n\n{skill_prompt_section}");
+        }
+        let skill_tools = skill_catalog.into_tool().into_iter().collect::<Vec<_>>();
         info!(
             agent_id = %agent.id,
+            requested_skills = skill_stats.requested,
             loaded_skill_tools = skill_tools.len(),
+            loaded_skills = skill_stats.loaded,
+            skipped_missing_skills = skill_stats.skipped_missing,
+            skipped_empty_skills = skill_stats.skipped_empty,
             status = "loaded",
             "agent skill tools loaded"
         );
@@ -283,7 +294,6 @@ pub(crate) async fn assemble_runtime_state(
         let tool_registry = tool_factory
             .build_registry(&agent_config.tools, &skill_tools)
             .wrap_err_with(|| format!("failed to build tool registry for agent '{}'", agent.id))?;
-        skill_factory.insert_agent_tools(agent.id.clone(), skill_tools);
         agent_configs_map.insert(
             agent.id.clone(),
             AgentRuntimeConfig {
@@ -684,6 +694,108 @@ mod tests {
         assert_eq!(config.persona_root, persona);
         assert_eq!(config.workspace_root, workspace);
         assert_eq!(config.system_prompt, "persona prompt");
+    }
+
+    #[tokio::test]
+    async fn assemble_runtime_state_injects_available_skills_into_system_prompt() {
+        let persona = temp_dir("composition_persona_skills");
+        let workspace = temp_dir("composition_workspace_skills");
+        std::fs::create_dir_all(persona.join("skills/research")).expect("skill dir");
+        std::fs::write(persona.join("AGENT.md"), "persona prompt\n")
+            .expect("persona prompt should be written");
+        std::fs::write(
+            persona.join("skills/research/SKILL.md"),
+            "---\ndescription: Investigate a topic\n---\n# Research\nBody\n",
+        )
+        .expect("skill should be written");
+
+        let mut global = GlobalConfig::default();
+        global.agents.list = vec![AgentEntryConfig {
+            id: "default".to_owned(),
+            name: "Default".to_owned(),
+            persona: persona.clone(),
+            workspace,
+            config: crate::config::AgentInnerConfig::default(),
+        }];
+        let loaded = LoadedConfig { global };
+        let app_paths = test_app_paths();
+        let deps = RuntimeDependencies {
+            provider_factory_builder: Arc::new(StaticProviderBuilder {
+                include_default: true,
+            }),
+            memory_factory: Arc::new(StaticMemoryFactory),
+            channel_factory: Arc::new(EmptyChannelFactory),
+            ..RuntimeDependencies::default()
+        };
+
+        let (state, _rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
+            .await
+            .expect("runtime state should assemble");
+
+        let config = state
+            .runtimes
+            .get("default")
+            .expect("default runtime should exist")
+            .config();
+        assert!(config.system_prompt.contains("persona prompt"));
+        assert!(config.system_prompt.contains("# Available Skills"));
+        assert!(
+            config
+                .system_prompt
+                .contains("`research`: Investigate a topic")
+        );
+        assert!(config.tool_registry.get("skill").is_some());
+    }
+
+    #[tokio::test]
+    async fn assemble_runtime_state_omits_skill_prompt_when_skill_tool_disabled() {
+        let persona = temp_dir("composition_persona_skills_disabled");
+        let workspace = temp_dir("composition_workspace_skills_disabled");
+        std::fs::create_dir_all(persona.join("skills/research")).expect("skill dir");
+        std::fs::write(persona.join("AGENT.md"), "persona prompt\n")
+            .expect("persona prompt should be written");
+        std::fs::write(
+            persona.join("skills/research/SKILL.md"),
+            "---\ndescription: Investigate a topic\n---\n# Research\nBody\n",
+        )
+        .expect("skill should be written");
+
+        let mut agent_config = crate::config::AgentInnerConfig::default();
+        agent_config.tools.skills = Some(crate::config::SkillsToolConfig {
+            enabled: false,
+            disabled_skills: Vec::new(),
+        });
+
+        let mut global = GlobalConfig::default();
+        global.agents.list = vec![AgentEntryConfig {
+            id: "default".to_owned(),
+            name: "Default".to_owned(),
+            persona: persona.clone(),
+            workspace,
+            config: agent_config,
+        }];
+        let loaded = LoadedConfig { global };
+        let app_paths = test_app_paths();
+        let deps = RuntimeDependencies {
+            provider_factory_builder: Arc::new(StaticProviderBuilder {
+                include_default: true,
+            }),
+            memory_factory: Arc::new(StaticMemoryFactory),
+            channel_factory: Arc::new(EmptyChannelFactory),
+            ..RuntimeDependencies::default()
+        };
+
+        let (state, _rx) = assemble_runtime_state(&loaded, &app_paths, &deps)
+            .await
+            .expect("runtime state should assemble");
+
+        let config = state
+            .runtimes
+            .get("default")
+            .expect("default runtime should exist")
+            .config();
+        assert_eq!(config.system_prompt, "persona prompt");
+        assert!(config.tool_registry.get("skill").is_none());
     }
 
     #[tokio::test]
