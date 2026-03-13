@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::config::ExecToolConfig;
-use crate::error::{FrameworkError, SandboxCapability, SandboxPermissionDenied};
+use crate::error::{FrameworkError, SandboxCapability};
 use crate::sandbox::{HostSandbox, RunHostCommandRequest, SandboxPolicy, SpawnHostCommandRequest};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
@@ -218,24 +218,8 @@ impl ExecTool {
             .await
         {
             Ok(output) => output,
-            Err(err) => {
-                if let Some(classified) =
-                    classify_host_sandbox_denial(&plan.command, &err.to_string())
-                {
-                    return Err(classified);
-                }
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         };
-        // High priority: this post-run heuristic is unsafe because successful command output can
-        // contain sandbox-like terms and be misclassified as a denial, which can trigger an
-        // incorrect unsandboxed retry path.
-        if let Some(err) = classify_host_sandbox_denial(
-            &plan.command,
-            &format!("{}\n{}", output.stdout, output.stderr),
-        ) {
-            return Err(err);
-        }
         Ok(ToolExecutionOutcome::Completed(ToolRunOutput::plain(
             command_output_to_json(output.exit_code, &output.stdout, &output.stderr).to_string(),
         )))
@@ -667,52 +651,6 @@ fn push_word_token(tokens: &mut Vec<ShellToken>, current: &mut String) {
         kind: ShellTokenKind::Word,
         text: std::mem::take(current),
     });
-}
-
-fn classify_host_sandbox_denial(command: &str, stderr: &str) -> Option<FrameworkError> {
-    let lowered = stderr.to_ascii_lowercase();
-    let capability = if lowered.contains("network")
-        || lowered.contains("name resolution")
-        || lowered.contains("enotfound")
-        || lowered.contains("eai_again")
-    {
-        Some(SandboxCapability::Network)
-    } else if lowered.contains("eacces")
-        || lowered.contains("eperm")
-        || lowered.contains("syscall mkdir")
-        || lowered.contains("syscall open")
-        || lowered.contains("syscall rename")
-        || lowered.contains("syscall unlink")
-        || lowered.contains("/.npm")
-        || lowered.contains("/_npx")
-        || lowered.contains("/.cache")
-        || lowered.contains("failed to initialize sandbox runtime")
-        || lowered.contains("failed to wrap command in sandbox runtime")
-        || lowered.contains("allow_write")
-    {
-        Some(SandboxCapability::Write)
-    } else if lowered.contains("permission denied")
-        || lowered.contains("operation not permitted")
-        || lowered.contains("access denied")
-        || lowered.contains("not permitted")
-        || lowered.contains("sandbox")
-    {
-        Some(SandboxCapability::Exec)
-    } else {
-        None
-    }?;
-
-    // This remains heuristic. Keep classification centralized so we can refine
-    // sandbox-vs-normal exec errors without changing the approval flow.
-    Some(FrameworkError::sandbox_permission_denied(
-        SandboxPermissionDenied {
-            tool_name: "exec".to_owned(),
-            execution_kind: "host_sandbox".to_owned(),
-            capability,
-            target: command.to_owned(),
-            diagnostic: stderr.trim().to_owned(),
-        },
-    ))
 }
 
 #[cfg(test)]
