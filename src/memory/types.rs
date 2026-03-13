@@ -42,6 +42,13 @@ pub struct StoredMessage {
 }
 
 #[derive(Debug, Clone)]
+pub struct ShortTermContextMessage {
+    pub role: StoredRole,
+    pub content: String,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct LongTermFactSummary {
     pub id: i64,
     pub content: String,
@@ -88,6 +95,7 @@ pub struct MemoryRecallHit {
     pub kind: Option<String>,
     #[allow(dead_code)]
     pub importance: Option<i64>,
+    pub context_messages: Option<Vec<ShortTermContextMessage>>,
     pub raw_similarity: f32,
     pub final_score: f32,
 }

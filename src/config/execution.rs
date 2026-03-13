@@ -65,9 +65,18 @@ impl ExecutionDefaultsConfig {
                 long_term_weight: memory_overrides
                     .long_term_weight
                     .unwrap_or(self.memory_recall.long_term_weight),
-                max_chars: memory_overrides
-                    .max_chars
-                    .unwrap_or(self.memory_recall.max_chars),
+                recall_word_count_threshold: memory_overrides
+                    .recall_word_count_threshold
+                    .unwrap_or(self.memory_recall.recall_word_count_threshold),
+                short_term_context_radius: memory_overrides
+                    .short_term_context_radius
+                    .unwrap_or(self.memory_recall.short_term_context_radius),
+                long_term_max_chars: memory_overrides
+                    .long_term_max_chars
+                    .unwrap_or(self.memory_recall.long_term_max_chars),
+                short_term_max_chars: memory_overrides
+                    .short_term_max_chars
+                    .unwrap_or(self.memory_recall.short_term_max_chars),
             },
             None => self.memory_recall.clone(),
         };
@@ -140,7 +149,10 @@ pub struct MemoryRecallConfig {
     pub top_k: u32,
     pub min_score: f32,
     pub long_term_weight: f32,
-    pub max_chars: u32,
+    pub recall_word_count_threshold: u32,
+    pub short_term_context_radius: u32,
+    pub long_term_max_chars: u32,
+    pub short_term_max_chars: u32,
 }
 
 impl Default for MemoryRecallConfig {
@@ -151,7 +163,10 @@ impl Default for MemoryRecallConfig {
             top_k: default_memory_recall_top_k(),
             min_score: default_memory_recall_min_score(),
             long_term_weight: default_memory_recall_long_term_weight(),
-            max_chars: default_memory_recall_max_chars(),
+            recall_word_count_threshold: default_memory_recall_recall_word_count_threshold(),
+            short_term_context_radius: default_memory_recall_short_term_context_radius(),
+            long_term_max_chars: default_memory_recall_long_term_max_chars(),
+            short_term_max_chars: default_memory_recall_short_term_max_chars(),
         }
     }
 }
@@ -163,7 +178,10 @@ impl MemoryRecallConfig {
             top_k: self.top_k.clamp(1, 10),
             min_score: self.min_score.clamp(0.0, 1.0),
             long_term_weight: self.long_term_weight.clamp(0.0, 1.0),
-            max_chars: self.max_chars.clamp(200, 4000),
+            recall_word_count_threshold: self.recall_word_count_threshold.clamp(1, 10),
+            short_term_context_radius: self.short_term_context_radius.clamp(0, 5),
+            long_term_max_chars: self.long_term_max_chars.clamp(100, 4000),
+            short_term_max_chars: self.short_term_max_chars.clamp(100, 4000),
         }
     }
 }
@@ -224,7 +242,10 @@ pub struct MemoryRecallOverrides {
     pub top_k: Option<u32>,
     pub min_score: Option<f32>,
     pub long_term_weight: Option<f32>,
-    pub max_chars: Option<u32>,
+    pub recall_word_count_threshold: Option<u32>,
+    pub short_term_context_radius: Option<u32>,
+    pub long_term_max_chars: Option<u32>,
+    pub short_term_max_chars: Option<u32>,
 }
 
 #[cfg(test)]
@@ -255,7 +276,10 @@ mod tests {
                 top_k: None,
                 min_score: Some(0.9),
                 long_term_weight: None,
-                max_chars: Some(2500),
+                recall_word_count_threshold: Some(4),
+                short_term_context_radius: Some(4),
+                long_term_max_chars: Some(1400),
+                short_term_max_chars: Some(900),
             }),
             safe_error_reply: Some("custom".to_owned()),
         };
@@ -286,7 +310,10 @@ mod tests {
             merged.memory_recall.long_term_weight,
             defaults.memory_recall.long_term_weight
         );
-        assert_eq!(merged.memory_recall.max_chars, 2500);
+        assert_eq!(merged.memory_recall.recall_word_count_threshold, 4);
+        assert_eq!(merged.memory_recall.short_term_context_radius, 4);
+        assert_eq!(merged.memory_recall.long_term_max_chars, 1400);
+        assert_eq!(merged.memory_recall.short_term_max_chars, 900);
         assert_eq!(merged.safe_error_reply, "custom");
     }
 
@@ -308,6 +335,22 @@ mod tests {
         assert_eq!(
             merged.memory_recall.long_term_weight,
             defaults.memory_recall.long_term_weight
+        );
+        assert_eq!(
+            merged.memory_recall.short_term_context_radius,
+            defaults.memory_recall.short_term_context_radius
+        );
+        assert_eq!(
+            merged.memory_recall.recall_word_count_threshold,
+            defaults.memory_recall.recall_word_count_threshold
+        );
+        assert_eq!(
+            merged.memory_recall.long_term_max_chars,
+            defaults.memory_recall.long_term_max_chars
+        );
+        assert_eq!(
+            merged.memory_recall.short_term_max_chars,
+            defaults.memory_recall.short_term_max_chars
         );
         assert_eq!(merged.safe_error_reply, defaults.safe_error_reply);
     }

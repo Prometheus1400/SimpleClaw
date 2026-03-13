@@ -108,7 +108,10 @@ mod tests {
             top_k: 2,
             min_score: 0.75,
             long_term_weight: 0.65,
-            max_chars: 1200,
+            recall_word_count_threshold: 3,
+            short_term_context_radius: 2,
+            long_term_max_chars: 720,
+            short_term_max_chars: 480,
         }
         .normalized();
         let hits = vec![
@@ -117,6 +120,7 @@ mod tests {
                 content: "Prefers short answers".to_owned(),
                 kind: Some("preferences".to_owned()),
                 importance: Some(5),
+                context_messages: None,
                 raw_similarity: 0.94,
                 final_score: 0.86,
             },
@@ -125,6 +129,7 @@ mod tests {
                 content: "Working in Rust project".to_owned(),
                 kind: Some("context".to_owned()),
                 importance: Some(3),
+                context_messages: None,
                 raw_similarity: 0.89,
                 final_score: 0.81,
             },
@@ -133,6 +138,7 @@ mod tests {
                 content: "Low confidence".to_owned(),
                 kind: Some("context".to_owned()),
                 importance: Some(1),
+                context_messages: None,
                 raw_similarity: 0.5,
                 final_score: 0.3,
             },
@@ -152,7 +158,10 @@ mod tests {
             top_k: 2,
             min_score: 0.72,
             long_term_weight: 0.65,
-            max_chars: 1200,
+            recall_word_count_threshold: 3,
+            short_term_context_radius: 2,
+            long_term_max_chars: 720,
+            short_term_max_chars: 480,
         }
         .normalized();
         let hits = vec![
@@ -161,6 +170,7 @@ mod tests {
                 content: "High weighted, low raw".to_owned(),
                 kind: Some("preferences".to_owned()),
                 importance: Some(5),
+                context_messages: None,
                 raw_similarity: 0.70,
                 final_score: 0.95,
             },
@@ -169,6 +179,7 @@ mod tests {
                 content: "Passes raw threshold".to_owned(),
                 kind: Some("context".to_owned()),
                 importance: Some(5),
+                context_messages: None,
                 raw_similarity: 0.90,
                 final_score: 0.60,
             },
@@ -177,6 +188,7 @@ mod tests {
                 content: "Also passes raw threshold".to_owned(),
                 kind: Some("context".to_owned()),
                 importance: Some(3),
+                context_messages: None,
                 raw_similarity: 0.88,
                 final_score: 0.58,
             },

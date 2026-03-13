@@ -430,14 +430,18 @@ memory_recall:
   top_k: 5
   min_score: 0.8
   long_term_weight: 0.7
-  max_chars: 900
+  recall_word_count_threshold: 4
+  long_term_max_chars: 900
+  short_term_max_chars: 600
 "#;
         let parsed = serde_yaml::from_str::<ExecutionDefaultsConfig>(yaml).expect("valid yaml");
         assert!(!parsed.memory_recall.enabled);
         assert_eq!(parsed.memory_recall.top_k, 5);
         assert!((parsed.memory_recall.min_score - 0.8).abs() < f32::EPSILON);
         assert!((parsed.memory_recall.long_term_weight - 0.7).abs() < f32::EPSILON);
-        assert_eq!(parsed.memory_recall.max_chars, 900);
+        assert_eq!(parsed.memory_recall.recall_word_count_threshold, 4);
+        assert_eq!(parsed.memory_recall.long_term_max_chars, 900);
+        assert_eq!(parsed.memory_recall.short_term_max_chars, 600);
     }
 
     #[test]
@@ -478,13 +482,19 @@ memory_recall:
             top_k: 999,
             min_score: 5.0,
             long_term_weight: -4.0,
-            max_chars: 32,
+            recall_word_count_threshold: 0,
+            short_term_context_radius: 99,
+            long_term_max_chars: 32,
+            short_term_max_chars: 50,
         };
         let normalized = config.normalized();
         assert_eq!(normalized.top_k, 10);
         assert!((normalized.min_score - 1.0).abs() < f32::EPSILON);
         assert!((normalized.long_term_weight - 0.0).abs() < f32::EPSILON);
-        assert_eq!(normalized.max_chars, 200);
+        assert_eq!(normalized.recall_word_count_threshold, 1);
+        assert_eq!(normalized.short_term_context_radius, 5);
+        assert_eq!(normalized.long_term_max_chars, 100);
+        assert_eq!(normalized.short_term_max_chars, 100);
     }
 
     #[test]
