@@ -49,7 +49,6 @@ impl AgentInvoker for DirectAgentInvoker {
         let memory = self
             .agents
             .memory(&request.target_agent_id)
-            .cloned()
             .ok_or_else(|| {
                 FrameworkError::Tool(format!("no memory for agent: {}", request.target_agent_id))
             })?;
@@ -65,6 +64,7 @@ impl AgentInvoker for DirectAgentInvoker {
             .tool_registry
             .without_names(&["summon", "task", "background"])
             .with_async_disabled_if(delegated_exec_enabled);
+        let execution_env = target_config.effective_execution.resolved_env()?;
         let params = RunParams {
             provider_key: &target_config.provider_key,
             system_prompt: &target_config.system_prompt,
@@ -73,15 +73,15 @@ impl AgentInvoker for DirectAgentInvoker {
             session_id: &request.session_id,
             max_steps: effective_max_steps,
             history_messages: target_config.effective_execution.history_messages as usize,
-            execution_env: target_config.effective_execution.resolved_env()?,
-            memory,
-            persona_root: target_config.persona_root.clone(),
-            workspace_root: target_config.workspace_root.clone(),
-            user_id: request.user_id,
-            owner_ids: target_config.owner_ids.clone(),
-            async_tool_runs: Arc::clone(&self.async_tool_runs),
+            execution_env: &execution_env,
+            memory: memory.as_ref(),
+            persona_root: &target_config.persona_root,
+            workspace_root: &target_config.workspace_root,
+            user_id: &request.user_id,
+            owner_ids: &target_config.owner_ids,
+            async_tool_runs: &self.async_tool_runs,
             approval_requester: request.approval_requester,
-            tool_registry: delegated_tool_registry,
+            tool_registry: &delegated_tool_registry,
             gateway: None,
             completion_tx: None,
             completion_route: None,
@@ -111,7 +111,6 @@ impl AgentInvoker for DirectAgentInvoker {
         let memory = self
             .agents
             .memory(&request.current_agent_id)
-            .cloned()
             .ok_or_else(|| FrameworkError::Tool("current agent memory unavailable".to_owned()))?;
         let worker_tool_registry = current_config
             .tool_registry
@@ -125,6 +124,7 @@ impl AgentInvoker for DirectAgentInvoker {
                     .unwrap_or_default()
                     .enabled,
             );
+        let execution_env = current_config.effective_execution.resolved_env()?;
         let params = RunParams {
             provider_key: &current_config.provider_key,
             system_prompt: "You are a task worker. Complete the assigned task and return a concise result.",
@@ -135,15 +135,15 @@ impl AgentInvoker for DirectAgentInvoker {
                 .max_steps_override
                 .unwrap_or(current_config.effective_execution.max_steps),
             history_messages: current_config.effective_execution.history_messages as usize,
-            execution_env: current_config.effective_execution.resolved_env()?,
-            memory,
-            persona_root: current_config.persona_root.clone(),
-            workspace_root: current_config.workspace_root.clone(),
-            user_id: request.user_id,
-            owner_ids: current_config.owner_ids.clone(),
-            async_tool_runs: Arc::clone(&self.async_tool_runs),
+            execution_env: &execution_env,
+            memory: memory.as_ref(),
+            persona_root: &current_config.persona_root,
+            workspace_root: &current_config.workspace_root,
+            user_id: &request.user_id,
+            owner_ids: &current_config.owner_ids,
+            async_tool_runs: &self.async_tool_runs,
             approval_requester: request.approval_requester,
-            tool_registry: worker_tool_registry,
+            tool_registry: &worker_tool_registry,
             gateway: None,
             completion_tx: None,
             completion_route: None,

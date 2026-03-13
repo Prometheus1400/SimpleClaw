@@ -65,7 +65,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         &self,
         calls: &[ParsedToolCall],
         active_tools: &AgentToolRegistry,
-        tool_ctx: &ToolExecEnv,
+        tool_ctx: &ToolExecEnv<'_>,
         session_id: &str,
     ) -> Vec<ToolExecutionResult> {
         let authorizer = DefaultToolAuthorizer;

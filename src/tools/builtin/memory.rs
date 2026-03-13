@@ -36,7 +36,7 @@ impl Tool for MemoryTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {

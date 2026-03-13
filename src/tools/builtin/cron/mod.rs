@@ -78,7 +78,7 @@ impl Tool for CronTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -147,7 +147,7 @@ impl Tool for CronTool {
 
                 let job = CronJob {
                     id: Uuid::new_v4().to_string(),
-                    agent_id: ctx.agent_id.clone(),
+                    agent_id: ctx.agent_id.to_owned(),
                     schedule,
                     description,
                     prompt,
@@ -157,7 +157,7 @@ impl Tool for CronTool {
                     guild_id: route.guild_id.clone(),
                     source_channel: route.source_channel.as_str().to_owned(),
                     is_dm: route.is_dm,
-                    created_by: ctx.user_id.clone(),
+                    created_by: ctx.user_id.to_owned(),
                     created_at: Utc::now(),
                     last_fired_at: None,
                     guard_timeout_seconds,

@@ -80,7 +80,7 @@ impl Tool for ListTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -92,7 +92,7 @@ impl Tool for ListTool {
 }
 
 impl ListTool {
-    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ListPlan, FrameworkError> {
+    pub fn plan(&self, ctx: &ToolExecEnv<'_>, args_json: &str) -> Result<ListPlan, FrameworkError> {
         let args: ListArgs = if args_json.trim().is_empty() {
             ListArgs {
                 path: None,
@@ -127,7 +127,7 @@ impl ListTool {
 
     pub async fn execute_direct(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         plan: ListPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let output = run_list(&plan.host_path, &plan.ignore)?;
@@ -136,7 +136,7 @@ impl ListTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: ListPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -150,8 +150,8 @@ impl ListTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize list args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "list_tool.wasm",
                 args: Vec::new(),

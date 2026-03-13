@@ -8,8 +8,7 @@ use color_eyre::eyre::WrapErr;
 use tracing::info;
 
 use crate::agent::{
-    AgentDirectory, AgentRuntime, AgentRuntimeConfig, RuntimeContext, ToolRuntime,
-    load_system_prompt_for_persona,
+    AgentDirectory, AgentRuntime, AgentRuntimeConfig, load_system_prompt_for_persona,
 };
 use crate::approval::ApprovalRegistry;
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
@@ -200,8 +199,12 @@ impl ApprovalRegistryFactory for DefaultApprovalRegistryFactory {
 
 pub(crate) struct RuntimeState {
     pub gateway: Arc<Gateway>,
+    pub directory: Arc<AgentDirectory>,
+    pub react_loop: Arc<ReactLoop>,
+    pub async_tool_runs: Arc<AsyncToolRunManager>,
+    pub approval_registry: Arc<ApprovalRegistry>,
+    pub completion_tx: tokio::sync::mpsc::Sender<InboundMessage>,
     pub runtimes: HashMap<String, AgentRuntime>,
-    pub context: Arc<RuntimeContext>,
     pub cron_store: Arc<std::sync::Mutex<CronStore>>,
     pub safe_error_reply: String,
     pub session_coordinator: SessionWorkerCoordinator<InboundMessage>,
@@ -341,22 +344,15 @@ pub(crate) async fn assemble_runtime_state(
         session_coordinator.clone(),
     ));
 
-    let context = Arc::new(RuntimeContext {
-        react_loop,
-        gateway: Arc::clone(&gateway),
-        agents: directory,
-        tool_runtime: Arc::new(ToolRuntime {
-            async_tool_runs,
-            completion_tx: gateway_tx.clone(),
-            approval_registry,
-        }),
-    });
-
     Ok((
         RuntimeState {
             gateway,
+            directory,
+            react_loop,
+            async_tool_runs,
+            approval_registry,
+            completion_tx: gateway_tx.clone(),
             runtimes,
-            context,
             cron_store,
             safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
             session_coordinator,
@@ -382,12 +378,12 @@ pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
         .collect();
     RuntimeServices {
         _gateway_listeners: state.gateway.start(
-            state.context.tool_runtime.completion_tx.clone(),
-            Arc::clone(&state.context.tool_runtime.approval_registry),
+            state.completion_tx.clone(),
+            Arc::clone(&state.approval_registry),
         ),
         _cron_scheduler: super::cron_scheduler::spawn(
             Arc::clone(&state.cron_store),
-            state.context.tool_runtime.completion_tx.clone(),
+            state.completion_tx.clone(),
             cron_env_by_agent,
             10,
         ),
@@ -647,8 +643,8 @@ mod tests {
             state.safe_error_reply,
             loaded.global.execution.defaults.safe_error_reply
         );
-        assert!(state.context.agents.config("default").is_some());
-        assert!(state.context.agents.memory("default").is_some());
+        assert!(state.directory.config("default").is_some());
+        assert!(state.directory.memory("default").is_some());
     }
 
     #[tokio::test]

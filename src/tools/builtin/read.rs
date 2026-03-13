@@ -63,7 +63,7 @@ impl Tool for ReadTool {
 
     async fn execute(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         args_json: &str,
         _session_id: &str,
     ) -> Result<ToolExecutionOutcome, FrameworkError> {
@@ -75,7 +75,7 @@ impl Tool for ReadTool {
 }
 
 impl ReadTool {
-    pub fn plan(&self, ctx: &ToolExecEnv, args_json: &str) -> Result<ReadPlan, FrameworkError> {
+    pub fn plan(&self, ctx: &ToolExecEnv<'_>, args_json: &str) -> Result<ReadPlan, FrameworkError> {
         let args: ReadArgs = serde_json::from_str(args_json)
             .map_err(|e| FrameworkError::Tool(format!("read requires JSON object args: {e}")))?;
         let file_path = args.file_path.trim();
@@ -115,7 +115,7 @@ impl ReadTool {
 
     pub async fn execute_direct(
         &self,
-        _ctx: &ToolExecEnv,
+        _ctx: &ToolExecEnv<'_>,
         plan: ReadPlan,
     ) -> Result<ToolRunOutput, FrameworkError> {
         let rendered = if plan.host_path.is_dir() {
@@ -128,7 +128,7 @@ impl ReadTool {
 
     pub async fn execute_wasm(
         &self,
-        ctx: &ToolExecEnv,
+        ctx: &ToolExecEnv<'_>,
         plan: ReadPlan,
         runtime: &dyn WasmSandbox,
     ) -> Result<ToolRunOutput, FrameworkError> {
@@ -143,8 +143,8 @@ impl ReadTool {
         .map_err(|e| FrameworkError::Tool(format!("failed to serialize read args: {e}")))?;
         let output = runtime
             .run(RunWasmRequest {
-                workspace_root: ctx.workspace_root.clone(),
-                persona_root: ctx.persona_root.clone(),
+                workspace_root: ctx.workspace_root.to_path_buf(),
+                persona_root: ctx.persona_root.to_path_buf(),
                 preopened_dirs: plan.route.preopened_dirs().to_vec(),
                 artifact_name: "read_tool.wasm",
                 args: Vec::new(),
