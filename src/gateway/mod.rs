@@ -6,20 +6,30 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 use tracing::{Instrument, info_span};
 
+use crate::agent::AgentDirectory;
 use crate::approval::{ApprovalRegistry, PendingApprovalRequest};
 use crate::channels::{ApprovalResolution, Channel, InboundMessage};
 use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
 use crate::error::FrameworkError;
+use crate::run::session::SessionWorkerCoordinator;
+use crate::tools::{AsyncToolRunManager, AsyncToolRunStatus};
 
+mod command;
 mod policy;
 mod router;
 mod session;
 mod transport;
 
+pub(crate) use command::{ChannelCommand, ChannelCommandKind, CommandResponse};
+
+#[derive(Clone)]
 pub struct Gateway {
     channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
     output_modes: HashMap<GatewayChannelKind, ChannelOutputMode>,
     inbound_policy: RoutingConfig,
+    agents: Arc<AgentDirectory>,
+    async_tool_runs: Arc<AsyncToolRunManager>,
+    session_coordinator: SessionWorkerCoordinator<InboundMessage>,
 }
 
 pub struct GatewayListeners {
@@ -46,10 +56,31 @@ impl Gateway {
         output_modes: HashMap<GatewayChannelKind, ChannelOutputMode>,
         inbound_policy: RoutingConfig,
     ) -> Self {
+        Self::with_runtime_dependencies(
+            channels,
+            output_modes,
+            inbound_policy,
+            Arc::new(AgentDirectory::new(HashMap::new(), HashMap::new())),
+            Arc::new(AsyncToolRunManager::new()),
+            SessionWorkerCoordinator::new(Duration::from_secs(300)),
+        )
+    }
+
+    pub(crate) fn with_runtime_dependencies(
+        channels: HashMap<GatewayChannelKind, Arc<dyn Channel>>,
+        output_modes: HashMap<GatewayChannelKind, ChannelOutputMode>,
+        inbound_policy: RoutingConfig,
+        agents: Arc<AgentDirectory>,
+        async_tool_runs: Arc<AsyncToolRunManager>,
+        session_coordinator: SessionWorkerCoordinator<InboundMessage>,
+    ) -> Self {
         Self {
             channels,
             output_modes,
             inbound_policy,
+            agents,
+            async_tool_runs,
+            session_coordinator,
         }
     }
 
@@ -58,10 +89,11 @@ impl Gateway {
         inbound_tx: mpsc::Sender<InboundMessage>,
         approvals: Arc<ApprovalRegistry>,
     ) -> GatewayListeners {
-        let mut tasks = Vec::with_capacity(self.channels.len() * 2);
+        let mut tasks = Vec::with_capacity(self.channels.len() * 3);
         for (kind, channel) in &self.channels {
             let kind = *kind;
             let supports_approval_resolution = channel.supports_approval_resolution();
+            let supports_commands = channel.supports_commands();
             let channel = Arc::clone(channel);
             let inbound_channel = Arc::clone(&channel);
             let inbound_tx = inbound_tx.clone();
@@ -177,9 +209,57 @@ impl Gateway {
                     .instrument(listener_span),
                 ));
             }
+
+            if supports_commands {
+                let channel = Arc::clone(&channel);
+                let gateway = self.clone();
+                let listener_span = info_span!("gateway.listen.command");
+                tasks.push(tokio::spawn(
+                    async move {
+                        loop {
+                            match channel.listen_for_command().await {
+                                Ok(command) => gateway.execute_command(command).await,
+                                Err(err) => {
+                                    tracing::error!(
+                                        status = "retrying",
+                                        error_kind = "command_listen",
+                                        error = %err,
+                                        "command listener failed"
+                                    );
+                                    sleep(Duration::from_secs(1)).await;
+                                }
+                            }
+                        }
+                    }
+                    .instrument(listener_span),
+                ));
+            }
         }
 
         GatewayListeners { tasks }
+    }
+
+    pub async fn execute_command(&self, cmd: ChannelCommand) {
+        let response = match self.resolve_command_target(&cmd) {
+            Some((agent_id, session_key)) => match cmd.kind {
+                ChannelCommandKind::NewSession => {
+                    self.session_coordinator.remove(&session_key).await;
+                    CommandResponse::NewSession {
+                        message: format!("Started a fresh session for `{agent_id}`."),
+                    }
+                }
+                ChannelCommandKind::Status => {
+                    self.status_command_response(&agent_id, &session_key).await
+                }
+                ChannelCommandKind::Stop => {
+                    self.stop_command_response(&agent_id, &session_key).await
+                }
+                ChannelCommandKind::Tools => self.tools_command_response(&agent_id),
+            },
+            None => self.denied_command_response(cmd.kind),
+        };
+
+        let _ = cmd.reply_tx.send(response);
     }
 
     pub async fn send_message(
@@ -273,6 +353,137 @@ impl Gateway {
     pub async fn broadcast_typing(&self, inbound: &InboundMessage) -> Result<(), FrameworkError> {
         let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
         channel.broadcast_typing(&inbound.channel_id).await
+    }
+
+    fn resolve_command_target(&self, cmd: &ChannelCommand) -> Option<(String, String)> {
+        let inbound = crate::channels::ChannelInbound {
+            message_id: format!("command:{}", cmd.kind.as_str()),
+            channel_id: cmd.channel_id.clone(),
+            guild_id: cmd.guild_id.clone(),
+            is_dm: cmd.is_dm,
+            user_id: cmd.user_id.clone(),
+            username: "system".to_owned(),
+            mentioned_bot: true,
+            content: format!("/{}", cmd.kind.as_str()),
+        };
+        let (agent_id, _) = router::resolve_route(cmd.source, &inbound, &self.inbound_policy)?;
+        let session_key =
+            session::build_session_key(&agent_id, cmd.is_dm, cmd.source, &cmd.channel_id);
+        Some((agent_id, session_key))
+    }
+
+    fn denied_command_response(&self, kind: ChannelCommandKind) -> CommandResponse {
+        let message = "That command is not allowed in this channel.";
+        match kind {
+            ChannelCommandKind::NewSession => CommandResponse::NewSession {
+                message: message.to_owned(),
+            },
+            ChannelCommandKind::Status => CommandResponse::Status {
+                message: message.to_owned(),
+            },
+            ChannelCommandKind::Stop => CommandResponse::Stop {
+                killed_count: 0,
+                message: message.to_owned(),
+            },
+            ChannelCommandKind::Tools => CommandResponse::Tools {
+                message: message.to_owned(),
+            },
+        }
+    }
+
+    async fn status_command_response(&self, agent_id: &str, session_key: &str) -> CommandResponse {
+        let Some(config) = self.agents.config(agent_id) else {
+            return CommandResponse::Status {
+                message: format!("Agent `{agent_id}` is not configured."),
+            };
+        };
+
+        let runs = self
+            .async_tool_runs
+            .list_for_session(agent_id, session_key)
+            .await;
+        let running = runs
+            .iter()
+            .filter(|run| run.status == AsyncToolRunStatus::Running)
+            .count();
+
+        let mut message = format!(
+            "Agent: {} (`{}`)\nSession: `{}`\nBackground runs: {} active / {} total",
+            config.agent_name,
+            agent_id,
+            session_key,
+            running,
+            runs.len()
+        );
+
+        if !runs.is_empty() {
+            let lines = runs
+                .iter()
+                .take(5)
+                .map(|run| format!("- `{}` {} {}", run.run_id, run.status.as_str(), run.summary))
+                .collect::<Vec<_>>()
+                .join("\n");
+            message.push_str("\nRecent runs:\n");
+            message.push_str(&lines);
+        }
+
+        CommandResponse::Status { message }
+    }
+
+    async fn stop_command_response(&self, agent_id: &str, session_key: &str) -> CommandResponse {
+        let runs = self
+            .async_tool_runs
+            .list_for_session(agent_id, session_key)
+            .await;
+        let mut killed_count = 0usize;
+
+        for run in runs {
+            if run.status != AsyncToolRunStatus::Running {
+                continue;
+            }
+            if self
+                .async_tool_runs
+                .kill_for_session(&run.run_id, agent_id, session_key)
+                .await
+                .is_ok()
+            {
+                killed_count += 1;
+            }
+        }
+
+        let message = if killed_count == 0 {
+            "No running background tasks were found.".to_owned()
+        } else {
+            format!("Stopped {killed_count} background task(s).")
+        };
+
+        CommandResponse::Stop {
+            killed_count,
+            message,
+        }
+    }
+
+    fn tools_command_response(&self, agent_id: &str) -> CommandResponse {
+        let Some(config) = self.agents.config(agent_id) else {
+            return CommandResponse::Tools {
+                message: format!("Agent `{agent_id}` is not configured."),
+            };
+        };
+
+        let definitions = config.tool_registry.definitions();
+        if definitions.is_empty() {
+            return CommandResponse::Tools {
+                message: format!("Agent `{agent_id}` has no tools configured."),
+            };
+        }
+
+        let message = definitions
+            .into_iter()
+            .map(|tool| format!("- `{}`: {}", tool.name, tool.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        CommandResponse::Tools { message }
     }
 }
 

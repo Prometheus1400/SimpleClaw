@@ -8,6 +8,7 @@ use std::future::pending;
 use crate::approval::PendingApprovalRequest;
 use crate::error::FrameworkError;
 
+use crate::gateway::ChannelCommand;
 pub use discord::DiscordChannel;
 pub use types::{ApprovalResolution, ChannelInbound, InboundMessage};
 
@@ -22,6 +23,10 @@ pub trait Channel: Send + Sync {
     }
 
     fn supports_approval_resolution(&self) -> bool {
+        false
+    }
+
+    fn supports_commands(&self) -> bool {
         false
     }
 
@@ -71,6 +76,10 @@ pub trait Channel: Send + Sync {
     async fn listen(&self) -> Result<ChannelInbound, FrameworkError>;
     async fn listen_for_approval(&self) -> Result<ApprovalResolution, FrameworkError> {
         pending::<Result<ApprovalResolution, FrameworkError>>().await
+    }
+
+    async fn listen_for_command(&self) -> Result<ChannelCommand, FrameworkError> {
+        pending::<Result<ChannelCommand, FrameworkError>>().await
     }
 }
 

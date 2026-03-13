@@ -70,6 +70,11 @@ where
         false
     }
 
+    pub(crate) async fn remove(&self, key: &str) {
+        let mut workers = self.workers.lock().await;
+        workers.remove(key);
+    }
+
     async fn worker_sender_for_key(
         &self,
         key: &str,

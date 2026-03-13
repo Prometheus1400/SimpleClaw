@@ -20,6 +20,7 @@ use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
 use crate::providers::ProviderFactory;
 use crate::react::ReactLoop;
+use crate::run::session::SessionWorkerCoordinator;
 use crate::tools::builtin::cron::{CronStore, CronTool};
 use crate::tools::skill::SkillFactory;
 use crate::tools::{AsyncToolRunManager, RegisteredTool, ToolFactory, default_factory};
@@ -203,6 +204,7 @@ pub(crate) struct RuntimeState {
     pub context: Arc<RuntimeContext>,
     pub cron_store: Arc<std::sync::Mutex<CronStore>>,
     pub safe_error_reply: String,
+    pub session_coordinator: SessionWorkerCoordinator<InboundMessage>,
 }
 
 pub(crate) struct RuntimeServices {
@@ -316,6 +318,7 @@ pub(crate) async fn assemble_runtime_state(
     });
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
+    let session_coordinator = SessionWorkerCoordinator::new(std::time::Duration::from_secs(300));
 
     let channels = deps
         .channel_factory
@@ -329,10 +332,13 @@ pub(crate) async fn assemble_runtime_state(
         .filter(|(_, config)| config.enabled)
         .map(|(kind, config)| (*kind, config.output))
         .collect::<HashMap<GatewayChannelKind, ChannelOutputMode>>();
-    let gateway = Arc::new(Gateway::new(
+    let gateway = Arc::new(Gateway::with_runtime_dependencies(
         channels,
         output_modes,
         loaded.global.gateway.routing.clone(),
+        Arc::clone(&directory),
+        Arc::clone(&async_tool_runs),
+        session_coordinator.clone(),
     ));
 
     let context = Arc::new(RuntimeContext {
@@ -353,6 +359,7 @@ pub(crate) async fn assemble_runtime_state(
             context,
             cron_store,
             safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
+            session_coordinator,
         },
         gateway_rx,
     ))

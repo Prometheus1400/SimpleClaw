@@ -118,7 +118,7 @@ impl AsyncToolRunManager {
         }
     }
 
-    pub async fn start_process(
+    pub(crate) async fn start_process(
         self: &Arc<Self>,
         tool_name: &str,
         command: &str,
@@ -211,7 +211,7 @@ impl AsyncToolRunManager {
         }
     }
 
-    pub async fn start_prepared_process(
+    pub(crate) async fn start_prepared_process(
         self: &Arc<Self>,
         tool_name: &str,
         command: &str,
@@ -270,7 +270,7 @@ impl AsyncToolRunManager {
         })
     }
 
-    pub async fn start_delegated<F>(
+    pub(crate) async fn start_delegated<F>(
         self: &Arc<Self>,
         tool_name: &str,
         request: &str,
