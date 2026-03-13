@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serenity::all::{
-    ButtonStyle, ComponentInteraction, CreateActionRow, CreateButton, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, Interaction,
+    ButtonStyle, Command, CommandInteraction, ComponentInteraction, CreateActionRow, CreateButton,
+    CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    EditInteractionResponse, Interaction,
 };
 use serenity::builder::EditMessage;
 use serenity::http::Http;
@@ -12,19 +13,21 @@ use serenity::model::channel::MessageReaction;
 use serenity::model::channel::ReactionType;
 use serenity::model::id::{ChannelId, EmojiId, MessageId};
 use serenity::prelude::*;
-use tokio::sync::{Mutex, RwLock, mpsc};
-use tokio::time::{Duration, sleep};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::time::{Duration, sleep, timeout};
 use tracing::{Instrument, info_span};
 
 use crate::approval::{ApprovalDecision, ApprovalRegistry, PendingApprovalRequest};
 use crate::channels::{ApprovalResolution, Channel, ChannelInbound};
 use crate::config::ChannelConfig;
 use crate::error::FrameworkError;
+use crate::gateway::{ChannelCommand, ChannelCommandKind, CommandResponse};
 
 pub struct DiscordChannel {
     http: Arc<Http>,
     inbound_rx: Mutex<mpsc::Receiver<ChannelInbound>>,
     approval_rx: Mutex<mpsc::Receiver<ApprovalResolution>>,
+    command_rx: Mutex<mpsc::Receiver<ChannelCommand>>,
 }
 
 impl DiscordChannel {
@@ -52,6 +55,7 @@ impl DiscordChannel {
 
         let (inbound_tx, inbound_rx) = mpsc::channel(1_024);
         let (approval_tx, approval_rx) = mpsc::channel(1_024);
+        let (command_tx, command_rx) = mpsc::channel(1_024);
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
             | GatewayIntents::MESSAGE_CONTENT
@@ -61,6 +65,7 @@ impl DiscordChannel {
             .event_handler(DiscordHandler {
                 inbound_tx,
                 approval_tx,
+                command_tx,
                 approval_registry,
                 bot_user_id: Arc::new(RwLock::new(None)),
             })
@@ -86,6 +91,7 @@ impl DiscordChannel {
             http,
             inbound_rx: Mutex::new(inbound_rx),
             approval_rx: Mutex::new(approval_rx),
+            command_rx: Mutex::new(command_rx),
         })
     }
 }
@@ -93,15 +99,35 @@ impl DiscordChannel {
 struct DiscordHandler {
     inbound_tx: mpsc::Sender<ChannelInbound>,
     approval_tx: mpsc::Sender<ApprovalResolution>,
+    command_tx: mpsc::Sender<ChannelCommand>,
     approval_registry: Arc<ApprovalRegistry>,
     bot_user_id: Arc<RwLock<Option<u64>>>,
 }
 
 #[async_trait]
 impl EventHandler for DiscordHandler {
-    async fn ready(&self, _ctx: Context, ready: serenity::model::gateway::Ready) {
+    async fn ready(&self, ctx: Context, ready: serenity::model::gateway::Ready) {
         let mut bot_user_id = self.bot_user_id.write().await;
         *bot_user_id = Some(ready.user.id.get());
+
+        if let Err(err) = Command::set_global_commands(
+            &ctx.http,
+            vec![
+                CreateCommand::new("new").description("Start a fresh conversation session"),
+                CreateCommand::new("status").description("Show bot and session status"),
+                CreateCommand::new("stop").description("Stop running background tasks"),
+                CreateCommand::new("tools").description("List available agent tools"),
+            ],
+        )
+        .await
+        {
+            tracing::warn!(
+                status = "failed",
+                error_kind = "register_slash_commands",
+                error = %err,
+                "discord slash command registration failed"
+            );
+        }
     }
 
     async fn message(&self, _ctx: Context, msg: DiscordMessage) {
@@ -135,102 +161,12 @@ impl EventHandler for DiscordHandler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Component(component) = interaction else {
-            return;
-        };
-        let Some((approval_id, decision)) = parse_approval_custom_id(&component) else {
-            return;
-        };
-        let actor_user_id = component.user.id.get().to_string();
-        let pending = self.approval_registry.pending_request(&approval_id).await;
-
-        match evaluate_approval_interaction(
-            pending,
-            actor_user_id.clone(),
-            component.channel_id.get().to_string(),
-            approval_id,
-            decision,
-        ) {
-            ApprovalInteractionResult::Inactive { message } => {
-                if let Err(err) = component
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(message)
-                                .ephemeral(true),
-                        ),
-                    )
-                    .await
-                {
-                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord inactive approval interaction ack failed");
-                }
+        match interaction {
+            Interaction::Command(command) => self.handle_slash_command(&ctx, command).await,
+            Interaction::Component(component) => {
+                self.handle_approval_interaction(&ctx, component).await;
             }
-            ApprovalInteractionResult::Unauthorized {
-                message,
-                approval_id,
-                channel_id,
-                user_id,
-            } => {
-                tracing::warn!(
-                    status = "ignored",
-                    reason = "requesting_user_mismatch",
-                    approval_id,
-                    channel_id,
-                    user_id,
-                    "discord approval interaction ignored"
-                );
-                if let Err(err) = component
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(message)
-                                .ephemeral(true),
-                        ),
-                    )
-                    .await
-                {
-                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord unauthorized approval interaction ack failed");
-                }
-            }
-            ApprovalInteractionResult::Authorized {
-                resolution,
-                rendered_message,
-            } => {
-                if let Err(err) = self.approval_tx.send(resolution).await {
-                    tracing::warn!(status = "dropped", error_kind = "approval_queue_closed", error = %err, "discord approval queue closed");
-                    if let Err(ack_err) = component
-                        .create_response(
-                            &ctx.http,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content(
-                                        "Failed to record the approval response. Please try again.",
-                                    )
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await
-                    {
-                        tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %ack_err, "discord approval queue failure ack failed");
-                    }
-                    return;
-                }
-                if let Err(err) = component
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::UpdateMessage(
-                            CreateInteractionResponseMessage::new()
-                                .content(rendered_message)
-                                .components(Vec::new()),
-                        ),
-                    )
-                    .await
-                {
-                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord approval interaction ack failed");
-                }
-            }
+            _ => {}
         }
     }
 }
@@ -246,6 +182,10 @@ impl Channel for DiscordChannel {
     }
 
     fn supports_approval_resolution(&self) -> bool {
+        true
+    }
+
+    fn supports_commands(&self) -> bool {
         true
     }
 
@@ -393,6 +333,213 @@ impl Channel for DiscordChannel {
             .await
             .ok_or_else(|| FrameworkError::Config("discord approval channel closed".to_owned()))
     }
+
+    async fn listen_for_command(&self) -> Result<ChannelCommand, FrameworkError> {
+        let mut rx = self.command_rx.lock().await;
+        rx.recv()
+            .await
+            .ok_or_else(|| FrameworkError::Config("discord command channel closed".to_owned()))
+    }
+}
+
+impl DiscordHandler {
+    async fn handle_slash_command(&self, ctx: &Context, command: CommandInteraction) {
+        let Some(kind) = slash_command_kind(&command.data.name) else {
+            return;
+        };
+
+        if let Err(err) = command.defer_ephemeral(&ctx.http).await {
+            tracing::warn!(
+                status = "failed",
+                error_kind = "interaction_defer",
+                error = %err,
+                command = %command.data.name,
+                "discord slash command defer failed"
+            );
+            return;
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = ChannelCommand {
+            kind,
+            source: crate::config::GatewayChannelKind::Discord,
+            channel_id: command.channel_id.get().to_string(),
+            guild_id: command.guild_id.map(|id| id.get().to_string()),
+            user_id: command.user.id.get().to_string(),
+            is_dm: command.guild_id.is_none(),
+            reply_tx,
+        };
+
+        let response = if let Err(err) = self.command_tx.send(request).await {
+            tracing::warn!(
+                status = "failed",
+                error_kind = "command_queue_closed",
+                error = %err,
+                command = %command.data.name,
+                "discord slash command queue closed"
+            );
+            fallback_response(kind, "Failed to dispatch the command.")
+        } else {
+            match timeout(Duration::from_secs(10), reply_rx).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => fallback_response(kind, "The command response channel closed."),
+                Err(_) => fallback_response(kind, "The command timed out."),
+            }
+        };
+
+        if let Err(err) = command
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new()
+                    .content(truncate_discord_response(response.message())),
+            )
+            .await
+        {
+            tracing::warn!(
+                status = "failed",
+                error_kind = "interaction_edit",
+                error = %err,
+                command = %command.data.name,
+                "discord slash command response edit failed"
+            );
+        }
+    }
+
+    async fn handle_approval_interaction(&self, ctx: &Context, component: ComponentInteraction) {
+        let Some((approval_id, decision)) = parse_approval_custom_id(&component) else {
+            return;
+        };
+        let actor_user_id = component.user.id.get().to_string();
+        let pending = self.approval_registry.pending_request(&approval_id).await;
+
+        match evaluate_approval_interaction(
+            pending,
+            actor_user_id.clone(),
+            component.channel_id.get().to_string(),
+            approval_id,
+            decision,
+        ) {
+            ApprovalInteractionResult::Inactive { message } => {
+                if let Err(err) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                {
+                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord inactive approval interaction ack failed");
+                }
+            }
+            ApprovalInteractionResult::Unauthorized {
+                message,
+                approval_id,
+                channel_id,
+                user_id,
+            } => {
+                tracing::warn!(
+                    status = "ignored",
+                    reason = "requesting_user_mismatch",
+                    approval_id,
+                    channel_id,
+                    user_id,
+                    "discord approval interaction ignored"
+                );
+                if let Err(err) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                {
+                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord unauthorized approval interaction ack failed");
+                }
+            }
+            ApprovalInteractionResult::Authorized {
+                resolution,
+                rendered_message,
+            } => {
+                if let Err(err) = self.approval_tx.send(resolution).await {
+                    tracing::warn!(status = "dropped", error_kind = "approval_queue_closed", error = %err, "discord approval queue closed");
+                    if let Err(ack_err) = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content(
+                                        "Failed to record the approval response. Please try again.",
+                                    )
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await
+                    {
+                        tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %ack_err, "discord approval queue failure ack failed");
+                    }
+                    return;
+                }
+                if let Err(err) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new()
+                                .content(rendered_message)
+                                .components(Vec::new()),
+                        ),
+                    )
+                    .await
+                {
+                    tracing::warn!(status = "failed", error_kind = "interaction_ack", error = %err, "discord approval interaction ack failed");
+                }
+            }
+        }
+    }
+}
+
+fn slash_command_kind(name: &str) -> Option<ChannelCommandKind> {
+    match name {
+        "new" => Some(ChannelCommandKind::NewSession),
+        "status" => Some(ChannelCommandKind::Status),
+        "stop" => Some(ChannelCommandKind::Stop),
+        "tools" => Some(ChannelCommandKind::Tools),
+        _ => None,
+    }
+}
+
+fn fallback_response(kind: ChannelCommandKind, message: &str) -> CommandResponse {
+    match kind {
+        ChannelCommandKind::NewSession => CommandResponse::NewSession {
+            message: message.to_owned(),
+        },
+        ChannelCommandKind::Status => CommandResponse::Status {
+            message: message.to_owned(),
+        },
+        ChannelCommandKind::Stop => CommandResponse::Stop {
+            killed_count: 0,
+            message: message.to_owned(),
+        },
+        ChannelCommandKind::Tools => CommandResponse::Tools {
+            message: message.to_owned(),
+        },
+    }
+}
+
+fn truncate_discord_response(message: &str) -> String {
+    const DISCORD_LIMIT: usize = 2_000;
+    let count = message.chars().count();
+    if count <= DISCORD_LIMIT {
+        return message.to_owned();
+    }
+
+    let truncated: String = message.chars().take(DISCORD_LIMIT - 3).collect();
+    format!("{truncated}...")
 }
 
 fn render_approval_request(request: &PendingApprovalRequest) -> String {

@@ -21,7 +21,7 @@ pub(crate) mod composition;
 mod cron_scheduler;
 mod daemon;
 mod logging;
-mod session;
+pub(crate) mod session;
 mod transparency;
 
 pub use daemon::{start_service, stop_service};
@@ -36,7 +36,6 @@ use daemon::{is_process_running, read_pid, state_paths};
 use logging::collect_log_history;
 use session::{SessionHandler, SessionWorkerCoordinator};
 
-const SESSION_WORKER_IDLE_TIMEOUT_SECS: u64 = 300;
 const INBOUND_ACK_REACTION: &str = "👀";
 const STREAMING_EDIT_INTERVAL: Duration = Duration::from_millis(1_500);
 
@@ -584,8 +583,7 @@ pub async fn run_service() -> color_eyre::Result<()> {
     let (state, mut inbound_rx) = assemble_runtime_state(&loaded, &app_paths, &deps).await?;
     let state = Arc::new(state);
     let _runtime_services = start_runtime_services(state.as_ref());
-    let coordinator =
-        SessionWorkerCoordinator::new(Duration::from_secs(SESSION_WORKER_IDLE_TIMEOUT_SECS));
+    let coordinator = state.session_coordinator.clone();
     let handler: SessionHandler<InboundMessage> = {
         let state = Arc::clone(&state);
         Arc::new(move |inbound: InboundMessage| {
@@ -1613,6 +1611,7 @@ mod tests {
                     .expect("cron store should open"),
             )),
             safe_error_reply: "safe fallback".to_owned(),
+            session_coordinator: SessionWorkerCoordinator::new(Duration::from_secs(60)),
         }
     }
 
@@ -1740,6 +1739,7 @@ mod tests {
                 .expect("cron store should open"),
             )),
             safe_error_reply: "safe fallback".to_owned(),
+            session_coordinator: SessionWorkerCoordinator::new(Duration::from_secs(60)),
         };
         let inbound = inbound_message();
 

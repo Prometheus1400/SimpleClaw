@@ -10,12 +10,7 @@ pub(super) fn route_inbound(
     inbound: ChannelInbound,
     inbound_policy: &RoutingConfig,
 ) -> Option<InboundMessage> {
-    let decision = evaluate_inbound_policy(kind, &inbound, inbound_policy);
-    let (target_agent_id, invoke) = match decision {
-        InboundDecision::Drop => return None,
-        InboundDecision::ContextOnly { agent_id } => (agent_id, false),
-        InboundDecision::Invoke { agent_id } => (agent_id, true),
-    };
+    let (target_agent_id, invoke) = resolve_route(kind, &inbound, inbound_policy)?;
 
     Some(InboundMessage {
         trace_id: crate::telemetry::next_trace_id(),
@@ -32,6 +27,19 @@ pub(super) fn route_inbound(
         invoke,
         content: inbound.content,
     })
+}
+
+pub(super) fn resolve_route(
+    kind: GatewayChannelKind,
+    inbound: &ChannelInbound,
+    inbound_policy: &RoutingConfig,
+) -> Option<(String, bool)> {
+    let decision = evaluate_inbound_policy(kind, inbound, inbound_policy);
+    match decision {
+        InboundDecision::Drop => None,
+        InboundDecision::ContextOnly { agent_id } => Some((agent_id, false)),
+        InboundDecision::Invoke { agent_id } => Some((agent_id, true)),
+    }
 }
 
 #[cfg(test)]

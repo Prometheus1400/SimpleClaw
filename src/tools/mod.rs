@@ -371,7 +371,7 @@ pub(crate) struct AgentToolEntry {
 }
 
 #[derive(Clone)]
-pub(crate) struct AgentToolRegistry {
+pub struct AgentToolRegistry {
     ordered: Vec<AgentToolEntry>,
     by_name: HashMap<String, AgentToolEntry>,
 }
