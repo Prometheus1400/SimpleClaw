@@ -368,6 +368,7 @@ pub(super) fn snapshot_to_json(snapshot: &AsyncToolRunSnapshot) -> Value {
         }),
         crate::tools::AsyncToolRunDetails::Delegated(delegated) => json!({
             "request": delegated.request,
+            "progress": truncate_for_tool_output(delegated.progress.trim(), 8_000),
             "reply": delegated.reply,
             "error": delegated.error,
         }),

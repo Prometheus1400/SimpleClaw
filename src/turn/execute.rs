@@ -85,6 +85,7 @@ impl<'a> TurnEngine<'a> {
             completion_route: Some(&completion_route),
             source_message_id: request.inbound.source_message_id.as_deref(),
             on_text_delta: request.on_text_delta,
+            on_tool_status: request.on_tool_status,
             allow_async_tools: true,
         };
 

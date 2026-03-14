@@ -293,6 +293,14 @@ impl Gateway {
             .await
     }
 
+    pub async fn begin_stream(
+        &self,
+        inbound: &InboundMessage,
+    ) -> Result<Box<dyn crate::channels::ChannelStream>, FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel.begin_stream(&inbound.channel_id).await
+    }
+
     pub fn supports_message_editing(
         &self,
         inbound: &InboundMessage,

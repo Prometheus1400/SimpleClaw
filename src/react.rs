@@ -46,6 +46,7 @@ pub struct RunParams<'a> {
     pub completion_route: Option<&'a CompletionRoute>,
     pub source_message_id: Option<&'a str>,
     pub on_text_delta: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    pub on_tool_status: Option<&'a (dyn Fn(Option<String>) + Send + Sync)>,
     pub allow_async_tools: bool,
 }
 
@@ -157,6 +158,7 @@ async fn run_loop(
             history,
             &tool_specs,
             params.on_text_delta.as_deref(),
+            params.on_tool_status.as_deref(),
         )
         .instrument(turn_span.clone())
         .await
@@ -234,6 +236,7 @@ async fn generate_provider_response(
     history: &[Message],
     tool_specs: &[crate::providers::ToolDefinition],
     on_text_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
+    on_tool_status: Option<&(dyn Fn(Option<String>) + Send + Sync)>,
 ) -> Result<ProviderResponse, FrameworkError> {
     let Some(on_text_delta) = on_text_delta else {
         return provider.generate(system_prompt, history, tool_specs).await;
@@ -249,9 +252,19 @@ async fn generate_provider_response(
         match event {
             StreamEvent::TextDelta(delta) => {
                 output_text.push_str(&delta);
-                on_text_delta(&output_text);
+                on_text_delta(&delta);
             }
-            StreamEvent::ToolCallComplete(tool_call) => tool_calls.push(tool_call),
+            StreamEvent::ToolCallDelta { name } => {
+                if let Some(on_tool_status) = on_tool_status {
+                    on_tool_status(Some(format!("Using tool `{name}`")));
+                }
+            }
+            StreamEvent::ToolCallComplete(tool_call) => {
+                if let Some(on_tool_status) = on_tool_status {
+                    on_tool_status(None);
+                }
+                tool_calls.push(tool_call);
+            }
             StreamEvent::Done => break,
             StreamEvent::Error(message) => {
                 return Err(FrameworkError::Provider(message));
@@ -447,7 +460,7 @@ mod tests {
         };
 
         let response =
-            generate_provider_response(&provider, "system", &[], &[], Some(on_text_delta.as_ref()))
+            generate_provider_response(&provider, "system", &[], &[], Some(on_text_delta.as_ref()), None)
                 .await
                 .expect("streaming response should succeed");
 
@@ -458,7 +471,7 @@ mod tests {
                 .lock()
                 .expect("test callback mutex should not be poisoned")
                 .clone(),
-            vec!["hel".to_owned(), "hello".to_owned()]
+            vec!["hel".to_owned(), "lo".to_owned()]
         );
     }
 
@@ -472,7 +485,7 @@ mod tests {
             stream_events: vec![StreamEvent::Error("boom".to_owned())],
         };
 
-        let err = generate_provider_response(&provider, "system", &[], &[], Some(&|_| {}))
+        let err = generate_provider_response(&provider, "system", &[], &[], Some(&|_| {}), None)
             .await
             .expect_err("streaming response should fail");
 

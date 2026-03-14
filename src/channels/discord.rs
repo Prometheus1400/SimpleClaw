@@ -189,6 +189,15 @@ impl Channel for DiscordChannel {
         true
     }
 
+    async fn begin_stream(&self, channel_id: &str) -> Result<Box<dyn crate::channels::ChannelStream>, FrameworkError> {
+        let parsed = parse_channel_id(channel_id)?;
+        Ok(Box::new(super::discord_stream::DiscordChannelStream::new(
+            Arc::clone(&self.http),
+            &parsed.get().to_string(),
+            self.message_char_limit().unwrap_or(2_000),
+        )))
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError> {
         let channel_id = parse_channel_id(channel_id)?;
         tracing::debug!(status = "sending", "discord send");
@@ -741,14 +750,14 @@ mod approval_tests {
     }
 }
 
-fn parse_channel_id(raw: &str) -> Result<ChannelId, FrameworkError> {
+pub(crate) fn parse_channel_id(raw: &str) -> Result<ChannelId, FrameworkError> {
     let id: u64 = raw
         .parse()
         .map_err(|_| FrameworkError::Tool(format!("invalid discord channel id: {raw}")))?;
     Ok(ChannelId::new(id))
 }
 
-fn parse_message_id(raw: &str) -> Result<MessageId, FrameworkError> {
+pub(crate) fn parse_message_id(raw: &str) -> Result<MessageId, FrameworkError> {
     let id: u64 = raw
         .parse()
         .map_err(|_| FrameworkError::Tool(format!("invalid discord message id: {raw}")))?;

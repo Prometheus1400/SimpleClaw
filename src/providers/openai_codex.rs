@@ -550,7 +550,7 @@ impl CodexStreamAccumulator {
             && let Some(item) = event.get("item")
             && let Some(tool_call) = parse_tool_call(item)
         {
-            self.record_tool_call(tool_call);
+            self.record_tool_call(tool_call, events);
         }
 
         if (event_type == Some("response.completed") || event_type == Some("response.done"))
@@ -565,23 +565,25 @@ impl CodexStreamAccumulator {
                 events.push(StreamEvent::TextDelta(text));
             }
             for tool_call in parsed.tool_calls {
-                self.record_tool_call(tool_call);
+                self.record_tool_call(tool_call, events);
             }
         }
 
         Ok(())
     }
 
-    fn record_tool_call(&mut self, tool_call: ToolCall) {
+    fn record_tool_call(&mut self, tool_call: ToolCall, events: &mut Vec<StreamEvent>) {
         if let Some(id) = tool_call.id.clone() {
             if let Some(index) = self.tool_call_indices_by_id.get(&id).copied() {
                 self.tool_calls[index] = tool_call;
             } else {
                 self.tool_call_indices_by_id
                     .insert(id, self.tool_calls.len());
+                events.push(StreamEvent::ToolCallDelta { name: tool_call.name.clone() });
                 self.tool_calls.push(tool_call);
             }
         } else {
+            events.push(StreamEvent::ToolCallDelta { name: tool_call.name.clone() });
             self.tool_calls.push(tool_call);
         }
     }
@@ -599,6 +601,7 @@ fn parse_sse_provider_response(body: &str) -> Result<ProviderResponse, Framework
     for event in events {
         match event {
             StreamEvent::TextDelta(delta) => output_text.push_str(&delta),
+            StreamEvent::ToolCallDelta { .. } => {}
             StreamEvent::ToolCallComplete(tool_call) => tool_calls.push(tool_call),
             StreamEvent::Done => {}
             StreamEvent::Error(message) => return Err(FrameworkError::Provider(message)),

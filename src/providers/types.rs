@@ -86,6 +86,7 @@ pub struct ProviderResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StreamEvent {
     TextDelta(String),
+    ToolCallDelta { name: String },
     ToolCallComplete(ToolCall),
     Done,
     Error(String),

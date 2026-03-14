@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -33,6 +33,7 @@ pub struct AgentInvokeRequest {
     pub session_id: String,
     pub user_id: String,
     pub prompt: String,
+    pub progress_log: Option<PathBuf>,
     pub approval_requester: DynApprovalRequester,
 }
 
@@ -43,6 +44,7 @@ pub struct WorkerInvokeRequest {
     pub user_id: String,
     pub prompt: String,
     pub max_steps_override: Option<u32>,
+    pub progress_log: Option<PathBuf>,
     pub approval_requester: DynApprovalRequester,
 }
 

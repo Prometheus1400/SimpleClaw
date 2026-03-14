@@ -1,6 +1,7 @@
 mod discord;
 pub(crate) mod policy;
 mod types;
+pub(crate) mod discord_stream;
 
 use async_trait::async_trait;
 use std::future::pending;
@@ -11,6 +12,13 @@ use crate::error::FrameworkError;
 use crate::gateway::ChannelCommand;
 pub use discord::DiscordChannel;
 pub use types::{ApprovalResolution, ChannelInbound, InboundMessage};
+
+#[async_trait]
+pub trait ChannelStream: Send + Sync {
+    fn push_delta(&self, delta: &str);
+    fn set_tool_status(&self, _status: Option<String>) {}
+    async fn finalize(&self, final_content: &str) -> Result<(), FrameworkError>;
+}
 
 #[async_trait]
 pub trait Channel: Send + Sync {
@@ -28,6 +36,12 @@ pub trait Channel: Send + Sync {
 
     fn supports_commands(&self) -> bool {
         false
+    }
+
+    async fn begin_stream(&self, _channel_id: &str) -> Result<Box<dyn ChannelStream>, FrameworkError> {
+        Err(FrameworkError::Tool(
+            "channel does not support streaming messages".to_owned(),
+        ))
     }
 
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError>;

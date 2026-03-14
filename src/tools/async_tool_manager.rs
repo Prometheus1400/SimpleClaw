@@ -100,6 +100,7 @@ pub struct ProcessAsyncToolRunDetails {
 #[derive(Debug, Clone)]
 pub struct DelegatedAsyncToolRunDetails {
     pub request: String,
+    pub progress: String,
     pub reply: Option<String>,
     pub error: Option<String>,
 }
@@ -270,7 +271,7 @@ impl AsyncToolRunManager {
         })
     }
 
-    pub(crate) async fn start_delegated<F>(
+    pub(crate) async fn start_delegated<F, MkF>(
         self: &Arc<Self>,
         tool_name: &str,
         request: &str,
@@ -278,13 +279,22 @@ impl AsyncToolRunManager {
         session_key: &str,
         completion_tx: Option<mpsc::Sender<InboundMessage>>,
         route: Option<CompletionRoute>,
-        future: F,
+        make_future: MkF,
     ) -> Result<StartedAsyncToolRun, FrameworkError>
     where
         F: Future<Output = Result<String, FrameworkError>> + Send + 'static,
+        MkF: FnOnce(PathBuf) -> F,
     {
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
         let run_id = format!("async-tool-run-{}-{seq}", Utc::now().timestamp_millis());
+        let base = std::env::temp_dir().join("simpleclaw_delegated");
+        std::fs::create_dir_all(&base).map_err(|e| {
+            FrameworkError::Tool(format!("delegated failed to create temp dir: {e}"))
+        })?;
+        let progress_path = base.join(format!("{run_id}.progress.log"));
+        File::create(&progress_path).map_err(|e| {
+            FrameworkError::Tool(format!("delegated failed to create progress log: {e}"))
+        })?;
         let started_at = Utc::now();
         let entry = AsyncToolRunEntry {
             tool_name: tool_name.to_owned(),
@@ -298,6 +308,7 @@ impl AsyncToolRunManager {
             process: None,
             delegated: Some(DelegatedRunState {
                 request: request.to_owned(),
+                progress_path: progress_path.clone(),
                 reply: None,
                 error: None,
             }),
@@ -309,7 +320,7 @@ impl AsyncToolRunManager {
         drop(runs);
         debug!(status = "started", "async tool run");
 
-        let join_handle = tokio::spawn(future);
+        let join_handle = tokio::spawn(make_future(progress_path));
         self.spawn_completion_watcher(
             run_id.clone(),
             CompletionHandle::Delegated(join_handle),
@@ -600,6 +611,7 @@ struct ProcessRunState {
 #[derive(Debug)]
 struct DelegatedRunState {
     request: String,
+    progress_path: PathBuf,
     reply: Option<String>,
     error: Option<String>,
 }
@@ -626,6 +638,7 @@ struct ProcessRunStateMeta {
 
 struct DelegatedRunStateMeta {
     request: String,
+    progress_path: PathBuf,
     reply: Option<String>,
     error: Option<String>,
 }
@@ -690,6 +703,7 @@ impl AsyncToolRunEntry {
                 .as_ref()
                 .map(|delegated| DelegatedRunStateMeta {
                     request: delegated.request.clone(),
+                    progress_path: delegated.progress_path.clone(),
                     reply: delegated.reply.clone(),
                     error: delegated.error.clone(),
                 }),
@@ -708,12 +722,14 @@ impl AsyncToolRunEntry {
         } else if let Some(delegated) = self.delegated.as_ref() {
             AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
                 request: delegated.request.clone(),
+                progress: read_process_output_tail(&delegated.progress_path, 32_768),
                 reply: delegated.reply.clone(),
                 error: delegated.error.clone(),
             })
         } else {
             AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
                 request: self.summary.clone(),
+                progress: String::new(),
                 reply: None,
                 error: Some("run details unavailable".to_owned()),
             })
@@ -735,6 +751,9 @@ impl AsyncToolRunEntry {
             let _ = std::fs::remove_file(&process.stdout_path);
             let _ = std::fs::remove_file(&process.stderr_path);
         }
+        if let Some(delegated) = self.delegated {
+            let _ = std::fs::remove_file(&delegated.progress_path);
+        }
     }
 }
 
@@ -751,12 +770,14 @@ impl AsyncToolRunEntryMeta {
         } else if let Some(delegated) = self.delegated {
             AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
                 request: delegated.request,
+                progress: read_process_output_tail(&delegated.progress_path, 32_768),
                 reply: delegated.reply,
                 error: delegated.error,
             })
         } else {
             AsyncToolRunDetails::Delegated(DelegatedAsyncToolRunDetails {
                 request: self.summary.clone(),
+                progress: String::new(),
                 reply: None,
                 error: Some("run details unavailable".to_owned()),
             })
@@ -881,7 +902,7 @@ mod tests {
                 "session-a",
                 None,
                 None,
-                async { Ok("done".to_owned()) },
+                |_progress_path| async { Ok("done".to_owned()) },
             )
             .await
             .expect("start delegated should succeed");
@@ -915,7 +936,7 @@ mod tests {
                 "session-a",
                 None,
                 None,
-                async {
+                |_progress_path| async {
                     sleep(Duration::from_millis(200)).await;
                     Ok("done".to_owned())
                 },
@@ -932,5 +953,45 @@ mod tests {
             err.to_string()
                 .contains("background run kind does not support kill")
         );
+    }
+
+    #[tokio::test]
+    async fn delegated_runs_expose_incremental_progress_while_running() {
+        let manager = Arc::new(AsyncToolRunManager::new());
+        let started = manager
+            .start_delegated(
+                "task",
+                "do delegated work",
+                "agent-a",
+                "session-a",
+                None,
+                None,
+                |progress_path| async move {
+                    std::fs::write(&progress_path, "step 1\nstep 2\n")
+                        .expect("progress log should be writable");
+                    sleep(Duration::from_millis(200)).await;
+                    Ok("done".to_owned())
+                },
+            )
+            .await
+            .expect("start delegated should succeed");
+
+        for _ in 0..20 {
+            let snapshot = manager
+                .get(&started.run_id)
+                .await
+                .expect("snapshot should exist");
+            if snapshot.status == AsyncToolRunStatus::Running {
+                let AsyncToolRunDetails::Delegated(details) = snapshot.details else {
+                    panic!("delegated run should return delegated details");
+                };
+                if details.progress == "step 1\nstep 2\n" {
+                    return;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("delegated run did not expose running progress in time");
     }
 }

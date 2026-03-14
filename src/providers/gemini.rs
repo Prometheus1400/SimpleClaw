@@ -359,9 +359,11 @@ impl GeminiStreamAccumulator {
                         } else {
                             self.tool_call_indices_by_id
                                 .insert(id, self.tool_calls.len());
+                            events.push(StreamEvent::ToolCallDelta { name: tool_call.name.clone() });
                             self.tool_calls.push(tool_call);
                         }
                     } else {
+                        events.push(StreamEvent::ToolCallDelta { name: tool_call.name.clone() });
                         self.tool_calls.push(tool_call);
                     }
                 }
@@ -680,6 +682,9 @@ mod tests {
             vec![
                 StreamEvent::TextDelta("hel".to_owned()),
                 StreamEvent::TextDelta("lo".to_owned()),
+                StreamEvent::ToolCallDelta {
+                    name: "clock".to_owned(),
+                },
                 StreamEvent::ToolCallComplete(ToolCall {
                     id: Some("call-1".to_owned()),
                     name: "clock".to_owned(),
@@ -711,6 +716,12 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"clock","args"
         assert_eq!(
             events,
             vec![
+                StreamEvent::ToolCallDelta {
+                    name: "clock".to_owned(),
+                },
+                StreamEvent::ToolCallDelta {
+                    name: "clock".to_owned(),
+                },
                 StreamEvent::ToolCallComplete(ToolCall {
                     id: None,
                     name: "clock".to_owned(),

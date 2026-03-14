@@ -87,6 +87,7 @@ impl AgentInvoker for DirectAgentInvoker {
             completion_route: None,
             source_message_id: None,
             on_text_delta: None,
+            on_tool_status: None,
             allow_async_tools: false,
         };
         self.react_loop
@@ -149,6 +150,7 @@ impl AgentInvoker for DirectAgentInvoker {
             completion_route: None,
             source_message_id: None,
             on_text_delta: None,
+            on_tool_status: None,
             allow_async_tools: false,
         };
         self.react_loop
@@ -439,6 +441,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "hello".to_owned(),
+                progress_log: None,
                 approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
@@ -463,6 +466,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "hello".to_owned(),
+                progress_log: None,
                 approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
@@ -489,6 +493,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "delegate this".to_owned(),
+                progress_log: None,
                 approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
@@ -519,6 +524,7 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 user_id: "user-1".to_owned(),
                 prompt: "delegate this".to_owned(),
+                progress_log: None,
                 approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
@@ -550,6 +556,7 @@ mod tests {
                 user_id: "user-1".to_owned(),
                 prompt: "do work".to_owned(),
                 max_steps_override: None,
+                progress_log: None,
                 approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await
@@ -585,6 +592,7 @@ mod tests {
                 user_id: "user-1".to_owned(),
                 prompt: "loop".to_owned(),
                 max_steps_override: Some(2),
+                progress_log: None,
                 approval_requester: Arc::new(UnavailableApprovalRequester),
             })
             .await

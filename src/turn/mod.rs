@@ -23,6 +23,7 @@ pub(crate) struct TurnRequest<'a> {
     pub inbound: &'a InboundMessage,
     pub memory_session_id: &'a str,
     pub on_text_delta: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    pub on_tool_status: Option<&'a (dyn Fn(Option<String>) + Send + Sync)>,
 }
 
 pub(crate) enum TurnDisposition {

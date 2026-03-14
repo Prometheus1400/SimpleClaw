@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::TaskToolConfig;
@@ -217,6 +218,7 @@ impl Tool for TaskTool {
                 user_id: ctx.user_id.to_owned(),
                 prompt: args.prompt.clone(),
                 max_steps_override: self.config.worker_max_steps,
+                progress_log: None,
                 approval_requester: Arc::clone(&ctx.approval_requester),
             };
             let started = ctx
@@ -228,7 +230,9 @@ impl Tool for TaskTool {
                     session_id,
                     ctx.completion_tx.cloned(),
                     ctx.completion_route.cloned(),
-                    async move {
+                    move |progress_path: PathBuf| async move {
+                        let mut request = request;
+                        request.progress_log = Some(progress_path);
                         invoker
                             .invoke_worker(request)
                             .await
@@ -247,6 +251,7 @@ impl Tool for TaskTool {
                 user_id: ctx.user_id.to_owned(),
                 prompt: args.prompt,
                 max_steps_override: self.config.worker_max_steps,
+                progress_log: None,
                 approval_requester: Arc::clone(&ctx.approval_requester),
             })
             .await?;
