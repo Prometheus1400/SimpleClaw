@@ -362,6 +362,7 @@ pub async fn run_single_gateway_roundtrip(
         secrets_path: app_base_dir.join("secrets.yaml"),
         db_path: ephemeral_paths.short_term_db_path.clone(),
         long_term_db_path: ephemeral_paths.long_term_db_path.clone(),
+        session_db_path: app_base_dir.join("db/sessions.db"),
         cron_db_path: app_base_dir.join("db/cron.db"),
         fastembed_cache_dir: ephemeral_paths.fastembed_cache_dir.clone(),
         logs_dir: app_base_dir.join("logs"),

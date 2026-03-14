@@ -52,9 +52,13 @@ flowchart LR
 ### Inbound policy and session identity
 - `InboundConfig::resolve` (`src/config.rs`): hierarchical policy resolution (global -> channel-kind -> workspace -> channel; DM override path).
 - `classify_inbound` (`src/channels/policy.rs`): computes `ingest_for_context`, `allow_invoke`, `target_agent_id`.
-- `build_session_key` (`src/gateway/session.rs`):
-  - DM: `agent:<agent_id>:main`
-  - non-DM Discord: `agent:<agent_id>:discord:<channel_id>`
+- `build_session_scope_key` (`src/gateway/session.rs`):
+  - DM scope: `agent:<agent_id>:main`
+  - non-DM Discord scope: `agent:<agent_id>:discord:<channel_id>`
+- `SessionStore` (`src/gateway/session.rs`): persists the active session id for each scope in `~/.simpleclaw/db/sessions.db`.
+- Session ids use a deterministic scope prefix plus a unique sequence suffix:
+  - `agent:<agent_id>:main:session:<n>`
+  - `agent:<agent_id>:discord:<channel_id>:session:<n>`
 
 ### Orchestration
 - `SessionWorkerCoordinator<T>` (`src/run/session.rs`): guarantees serialized processing per `session_key` and concurrency across different keys.
