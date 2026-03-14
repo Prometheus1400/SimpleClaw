@@ -41,8 +41,8 @@ pub use tools::{
     BackgroundToolConfig, ClockToolConfig, CronToolConfig, EditToolConfig, ExecToolConfig,
     ForgetToolConfig, GlobToolConfig, GrepToolConfig, ListToolConfig, MemorizeToolConfig,
     MemoryToolConfig, ReactToolConfig, ReadToolConfig, SkillsToolConfig, SummonToolConfig,
-    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WebFetchToolConfig, WebSearchProvider,
-    WebSearchToolConfig, WebSearchToolRuntimeConfig,
+    TaskToolConfig, ToolSandboxConfig, ToolsConfig, WaitToolConfig, WebFetchToolConfig,
+    WebSearchProvider, WebSearchToolConfig, WebSearchToolRuntimeConfig,
 };
 
 // Re-exports used only by test code in other modules.
@@ -647,6 +647,7 @@ channels:
                 "list".to_owned(),
                 "exec".to_owned(),
                 "background".to_owned(),
+                "wait".to_owned(),
             ]
         );
     }

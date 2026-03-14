@@ -1508,6 +1508,10 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             }),
+            wait: Some(crate::config::WaitToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
             web_search: Some(crate::config::WebSearchToolConfig {
                 enabled: false,
                 ..Default::default()
@@ -1579,6 +1583,10 @@ mod tests {
                 ..Default::default()
             }),
             background: Some(crate::config::BackgroundToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            wait: Some(crate::config::WaitToolConfig {
                 enabled: false,
                 ..Default::default()
             }),
@@ -1656,6 +1664,10 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }),
+            wait: Some(crate::config::WaitToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
             web_search: Some(crate::config::WebSearchToolConfig {
                 enabled: false,
                 ..Default::default()
@@ -1727,6 +1739,10 @@ mod tests {
             }),
             exec: Some(crate::config::ExecToolConfig::default()),
             background: Some(crate::config::BackgroundToolConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            wait: Some(crate::config::WaitToolConfig {
                 enabled: false,
                 ..Default::default()
             }),
@@ -2270,5 +2286,25 @@ mod tests {
 
         assert!(!exec.input_schema_json.contains("background"));
         assert!(!exec.description.contains("background"));
+    }
+
+    #[test]
+    fn default_factory_build_registry_includes_wait_tool() {
+        let factory = default_factory();
+        let mut config = only_background_enabled();
+        config.background = Some(crate::config::BackgroundToolConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        config.wait = Some(crate::config::WaitToolConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let active = factory
+            .build_registry(&config, &[])
+            .expect("tool registry should build");
+
+        assert!(active.get("wait").is_some());
+        assert!(active.definitions().iter().any(|tool| tool.name == "wait"));
     }
 }

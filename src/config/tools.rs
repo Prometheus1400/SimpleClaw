@@ -30,6 +30,7 @@ pub struct ToolsConfig {
     pub list: Option<ListToolConfig>,
     pub exec: Option<ExecToolConfig>,
     pub background: Option<BackgroundToolConfig>,
+    pub wait: Option<WaitToolConfig>,
     pub web_search: Option<WebSearchToolConfig>,
     pub web_fetch: Option<WebFetchToolConfig>,
     pub memory: Option<MemoryToolConfig>,
@@ -117,6 +118,9 @@ impl ToolsConfig {
         {
             names.push("background".to_owned());
         }
+        if self.wait.as_ref().map(|cfg| cfg.enabled).unwrap_or(true) {
+            names.push("wait".to_owned());
+        }
         names
     }
 
@@ -129,6 +133,7 @@ impl ToolsConfig {
             "list" => serde_json::to_value(self.list.clone().unwrap_or_default()).ok(),
             "exec" => serde_json::to_value(self.exec.clone().unwrap_or_default()).ok(),
             "background" => serde_json::to_value(self.background.clone().unwrap_or_default()).ok(),
+            "wait" => serde_json::to_value(self.wait.clone().unwrap_or_default()).ok(),
             "web_search" => Some(
                 serde_json::to_value(self.web_search.clone().unwrap_or_default().to_runtime()?)
                     .map_err(|err| {
@@ -161,6 +166,7 @@ impl ToolsConfig {
             "list" => self.list.clone().unwrap_or_default().owner_restricted,
             "exec" => self.exec.clone().unwrap_or_default().owner_restricted,
             "background" => self.background.clone().unwrap_or_default().owner_restricted,
+            "wait" => self.wait.clone().unwrap_or_default().owner_restricted,
             "web_search" => self.web_search.clone().unwrap_or_default().owner_restricted,
             "web_fetch" => self.web_fetch.clone().unwrap_or_default().owner_restricted,
             "memory" => self.memory.clone().unwrap_or_default().owner_restricted,
@@ -189,6 +195,7 @@ impl ToolsConfig {
                 "background" => {
                     next.background.get_or_insert_with(Default::default).enabled = false
                 }
+                "wait" => next.wait.get_or_insert_with(Default::default).enabled = false,
                 "web_search" => {
                     next.web_search.get_or_insert_with(Default::default).enabled = false
                 }
@@ -378,6 +385,24 @@ pub struct BackgroundToolConfig {
 }
 
 impl Default for BackgroundToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            owner_restricted: default_owner_restricted(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WaitToolConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_owner_restricted")]
+    pub owner_restricted: bool,
+}
+
+impl Default for WaitToolConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),

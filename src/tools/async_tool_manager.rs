@@ -9,8 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::process::Command;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Notify, mpsc};
 use tracing::{Instrument, debug, info_span};
 
 use crate::channels::InboundMessage;
@@ -165,6 +164,8 @@ impl AsyncToolRunManager {
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
+            completion_notify: Arc::new(Notify::new()),
+            claimed: false,
             process: Some(ProcessRunState {
                 command: command.to_owned(),
                 pid,
@@ -247,6 +248,8 @@ impl AsyncToolRunManager {
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
+            completion_notify: Arc::new(Notify::new()),
+            claimed: false,
             process: Some(ProcessRunState {
                 command: command.to_owned(),
                 pid,
@@ -295,6 +298,8 @@ impl AsyncToolRunManager {
             status: AsyncToolRunStatus::Running,
             started_at,
             finished_at: None,
+            completion_notify: Arc::new(Notify::new()),
+            claimed: false,
             process: None,
             delegated: Some(DelegatedRunState {
                 request: request.to_owned(),
@@ -393,6 +398,46 @@ impl AsyncToolRunManager {
         Ok(entry.snapshot(run_id.to_owned()))
     }
 
+    pub async fn wait_for_session(
+        &self,
+        run_ids: &[String],
+        agent_id: &str,
+        session_key: &str,
+        timeout_ms: u64,
+    ) -> Result<Vec<AsyncToolRunSnapshot>, FrameworkError> {
+        let claimed = self.claim_runs(run_ids, agent_id, session_key).await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let pending: Vec<(String, Arc<Notify>)> = claimed
+            .iter()
+            .filter(|(_, _, already_completed)| !already_completed)
+            .map(|(run_id, notify, _)| (run_id.clone(), Arc::clone(notify)))
+            .collect();
+
+        futures::future::join_all(pending.iter().map(|(_, notify)| {
+            let notify = Arc::clone(notify);
+            async move {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let _ = tokio::time::timeout(remaining, notify.notified()).await;
+            }
+        }))
+        .await;
+
+        let mut still_running = Vec::new();
+        for run_id in run_ids {
+            let snapshot = self.get_for_session(run_id, agent_id, session_key).await?;
+            if snapshot.status == AsyncToolRunStatus::Running {
+                still_running.push(run_id.clone());
+            }
+        }
+        self.unclaim_runs(&still_running).await;
+
+        let mut snapshots = Vec::with_capacity(run_ids.len());
+        for run_id in run_ids {
+            snapshots.push(self.get_for_session(run_id, agent_id, session_key).await?);
+        }
+        Ok(snapshots)
+    }
+
     fn spawn_completion_watcher(
         self: &Arc<Self>,
         run_id: String,
@@ -449,35 +494,42 @@ impl AsyncToolRunManager {
                     }
                 };
 
-                if let (Some(tx), Some(route)) = (completion_tx, route) {
-                    let msg = InboundMessage {
-                        trace_id: route.trace_id.clone(),
-                        source_channel: route.source_channel,
-                        target_agent_id: route.target_agent_id,
-                        session_key: route.session_key,
-                        source_message_id: None,
-                        channel_id: route.channel_id,
-                        guild_id: route.guild_id,
-                        is_dm: route.is_dm,
-                        user_id: "system".to_owned(),
-                        username: "system".to_owned(),
-                        mentioned_bot: false,
-                        invoke: true,
-                        content,
-                    };
-                    if let Err(err) = tx.send(msg).await {
-                        tracing::warn!(
-                            status = "failed",
-                            error_kind = "completion_send",
-                            error = %err,
-                            "failed to send async tool run completion message"
-                        );
+                if pm.should_reinject(&run_id).await {
+                    if let (Some(tx), Some(route)) = (completion_tx, route) {
+                        let msg = InboundMessage {
+                            trace_id: route.trace_id.clone(),
+                            source_channel: route.source_channel,
+                            target_agent_id: route.target_agent_id,
+                            session_key: route.session_key,
+                            source_message_id: None,
+                            channel_id: route.channel_id,
+                            guild_id: route.guild_id,
+                            is_dm: route.is_dm,
+                            user_id: "system".to_owned(),
+                            username: "system".to_owned(),
+                            mentioned_bot: false,
+                            invoke: true,
+                            content,
+                        };
+                        if let Err(err) = tx.send(msg).await {
+                            tracing::warn!(
+                                status = "failed",
+                                error_kind = "completion_send",
+                                error = %err,
+                                "failed to send async tool run completion message"
+                            );
+                        } else {
+                            debug!(status = "completed", "async tool run completion watcher");
+                        }
                     } else {
-                        debug!(status = "completed", "async tool run completion watcher");
+                        debug!(
+                            status = "completed_no_route",
+                            "async tool run completion watcher"
+                        );
                     }
                 } else {
                     debug!(
-                        status = "completed_no_route",
+                        status = "completed_claimed",
                         "async tool run completion watcher"
                     );
                 }
@@ -496,6 +548,7 @@ impl AsyncToolRunManager {
                 process.exit_code = exit_code;
             }
             entry.finished_at = Some(Utc::now());
+            entry.completion_notify.notify_waiters();
         }
     }
 
@@ -522,7 +575,54 @@ impl AsyncToolRunManager {
                     }
                 }
             }
+            entry.completion_notify.notify_waiters();
         }
+    }
+
+    async fn claim_runs(
+        &self,
+        run_ids: &[String],
+        agent_id: &str,
+        session_key: &str,
+    ) -> Result<Vec<(String, Arc<Notify>, bool)>, FrameworkError> {
+        let mut runs = self.runs.lock().await;
+        run_ids
+            .iter()
+            .map(|run_id| {
+                let entry = runs.get_mut(run_id).ok_or_else(|| {
+                    FrameworkError::Tool(format!("unknown background run_id: {run_id}"))
+                })?;
+                if !entry.belongs_to(agent_id, session_key) {
+                    return Err(FrameworkError::Tool(format!(
+                        "unknown background run_id: {run_id}"
+                    )));
+                }
+                entry.claimed = true;
+                Ok((
+                    run_id.clone(),
+                    Arc::clone(&entry.completion_notify),
+                    entry.status != AsyncToolRunStatus::Running,
+                ))
+            })
+            .collect()
+    }
+
+    async fn unclaim_runs(&self, run_ids: &[String]) {
+        let mut runs = self.runs.lock().await;
+        for run_id in run_ids {
+            if let Some(entry) = runs.get_mut(run_id)
+                && entry.status == AsyncToolRunStatus::Running
+            {
+                entry.claimed = false;
+            }
+        }
+    }
+
+    async fn should_reinject(&self, run_id: &str) -> bool {
+        let runs = self.runs.lock().await;
+        runs.get(run_id)
+            .map(|entry| !entry.claimed)
+            .unwrap_or(false)
     }
 
     async fn completion_content_for_process(&self, run_id: &str, exit_code: Option<i32>) -> String {
@@ -584,6 +684,8 @@ struct AsyncToolRunEntry {
     status: AsyncToolRunStatus,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
+    completion_notify: Arc<Notify>,
+    claimed: bool,
     process: Option<ProcessRunState>,
     delegated: Option<DelegatedRunState>,
 }
@@ -666,6 +768,7 @@ impl AsyncToolRunEntry {
         self.status = AsyncToolRunStatus::Killed;
         self.finished_at = Some(Utc::now());
         process.exit_code = Some(-1);
+        self.completion_notify.notify_waiters();
         Ok(())
     }
 
@@ -932,5 +1035,38 @@ mod tests {
             err.to_string()
                 .contains("background run kind does not support kill")
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_session_returns_completed_snapshot() {
+        let manager = Arc::new(AsyncToolRunManager::new());
+        let started = manager
+            .start_delegated(
+                "task",
+                "do delegated work",
+                "agent-a",
+                "session-a",
+                None,
+                None,
+                async {
+                    sleep(Duration::from_millis(25)).await;
+                    Ok("done".to_owned())
+                },
+            )
+            .await
+            .expect("start delegated should succeed");
+
+        let snapshots = manager
+            .wait_for_session(
+                std::slice::from_ref(&started.run_id),
+                "agent-a",
+                "session-a",
+                1_000,
+            )
+            .await
+            .expect("wait should succeed");
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].status, AsyncToolRunStatus::Completed);
     }
 }
