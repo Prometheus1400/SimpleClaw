@@ -7,16 +7,14 @@ use crate::tools::{AgentInvokeRequest, Tool, ToolExecEnv, ToolExecutionOutcome, 
 
 use super::common::parse_summon_args;
 
-const SUMMON_DESCRIPTION_WITH_BG: &str =
-    "Hand off to another agent using JSON: {agent, summary?, background?}";
-const SUMMON_DESCRIPTION_SYNC_ONLY: &str =
-    "Synchronously hand off to another agent with JSON: {agent, summary?}";
-const SUMMON_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"agent\"]}";
-const SUMMON_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}},\"required\":[\"agent\"]}";
+const SUMMON_DESCRIPTION_FALLBACK: &str = "Delegate a task to another agent. Provide a summary describing what the target agent should do.";
+const SUMMON_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\",\"description\":\"Target agent to delegate to.\"},\"summary\":{\"type\":\"string\",\"description\":\"Summary of what the target agent should do.\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"agent\"]}";
+const SUMMON_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\",\"description\":\"Target agent to delegate to.\"},\"summary\":{\"type\":\"string\",\"description\":\"Summary of what the target agent should do.\"}},\"required\":[\"agent\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SummonTool {
     config: SummonToolConfig,
+    description: String,
 }
 
 #[async_trait]
@@ -25,11 +23,11 @@ impl Tool for SummonTool {
         "summon"
     }
 
-    fn description(&self) -> &'static str {
-        if self.config.allow_background {
-            SUMMON_DESCRIPTION_WITH_BG
+    fn description(&self) -> &str {
+        if self.description.is_empty() {
+            SUMMON_DESCRIPTION_FALLBACK
         } else {
-            SUMMON_DESCRIPTION_SYNC_ONLY
+            &self.description
         }
     }
 
@@ -44,6 +42,7 @@ impl Tool for SummonTool {
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {
         self.config = serde_json::from_value(config)
             .map_err(|e| FrameworkError::Config(format!("tools.summon config is invalid: {e}")))?;
+        self.description = self.build_description();
         Ok(())
     }
 
@@ -141,6 +140,23 @@ impl Tool for SummonTool {
 impl SummonTool {
     pub(crate) fn set_allow_background(&mut self, allow_background: bool) {
         self.config.allow_background = allow_background;
+        self.description = self.build_description();
+    }
+
+    fn build_description(&self) -> String {
+        let available_agents = if self.config.allowed.is_empty() {
+            "(none configured)".to_owned()
+        } else {
+            self.config.allowed.join(", ")
+        };
+        let background = if self.config.allow_background {
+            " Background mode is available via background=true."
+        } else {
+            ""
+        };
+        format!(
+            "Delegate a task to another agent. Available agents: {available_agents}. Provide a summary describing what the target agent should do.{background}"
+        )
     }
 
     fn target_allowed(&self, target: &str) -> bool {

@@ -18,11 +18,11 @@ impl Tool for MemorizeTool {
     }
 
     fn description(&self) -> &'static str {
-        "Store durable long-term memory using JSON: {fact, kind?, importance?(1-5)}; kind one of: general|profile|preferences|project|task|constraint"
+        "Store a durable long-term fact that persists across sessions. Use this to remember user preferences, project context, or learned constraints. Semantically similar existing facts are updated in place rather than duplicated."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"general\",\"profile\",\"preferences\",\"project\",\"task\",\"constraint\"]},\"importance\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5}},\"required\":[\"fact\"]}"
+        "{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\",\"description\":\"The fact to store, as a complete sentence.\"},\"kind\":{\"type\":\"string\",\"enum\":[\"general\",\"profile\",\"preferences\",\"project\",\"task\",\"constraint\"],\"description\":\"Category. Defaults to general.\"},\"importance\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5,\"description\":\"Priority from 1 (low) to 5 (critical). Defaults to 3.\"}},\"required\":[\"fact\"]}"
     }
 
     async fn execute(

@@ -21,11 +21,11 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &'static str {
-        "Semantic query memory using JSON: {action?, query, top_k?, store?, kind?, limit?}; store one of: combined|long_term|short_term; kind one of: general|profile|preferences|project|task|constraint"
+        "Search the agent's memory for relevant context. Use action=\"query\" with a natural-language query to semantically search memories. Use action=\"list\" to enumerate stored long-term facts. Defaults: store=combined, top_k=5."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        r#"{"type":"object","properties":{"action":{"type":"string","enum":["query","list"]},"query":{"type":"string"},"top_k":{"type":"integer"},"store":{"type":"string","enum":["combined","long_term","short_term"]},"kind":{"type":"string","enum":["general","profile","preferences","project","task","constraint"]},"limit":{"type":"integer"}},"required":[]}"#
+        r#"{"type":"object","properties":{"action":{"type":"string","enum":["query","list"],"description":"query = semantic search, list = enumerate long-term facts."},"query":{"type":"string","description":"Natural-language search query. Required for query action."},"top_k":{"type":"integer","description":"Max results to return (query action)."},"store":{"type":"string","enum":["combined","long_term","short_term"],"description":"Memory store to search. Defaults to combined."},"kind":{"type":"string","enum":["general","profile","preferences","project","task","constraint"],"description":"Filter to a specific fact category."},"limit":{"type":"integer","description":"Max facts to return (list action)."}},"required":["action"]}"#
     }
 
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {

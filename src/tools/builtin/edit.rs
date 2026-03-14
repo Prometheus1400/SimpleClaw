@@ -44,7 +44,7 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Edit a file using JSON: {filePath, oldString, newString, replaceAll?}."
+        "Edit a file by replacing a specific string, or create a new file. Provide oldString and newString for search-and-replace (must match exactly one location unless replaceAll is true). To create a new file, set oldString to an empty string and newString to the file contents."
     }
 
     fn input_schema_json(&self) -> &'static str {

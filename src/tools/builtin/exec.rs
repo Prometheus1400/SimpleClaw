@@ -12,12 +12,10 @@ use super::common::{command_output_to_json, exec_shell_command, parse_exec_args}
 use super::file_access::resolve_path_for_read;
 
 const DEFAULT_SANDBOX_EXEC_TIMEOUT_SECS: u64 = 120;
-const EXEC_DESCRIPTION_WITH_BG: &str =
-    "Run local shell commands using JSON: {command, workdir?, background?}. Returns JSON string.";
-const EXEC_DESCRIPTION_SYNC_ONLY: &str =
-    "Run local shell commands using JSON: {command, workdir?}. Returns JSON string.";
-const EXEC_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
-const EXEC_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"}},\"required\":[\"command\"]}";
+const EXEC_DESCRIPTION_WITH_BG: &str = "Run a shell command in the agent workspace. Commands using network tools, writing outside the workspace, or using dynamic shell features (eval, command substitution) may require approval. Default workdir is workspace root. Set background=true to run asynchronously.";
+const EXEC_DESCRIPTION_SYNC_ONLY: &str = "Run a shell command in the agent workspace. Commands using network tools, writing outside the workspace, or using dynamic shell features (eval, command substitution) may require approval. Default workdir is workspace root.";
+const EXEC_SCHEMA_WITH_BG: &str = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Optional working directory. Defaults to the workspace root.\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}";
+const EXEC_SCHEMA_SYNC_ONLY: &str = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Optional working directory. Defaults to the workspace root.\"}},\"required\":[\"command\"]}";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecTool {
@@ -942,11 +940,11 @@ mod tests {
 
         assert_eq!(
             tool.input_schema_json(),
-            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"}},\"required\":[\"command\"]}"
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Optional working directory. Defaults to the workspace root.\"}},\"required\":[\"command\"]}"
         );
         assert_eq!(
             tool.description(),
-            "Run local shell commands using JSON: {command, workdir?}. Returns JSON string."
+            "Run a shell command in the agent workspace. Commands using network tools, writing outside the workspace, or using dynamic shell features (eval, command substitution) may require approval. Default workdir is workspace root."
         );
     }
 
@@ -961,7 +959,7 @@ mod tests {
 
         assert_eq!(
             tool.input_schema_json(),
-            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute.\"},\"workdir\":{\"type\":\"string\",\"description\":\"Optional working directory. Defaults to the workspace root.\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}"
         );
     }
 
