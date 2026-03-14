@@ -15,6 +15,7 @@ mod react;
 pub(crate) mod read;
 pub(crate) mod summon;
 pub(crate) mod task;
+mod wait;
 pub(crate) mod web_fetch;
 pub(crate) mod web_search;
 
@@ -51,5 +52,6 @@ pub(crate) fn builtin_tools() -> Vec<RegisteredTool> {
         RegisteredTool::Direct(
             std::sync::Arc::new(background::BackgroundTool::Lifecycle) as std::sync::Arc<dyn Tool>
         ),
+        RegisteredTool::Direct(std::sync::Arc::new(wait::WaitTool) as std::sync::Arc<dyn Tool>),
     ]
 }

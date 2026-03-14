@@ -321,6 +321,42 @@ pub(super) fn parse_background_args(args_json: &str) -> BackgroundArgs {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct WaitArgs {
+    pub run_ids: Vec<String>,
+    pub timeout_ms: u64,
+}
+
+pub(super) fn parse_wait_args(args_json: &str) -> WaitArgs {
+    if let Ok(value) = serde_json::from_str::<Value>(args_json) {
+        let run_ids = value
+            .get("run_ids")
+            .or_else(|| value.get("runIds"))
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let timeout_ms = value
+            .get("timeout_ms")
+            .or_else(|| value.get("timeoutMs"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30_000)
+            .clamp(1, 120_000);
+        return WaitArgs {
+            run_ids,
+            timeout_ms,
+        };
+    }
+    WaitArgs {
+        run_ids: Vec::new(),
+        timeout_ms: 30_000,
+    }
+}
+
 pub(super) async fn exec_shell_command(
     command: &str,
     workspace: Option<&std::path::Path>,
@@ -405,7 +441,7 @@ fn truncate_for_tool_output(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::{
         parse_background_args, parse_exec_args, parse_forget_args, parse_summon_args,
-        parse_task_args,
+        parse_task_args, parse_wait_args,
     };
 
     #[test]
@@ -431,6 +467,13 @@ mod tests {
         let args = parse_background_args(r#"{"action":"status","runId":"abc"}"#);
         assert_eq!(args.action, "status");
         assert_eq!(args.run_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn parse_wait_args_accepts_camel_case_and_clamps_timeout() {
+        let args = parse_wait_args(r#"{"runIds":["a","b"],"timeoutMs":999999}"#);
+        assert_eq!(args.run_ids, vec!["a", "b"]);
+        assert_eq!(args.timeout_ms, 120_000);
     }
 
     #[test]

@@ -3955,6 +3955,7 @@ dependencies = [
  "deadpool-sqlite",
  "fastembed",
  "fs2",
+ "futures",
  "glob",
  "rand 0.8.5",
  "regex",

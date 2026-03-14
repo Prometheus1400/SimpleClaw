@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::future::join_all;
 use regex::Regex;
 use serde_json::{Value, json};
 use tracing::{debug, info_span, warn};
@@ -70,21 +71,20 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     ) -> Vec<ToolExecutionResult> {
         let authorizer = DefaultToolAuthorizer;
         let executor = DefaultToolExecutor::new();
-        let mut results = Vec::with_capacity(calls.len());
-        for call in calls {
+        join_all(calls.iter().map(|call| async {
             let args_json = call.arguments.to_string();
             let args_preview: String = args_json.chars().take(200).collect();
             let tool_started = std::time::Instant::now();
-            let call_span = info_span!(
-                "tool.call",
-                tool_name = %call.name,
-                tool_args = %args_preview,
-                session_id = %session_id,
-            );
-            let _call_entered = call_span.enter();
-            debug!(status = "started", "tool call");
+            let (observation, nested_tool_calls, status) = {
+                let call_span = info_span!(
+                    "tool.call",
+                    tool_name = %call.name,
+                    tool_args = %args_preview,
+                    session_id = %session_id,
+                );
+                let _call_entered = call_span.enter();
+                debug!(status = "started", "tool call");
 
-            let (observation, nested_tool_calls, status) =
                 match active_tools.get(call.name.as_str()) {
                     Some(entry) => match authorizer.authorize(entry, tool_ctx) {
                         Ok(()) => match executor
@@ -116,7 +116,8 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                         Vec::new(),
                         ToolExecutionStatus::ToolError,
                     ),
-                };
+                }
+            };
             let elapsed_ms = tool_started.elapsed().as_millis() as u64;
             let output_preview = preview_for_log(&observation, TOOL_OUTPUT_LOG_PREVIEW_CHARS);
 
@@ -141,7 +142,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                 );
             }
 
-            results.push(ToolExecutionResult {
+            ToolExecutionResult {
                 name: call.name.clone(),
                 args_json,
                 output: observation,
@@ -149,9 +150,9 @@ pub(crate) trait ToolDispatcher: Send + Sync {
                 elapsed_ms,
                 tool_call_id: call.tool_call_id.clone(),
                 nested_tool_calls,
-            });
-        }
-        results
+            }
+        }))
+        .await
     }
 
     fn format_for_history(
