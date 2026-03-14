@@ -216,7 +216,7 @@ async fn gateway_listener_roundtrip_routes_and_processes_invoke_message() {
     assert_eq!(result.outbound_messages[0].content, "listener-reply");
     assert_eq!(
         result.memory_session_id,
-        "agent:default:discord:integration-channel"
+        "agent:default:discord:integration-channel:session:1"
     );
 
     let conn = Connection::open(&result.ephemeral_paths.short_term_db_path)
@@ -263,7 +263,7 @@ async fn gateway_listener_roundtrip_routes_context_only_when_mention_missing() {
     assert!(result.outbound_messages.is_empty());
     assert_eq!(
         result.memory_session_id,
-        "agent:default:discord:integration-channel"
+        "agent:default:discord:integration-channel:session:1"
     );
 
     let conn = Connection::open(&result.ephemeral_paths.short_term_db_path)
@@ -590,7 +590,7 @@ async fn gateway_listener_roundtrip_invokes_dm_without_requiring_mention() {
 
     assert!(result.listener_routed);
     assert_eq!(result.provider_call_count, 1);
-    assert_eq!(result.memory_session_id, "agent:default:main");
+    assert_eq!(result.memory_session_id, "agent:default:main:session:1");
     assert_eq!(result.outbound_messages.len(), 1);
     assert_eq!(result.outbound_messages[0].content, "dm-reply");
 }
