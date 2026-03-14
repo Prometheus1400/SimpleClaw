@@ -18,11 +18,11 @@ impl Tool for ForgetTool {
     }
 
     fn description(&self) -> &'static str {
-        "Prune long-term memory by semantic similarity using JSON: {query, commit?, similarity_threshold?, max_matches?, kind?}; kind one of: general|profile|preferences|project|task|constraint"
+        "Remove long-term facts by semantic similarity. Call with commit=false (default) to preview matches without deleting. Call with commit=true to permanently delete."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"commit\":{\"type\":\"boolean\"},\"similarity_threshold\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1},\"max_matches\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50},\"kind\":{\"type\":\"string\",\"enum\":[\"general\",\"profile\",\"preferences\",\"project\",\"task\",\"constraint\"]}},\"required\":[\"query\"]}"
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Natural-language query used to find matching long-term facts.\"},\"commit\":{\"type\":\"boolean\",\"description\":\"Set true to permanently delete matches. Defaults to false for preview mode.\"},\"similarity_threshold\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1,\"description\":\"Minimum semantic similarity required to match a fact.\"},\"max_matches\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50,\"description\":\"Maximum number of matching facts to return or delete.\"},\"kind\":{\"type\":\"string\",\"enum\":[\"general\",\"profile\",\"preferences\",\"project\",\"task\",\"constraint\"],\"description\":\"Restrict matching to a specific fact category.\"}},\"required\":[\"query\"]}"
     }
 
     async fn execute(

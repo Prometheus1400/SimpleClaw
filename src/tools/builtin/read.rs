@@ -44,11 +44,11 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a file or directory using JSON: {filePath, offset?, limit?}."
+        "Read the contents of a file or list a directory. Returns numbered lines. Use offset and limit to page through large files. Lines are 1-indexed; default limit is 2000."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":1},\"limit\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"filePath\"]}"
+        "{\"type\":\"object\",\"properties\":{\"filePath\":{\"type\":\"string\",\"description\":\"Absolute or workspace-relative path.\"},\"offset\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"1-indexed line number to start from. Defaults to 1.\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Max number of lines to return. Defaults to 2000.\"}},\"required\":[\"filePath\"]}"
     }
 
     fn supported_execution_kinds(&self) -> &'static [ToolExecutionKind] {

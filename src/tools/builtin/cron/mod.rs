@@ -63,11 +63,11 @@ impl Tool for CronTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage agent cron jobs using JSON: {action:create|delete|list, schedule?, description?, prompt?, guard_command?, id?, query?}. Create requires schedule, description, and prompt."
+        "Schedule, delete, or list recurring cron jobs. action=\"create\" requires schedule (cron expression), description, and prompt (message sent on trigger). Optionally set guard_command to a shell command that must exit 0 before the job fires. action=\"delete\" requires id. action=\"list\" accepts optional query filter."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"delete\",\"list\"]},\"schedule\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"},\"guard_command\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}"
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\",\"delete\",\"list\"],\"description\":\"Operation to perform: create a job, delete a job, or list jobs.\"},\"schedule\":{\"type\":\"string\",\"description\":\"Cron expression for action=create. Five-field expressions are accepted and normalized to include seconds.\"},\"description\":{\"type\":\"string\",\"description\":\"Human-readable label for action=create.\"},\"prompt\":{\"type\":\"string\",\"description\":\"Message sent when the cron job triggers. Required for action=create.\"},\"guard_command\":{\"type\":\"string\",\"description\":\"Optional shell command that must exit 0 before the job fires.\"},\"id\":{\"type\":\"string\",\"description\":\"Job identifier. Required for action=delete.\"},\"query\":{\"type\":\"string\",\"description\":\"Optional substring filter for action=list.\"}},\"required\":[\"action\"]}"
     }
 
     fn configure(&mut self, config: serde_json::Value) -> Result<(), FrameworkError> {

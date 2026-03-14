@@ -61,7 +61,7 @@ impl Tool for ListTool {
     }
 
     fn description(&self) -> &'static str {
-        "List files and directories using JSON: {path?, ignore?}."
+        "List files and directories as a tree. Recursively walks from the given path (default: workspace root). Common non-source directories are hidden by default (node_modules, .git, target, dist, build, vendor, __pycache__, .venv, etc.). Pass ignore with additional glob patterns to exclude."
     }
 
     fn input_schema_json(&self) -> &'static str {

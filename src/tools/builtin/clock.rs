@@ -16,11 +16,11 @@ impl Tool for ClockTool {
     }
 
     fn description(&self) -> &'static str {
-        "Current timestamp"
+        "Return the current UTC timestamp in RFC 3339 format."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"null\"}"
+        "{\"type\":\"object\",\"properties\":{},\"required\":[]}"
     }
 
     async fn execute(

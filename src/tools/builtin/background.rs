@@ -18,11 +18,11 @@ impl Tool for BackgroundTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage background async tool runs using JSON: {action: list|status|kill, run_id?}. Returns JSON string."
+        "Check on or manage background async tool runs. action=\"list\" shows all runs. action=\"status\" requires run_id, returns details of one run. action=\"kill\" requires run_id, terminates a run."
     }
 
     fn input_schema_json(&self) -> &'static str {
-        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"status\",\"kill\"]},\"run_id\":{\"type\":\"string\"}},\"required\":[\"action\"]}"
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list\",\"status\",\"kill\"],\"description\":\"Whether to list runs, inspect one run, or terminate one run.\"},\"run_id\":{\"type\":\"string\",\"description\":\"Required for status and kill actions.\"}},\"required\":[\"action\"]}"
     }
 
     async fn execute(
