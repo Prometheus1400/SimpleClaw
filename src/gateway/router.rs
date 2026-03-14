@@ -1,22 +1,29 @@
 use crate::channels::policy::InboundDecision;
 use crate::channels::{ChannelInbound, InboundMessage};
 use crate::config::{GatewayChannelKind, RoutingConfig};
+use crate::error::FrameworkError;
 
 use super::policy::evaluate_inbound_policy;
-use super::session::build_session_key;
+use super::session::{SessionStore, build_session_scope_key};
 
-pub(super) fn route_inbound(
+pub(super) async fn route_inbound(
     kind: GatewayChannelKind,
     inbound: ChannelInbound,
     inbound_policy: &RoutingConfig,
-) -> Option<InboundMessage> {
-    let (target_agent_id, invoke) = resolve_route(kind, &inbound, inbound_policy)?;
+    session_store: &SessionStore,
+) -> Result<Option<InboundMessage>, FrameworkError> {
+    let Some((target_agent_id, invoke)) = resolve_route(kind, &inbound, inbound_policy) else {
+        return Ok(None);
+    };
+    let scope_key =
+        build_session_scope_key(&target_agent_id, inbound.is_dm, kind, &inbound.channel_id);
+    let session_key = session_store.current_or_create(&scope_key).await?;
 
-    Some(InboundMessage {
+    Ok(Some(InboundMessage {
         trace_id: crate::telemetry::next_trace_id(),
         source_channel: kind,
         target_agent_id: target_agent_id.clone(),
-        session_key: build_session_key(&target_agent_id, inbound.is_dm, kind, &inbound.channel_id),
+        session_key,
         source_message_id: Some(inbound.message_id),
         channel_id: inbound.channel_id,
         guild_id: inbound.guild_id,
@@ -26,7 +33,7 @@ pub(super) fn route_inbound(
         mentioned_bot: inbound.mentioned_bot,
         invoke,
         content: inbound.content,
-    })
+    }))
 }
 
 pub(super) fn resolve_route(
@@ -51,9 +58,10 @@ mod tests {
     use crate::config::{
         ChannelRoutingConfig, GatewayChannelKind, InboundPolicyConfig, RoutingConfig,
     };
+    use crate::gateway::session::SessionStore;
 
-    #[test]
-    fn route_inbound_sets_policy_and_session_fields() {
+    #[tokio::test]
+    async fn route_inbound_sets_policy_and_session_fields() {
         let inbound = ChannelInbound {
             message_id: "321".to_owned(),
             channel_id: "123".to_owned(),
@@ -68,15 +76,18 @@ mod tests {
             GatewayChannelKind::Discord,
             inbound,
             &RoutingConfig::default(),
+            &SessionStore::in_memory().expect("session store should open"),
         )
+        .await
+        .expect("routing should succeed")
         .expect("message should be routed");
         assert!(message.invoke);
         assert_eq!(message.target_agent_id, "default");
-        assert_eq!(message.session_key, "agent:default:discord:123");
+        assert_eq!(message.session_key, "agent:default:discord:123:session:1");
     }
 
-    #[test]
-    fn route_inbound_drops_dm_when_policy_denies_ingest() {
+    #[tokio::test]
+    async fn route_inbound_drops_dm_when_policy_denies_ingest() {
         let inbound = ChannelInbound {
             message_id: "321".to_owned(),
             channel_id: "123".to_owned(),
@@ -101,7 +112,14 @@ mod tests {
             )]),
             ..RoutingConfig::default()
         };
-        let message = route_inbound(GatewayChannelKind::Discord, inbound, &policy);
+        let message = route_inbound(
+            GatewayChannelKind::Discord,
+            inbound,
+            &policy,
+            &SessionStore::in_memory().expect("session store should open"),
+        )
+        .await
+        .expect("routing should succeed");
         assert!(message.is_none());
     }
 }

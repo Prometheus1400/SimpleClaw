@@ -218,6 +218,7 @@ mod tests {
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: db_dir.join("short_term_memory.db"),
             long_term_db_path: db_dir.join("long_term_memory.db"),
+            session_db_path: db_dir.join("sessions.db"),
             cron_db_path: db_dir.join("cron.db"),
             fastembed_cache_dir: base_dir.join(".fastembed_cache"),
             log_path: logs_dir.join("service.log"),

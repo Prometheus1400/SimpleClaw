@@ -13,7 +13,7 @@ use crate::agent::{
 use crate::approval::ApprovalRegistry;
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::config::{AgentEntryConfig, ChannelOutputMode, GatewayChannelKind, LoadedConfig};
-use crate::gateway::Gateway;
+use crate::gateway::{Gateway, SessionStore};
 use crate::invoke::DirectAgentInvoker;
 use crate::memory::{DynMemory, MemoryStore};
 use crate::paths::AppPaths;
@@ -352,6 +352,8 @@ pub(crate) async fn assemble_runtime_state(
         Arc::clone(&directory),
         Arc::clone(&async_tool_runs),
         session_coordinator.clone(),
+        SessionStore::open(&app_paths.session_db_path)
+            .wrap_err("failed to initialize session store")?,
     ));
 
     Ok((
@@ -611,6 +613,7 @@ mod tests {
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: base_dir.join("db/short.db"),
             long_term_db_path: base_dir.join("db/long.db"),
+            session_db_path: base_dir.join("db/sessions.db"),
             cron_db_path: base_dir.join("db/cron.db"),
             fastembed_cache_dir: base_dir.join(".fastembed"),
             logs_dir: base_dir.join("logs"),
