@@ -1,6 +1,13 @@
 use crate::approval::ApprovalDecision;
 use crate::config::GatewayChannelKind;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InboundMessageKind {
+    #[default]
+    Text,
+    Voice,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChannelInbound {
     pub message_id: String,
@@ -11,6 +18,7 @@ pub struct ChannelInbound {
     pub username: String,
     pub mentioned_bot: bool,
     pub content: String,
+    pub kind: InboundMessageKind,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +37,7 @@ pub struct InboundMessage {
     pub mentioned_bot: bool,
     pub invoke: bool,
     pub content: String,
+    pub kind: InboundMessageKind,
 }
 
 #[derive(Debug, Clone)]
@@ -37,4 +46,12 @@ pub struct ApprovalResolution {
     pub decision: ApprovalDecision,
     pub channel_id: String,
     pub user_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboundVoiceMessage {
+    pub audio_bytes: Vec<u8>,
+    pub attachment_filename: String,
+    pub duration_secs: f64,
+    pub waveform: String,
 }

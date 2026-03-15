@@ -1,4 +1,5 @@
 mod agents;
+use crate::audio::AudioConfig;
 mod database;
 mod defaults;
 mod execution;
@@ -71,6 +72,8 @@ pub struct GlobalConfig {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub audio: AudioConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +96,7 @@ impl LoadedConfig {
         global.database.path = paths.db_path;
         global.database.long_term_path = paths.long_term_db_path;
         normalize::normalize_agent_directory_paths(&mut global.agents);
+        normalize::normalize_audio_paths(&mut global.audio);
         if let Some(workspace_override) = workspace_override {
             let workspace = normalize::normalize_workspace_path(workspace_override);
             let default_id = global.agents.default.clone();
@@ -115,6 +119,7 @@ impl LoadedConfig {
         )?;
         validate::validate_providers_config(&global.providers)?;
         validate::validate_agents_config(&global.agents)?;
+        validate::validate_audio_config(&global.audio)?;
         validate::reconcile_routing_default_agent(&mut global.gateway.routing, &global.agents);
         validate::validate_gateway_config(&global.gateway)?;
         validate::validate_routing_config(&global.gateway.routing)?;
@@ -214,6 +219,9 @@ mod tests {
         let logs_dir = base_dir.join("logs");
         let run_dir = base_dir.join("run");
         AppPaths {
+            venvs_dir: base_dir.join("venvs"),
+            bin_dir: base_dir.join("bin"),
+            models_dir: base_dir.join("models"),
             config_path: base_dir.join("config.yaml"),
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: db_dir.join("short_term_memory.db"),
@@ -698,6 +706,13 @@ tools:
     }
 
     #[test]
+    fn agent_config_parses_tts_mode_override() {
+        let parsed: AgentInnerConfig =
+            serde_yaml::from_str("tts_mode: auto\n").expect("valid yaml");
+        assert_eq!(parsed.tts_mode, Some(crate::audio::TtsMode::Auto));
+    }
+
+    #[test]
     fn agent_config_rejects_legacy_skills_field() {
         let parsed = serde_yaml::from_str::<AgentInnerConfig>(
             r#"
@@ -1113,6 +1128,22 @@ execution:
         unsafe {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn normalize_audio_paths_expands_home_prefix() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+        let mut audio = crate::audio::AudioConfig::default();
+        audio.transcription.model_path = PathBuf::from("~/models/whisper.bin");
+        audio.tts.piper_model = PathBuf::from("~/models/piper.onnx");
+        normalize::normalize_audio_paths(&mut audio);
+        assert_eq!(
+            audio.transcription.model_path,
+            home.join("models/whisper.bin")
+        );
+        assert_eq!(audio.tts.piper_model, home.join("models/piper.onnx"));
     }
 
     #[test]

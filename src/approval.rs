@@ -324,6 +324,7 @@ mod tests {
             mentioned_bot: false,
             invoke: true,
             content: "run it".to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         }
     }
 

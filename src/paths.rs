@@ -7,6 +7,9 @@ use crate::error::FrameworkError;
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub base_dir: PathBuf,
+    pub bin_dir: PathBuf,
+    pub models_dir: PathBuf,
+    pub venvs_dir: PathBuf,
     pub config_path: PathBuf,
     pub secrets_path: PathBuf,
     pub db_path: PathBuf,
@@ -27,12 +30,18 @@ impl AppPaths {
             )
         })?;
         let base_dir = home.join(".simpleclaw");
+        let bin_dir = base_dir.join("bin");
+        let models_dir = base_dir.join("models");
+        let venvs_dir = base_dir.join("venvs");
         let db_dir = base_dir.join("db");
         let logs_dir = base_dir.join("logs");
         let run_dir = base_dir.join("run");
         Ok(Self {
+            bin_dir,
             config_path: base_dir.join("config.yaml"),
             secrets_path: base_dir.join("secrets.yaml"),
+            models_dir,
+            venvs_dir,
             db_path: db_dir.join("short_term_memory.db"),
             long_term_db_path: db_dir.join("long_term_memory.db"),
             cron_db_path: db_dir.join("cron.db"),
@@ -60,6 +69,13 @@ impl AppPaths {
         fs::create_dir_all(&self.fastembed_cache_dir)?;
         Ok(())
     }
+
+    pub fn ensure_audio_dirs(&self) -> Result<(), FrameworkError> {
+        fs::create_dir_all(&self.bin_dir)?;
+        fs::create_dir_all(&self.models_dir)?;
+        fs::create_dir_all(&self.venvs_dir)?;
+        Ok(())
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -82,6 +98,18 @@ mod tests {
         assert_eq!(
             paths.config_path.file_name().and_then(|s| s.to_str()),
             Some("config.yaml")
+        );
+        assert_eq!(
+            paths.bin_dir.file_name().and_then(|s| s.to_str()),
+            Some("bin")
+        );
+        assert_eq!(
+            paths.models_dir.file_name().and_then(|s| s.to_str()),
+            Some("models")
+        );
+        assert_eq!(
+            paths.venvs_dir.file_name().and_then(|s| s.to_str()),
+            Some("venvs")
         );
         assert_eq!(
             paths.secrets_path.file_name().and_then(|s| s.to_str()),

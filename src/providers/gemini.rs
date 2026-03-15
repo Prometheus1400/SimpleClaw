@@ -359,11 +359,15 @@ impl GeminiStreamAccumulator {
                         } else {
                             self.tool_call_indices_by_id
                                 .insert(id, self.tool_calls.len());
-                            events.push(StreamEvent::ToolCallDelta { name: tool_call.name.clone() });
+                            events.push(StreamEvent::ToolCallDelta {
+                                name: tool_call.name.clone(),
+                            });
                             self.tool_calls.push(tool_call);
                         }
                     } else {
-                        events.push(StreamEvent::ToolCallDelta { name: tool_call.name.clone() });
+                        events.push(StreamEvent::ToolCallDelta {
+                            name: tool_call.name.clone(),
+                        });
                         self.tool_calls.push(tool_call);
                     }
                 }

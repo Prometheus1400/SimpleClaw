@@ -3,6 +3,10 @@ name = "simpleclaw"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+audio = ["dep:whisper-rs", "dep:hound"]
+
 [workspace]
 members = [
   "sandbox/common",
@@ -50,6 +54,10 @@ base64 = "0.22"
 rand = "0.8"
 sha2 = "0.10"
 fs2 = "0.4"
+whisper-rs = { version = "0.12", optional = true }
+flate2 = "1"
+tar = "0.4"
+hound = { version = "3.5", optional = true }
 
 [patch.crates-io]
 sandbox-runtime = { git = "https://github.com/Prometheus1400/sandbox-runtime-rs", rev = "8f1703f9c339ff98bd89a3c5dd27603321c43049" }

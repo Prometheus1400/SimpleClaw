@@ -16,6 +16,7 @@ use crate::config::{AgentEntryConfig, ChannelOutputMode, LoadedConfig};
 use crate::paths::AppPaths;
 use crate::reply_policy::is_no_reply;
 use crate::turn::{TurnDisposition, TurnEngine, TurnRequest, TurnRuntime};
+use crate::{audio, config::GatewayChannelKind};
 
 pub(crate) mod composition;
 mod cron_scheduler;
@@ -41,8 +42,9 @@ const INBOUND_ACK_REACTION: &str = "👀";
 async fn begin_channel_stream(
     state: &RuntimeState,
     inbound: &InboundMessage,
+    allow_streaming: bool,
 ) -> Option<Arc<dyn ChannelStream>> {
-    if state.gateway.output_mode(inbound) != ChannelOutputMode::Streaming {
+    if !allow_streaming || state.gateway.output_mode(inbound) != ChannelOutputMode::Streaming {
         return None;
     }
 
@@ -117,7 +119,13 @@ pub(crate) async fn handle_inbound_once(
     }
     tracing::debug!(status = "dispatching", "invoke inbound");
 
-    let channel_stream = begin_channel_stream(state, &inbound).await;
+    let tts_mode = runtime
+        .config()
+        .agent_config
+        .tts_mode
+        .unwrap_or(state.default_tts_mode);
+    let tts_requested = tts_mode.should_synthesize(inbound.kind) && state.synthesizer.is_some();
+    let channel_stream = begin_channel_stream(state, &inbound, !tts_requested).await;
     let on_text_delta = channel_stream.as_ref().map(|channel_stream| {
         let channel_stream = Arc::clone(channel_stream);
         Arc::new(move |text: &str| {
@@ -187,6 +195,62 @@ pub(crate) async fn handle_inbound_once(
             );
             let send_result = if let Some(channel_stream) = channel_stream.as_ref() {
                 channel_stream.finalize(&outbound).await
+            } else if tts_requested {
+                if let Some(synthesizer) = state.synthesizer.clone() {
+                    match synthesizer.synthesize(&outbound).await {
+                        Ok(audio_bytes) => {
+                            if inbound.source_channel == GatewayChannelKind::Discord {
+                                match audio::prepare_discord_voice_message(
+                                    &state.ffmpeg_binary,
+                                    &audio_bytes,
+                                )
+                                .await
+                                {
+                                    Ok(voice_message) => {
+                                        state
+                                            .gateway
+                                            .send_voice_message(&inbound, voice_message)
+                                            .await
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            status = "degraded",
+                                            error_kind = "voice_message_prepare",
+                                            error = %err,
+                                            trace_id = %inbound.trace_id,
+                                            session_id = %inbound.session_key,
+                                            "discord voice message preparation failed; falling back to text-only reply"
+                                        );
+                                        state.gateway.send_message(&inbound, &outbound).await
+                                    }
+                                }
+                            } else {
+                                state
+                                    .gateway
+                                    .send_message_with_attachment(
+                                        &inbound,
+                                        "",
+                                        audio_bytes,
+                                        synthesizer.output_filename().to_owned(),
+                                    )
+                                    .await
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                status = "degraded",
+                                error_kind = "tts_synthesis",
+                                error = %err,
+                                trace_id = %inbound.trace_id,
+                                session_id = %inbound.session_key,
+                                "tts synthesis failed; falling back to text-only reply"
+                            );
+                            state.gateway.send_message(&inbound, &outbound).await
+                        }
+                    }
+                } else {
+                    state.gateway.send_message(&inbound, &outbound).await
+                }
             } else {
                 state.gateway.send_message(&inbound, &outbound).await
             };
@@ -1084,7 +1148,9 @@ mod tests {
             &self,
             _channel_id: &str,
         ) -> Result<Box<dyn ChannelStream>, FrameworkError> {
-            self.stream_state.begin_calls.fetch_add(1, Ordering::Relaxed);
+            self.stream_state
+                .begin_calls
+                .fetch_add(1, Ordering::Relaxed);
             if self.stream_state.fail_begin.load(Ordering::Relaxed) {
                 return Err(FrameworkError::Tool(
                     "simulated begin stream failure".to_owned(),
@@ -1245,6 +1311,7 @@ mod tests {
             mentioned_bot: true,
             invoke: true,
             content: "hello".to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         }
     }
 
@@ -1326,6 +1393,9 @@ mod tests {
                     .expect("cron store should open"),
             )),
             safe_error_reply: "safe fallback".to_owned(),
+            synthesizer: None,
+            ffmpeg_binary: std::path::PathBuf::from("ffmpeg"),
+            default_tts_mode: crate::audio::TtsMode::Off,
             session_coordinator: SessionWorkerCoordinator::new(Duration::from_secs(60)),
         }
     }
@@ -1492,23 +1562,12 @@ mod tests {
             .expect("handler should succeed");
 
         assert_eq!(channel.typing_events().await.len(), 1);
-        assert_eq!(channel.finalized_streams().await, vec!["hello back".to_owned()]);
+        assert_eq!(
+            channel.finalized_streams().await,
+            vec!["hello back".to_owned()]
+        );
         assert!(channel.edits().await.is_empty());
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     #[tokio::test]
     async fn handle_inbound_once_streams_deltas_and_tool_statuses_through_channel_stream() {
@@ -1543,7 +1602,10 @@ mod tests {
             channel.streamed_statuses().await,
             vec![Some("Using tool `grep`".to_owned())]
         );
-        assert_eq!(channel.finalized_streams().await, vec!["hello world".to_owned()]);
+        assert_eq!(
+            channel.finalized_streams().await,
+            vec!["hello world".to_owned()]
+        );
         assert!(channel.outbound().await.is_empty());
     }
 

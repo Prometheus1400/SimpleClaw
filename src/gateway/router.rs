@@ -26,6 +26,7 @@ pub(super) fn route_inbound(
         mentioned_bot: inbound.mentioned_bot,
         invoke,
         content: inbound.content,
+        kind: inbound.kind,
     })
 }
 
@@ -63,6 +64,7 @@ mod tests {
             username: "kaleb".to_owned(),
             mentioned_bot: false,
             content: "hello".to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         let message = route_inbound(
             GatewayChannelKind::Discord,
@@ -86,6 +88,7 @@ mod tests {
             username: "kaleb".to_owned(),
             mentioned_bot: false,
             content: "hello".to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         let policy = RoutingConfig {
             channels: HashMap::from([(

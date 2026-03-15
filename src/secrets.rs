@@ -193,6 +193,9 @@ mod tests {
         let logs_dir = base_dir.join("logs");
         let run_dir = base_dir.join("run");
         AppPaths {
+            venvs_dir: base_dir.join("venvs"),
+            bin_dir: base_dir.join("bin"),
+            models_dir: base_dir.join("models"),
             config_path: base_dir.join("config.yaml"),
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: db_dir.join("short_term_memory.db"),

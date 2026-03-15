@@ -358,6 +358,9 @@ pub async fn run_single_gateway_roundtrip(
     fs::create_dir_all(&app_base_dir).wrap_err("failed to create app base directory")?;
     let app_paths = AppPaths {
         base_dir: app_base_dir.clone(),
+        bin_dir: app_base_dir.join("bin"),
+        models_dir: app_base_dir.join("models"),
+        venvs_dir: app_base_dir.join("venvs"),
         config_path: app_base_dir.join("config.yaml"),
         secrets_path: app_base_dir.join("secrets.yaml"),
         db_path: ephemeral_paths.short_term_db_path.clone(),
@@ -394,6 +397,7 @@ pub async fn run_single_gateway_roundtrip(
             mentioned_bot: config.mentioned_bot,
             invoke: true,
             content: config.inbound_content.clone(),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         let memory_session_id = inbound.session_key.clone();
         handle_inbound_once(&state, inbound)
@@ -482,6 +486,7 @@ async fn receive_listener_inbound(
             username: config.username.clone(),
             mentioned_bot: config.mentioned_bot,
             content: content.to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         })
         .await
         .wrap_err("failed to enqueue test inbound for gateway listener")?;
@@ -806,6 +811,7 @@ impl ChannelFactory for StaticChannelFactory {
         &self,
         _loaded: &LoadedConfig,
         _approval_registry: Arc<crate::approval::ApprovalRegistry>,
+        _transcriber: Option<Arc<dyn crate::audio::Transcriber>>,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         channels.insert(GatewayChannelKind::Discord, self.channel.clone());

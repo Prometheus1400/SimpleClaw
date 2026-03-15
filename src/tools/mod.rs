@@ -1434,6 +1434,7 @@ mod tests {
             mentioned_bot: false,
             invoke: false,
             content: String::new(),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         let memory = Box::leak(Box::new(NoopMemory));
         let env = Box::leak(Box::new(env_map));

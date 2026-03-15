@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio::time::Duration;
 
+use super::discord::{parse_channel_id, parse_message_id};
 use crate::channels::ChannelStream;
 use crate::error::FrameworkError;
-use super::discord::{parse_channel_id, parse_message_id};
 use serenity::builder::EditMessage;
 
 const STREAMING_EDIT_INTERVAL: Duration = Duration::from_millis(1_500);
@@ -59,7 +59,7 @@ impl DiscordChannelStream {
             notify: Arc::new(Notify::new()),
             tool_status: None,
         }));
-        
+
         Self { state }
     }
 }
@@ -128,9 +128,7 @@ fn active_streaming_segment(
         .map(|suffix| suffix.chars().count())
         .unwrap_or(0);
     let visible_chars = channel_limit.map_or(tail_chars, |limit| {
-        limit
-            .saturating_sub(reserved_chars)
-            .min(tail_chars)
+        limit.saturating_sub(reserved_chars).min(tail_chars)
     });
     let end = byte_index_for_char_offset(tail, visible_chars);
     let mut content = tail[..end].to_owned();
@@ -184,8 +182,6 @@ enum DiscordStreamingStateAction {
         content: String,
     },
 }
-
-
 
 fn next_streaming_display_action(
     display: &Arc<Mutex<DiscordStreamingState>>,
@@ -266,8 +262,13 @@ fn spawn_next_streaming_display_action(display: &Arc<Mutex<DiscordStreamingState
             } => {
                 let result: Result<String, FrameworkError> = async {
                     let parsed = parse_channel_id(&channel_id)?;
-                    parsed.say(&http, &content).await.map(|msg| msg.id.get().to_string()).map_err(|e: serenity::Error| FrameworkError::Tool(e.to_string()))
-                }.await;
+                    parsed
+                        .say(&http, &content)
+                        .await
+                        .map(|msg| msg.id.get().to_string())
+                        .map_err(|e: serenity::Error| FrameworkError::Tool(e.to_string()))
+                }
+                .await;
                 let mut should_retry = false;
                 {
                     let mut state = match display.lock() {
@@ -283,7 +284,6 @@ fn spawn_next_streaming_display_action(display: &Arc<Mutex<DiscordStreamingState
                             state.error_message = None;
                             should_retry = true;
                         }
-                        
 
                         Err(err) => {
                             state.error_message = Some(err.to_string());
@@ -293,7 +293,7 @@ fn spawn_next_streaming_display_action(display: &Arc<Mutex<DiscordStreamingState
                                 error_kind = "streaming_initial_send",
                                 error = %err,
                                 channel_id = %channel_id,
-                                
+
                                 "streaming initial send failed"
                             );
                         }
@@ -313,8 +313,13 @@ fn spawn_next_streaming_display_action(display: &Arc<Mutex<DiscordStreamingState
                 let result: Result<(), FrameworkError> = async {
                     let parsed = parse_channel_id(&channel_id)?;
                     let parsed_msg = parse_message_id(&message_id)?;
-                    parsed.edit_message(&http, parsed_msg, EditMessage::new().content(&content)).await.map_err(|e: serenity::Error| FrameworkError::Tool(e.to_string())).map(|_| ())
-                }.await;
+                    parsed
+                        .edit_message(&http, parsed_msg, EditMessage::new().content(&content))
+                        .await
+                        .map_err(|e: serenity::Error| FrameworkError::Tool(e.to_string()))
+                        .map(|_| ())
+                }
+                .await;
                 let mut should_retry = false;
                 {
                     let mut state = match display.lock() {
@@ -330,7 +335,7 @@ fn spawn_next_streaming_display_action(display: &Arc<Mutex<DiscordStreamingState
                             error_kind = "streaming_edit",
                             error = %err,
                             channel_id = %channel_id,
-                            
+
                             message_id = %message_id,
                             "streaming edit failed"
                         );
@@ -424,7 +429,10 @@ async fn finalize_streaming_display(
 
         if let Some((http, channel_id)) = fallback {
             let parsed_channel_id = parse_channel_id(&channel_id)?;
-            parsed_channel_id.say(&http, content).await.map_err(|e: serenity::Error| FrameworkError::Tool(e.to_string()))?;
+            parsed_channel_id
+                .say(&http, content)
+                .await
+                .map_err(|e: serenity::Error| FrameworkError::Tool(e.to_string()))?;
             return Ok(());
         }
 
@@ -461,13 +469,8 @@ mod tests {
 
     #[test]
     fn active_streaming_segment_reserves_room_for_tool_status_within_limit() {
-        let segment = active_streaming_segment(
-            &"a".repeat(1_995),
-            0,
-            Some(2_000),
-            Some("grep"),
-        )
-        .expect("segment should exist");
+        let segment = active_streaming_segment(&"a".repeat(1_995), 0, Some(2_000), Some("grep"))
+            .expect("segment should exist");
 
         assert!(segment.content.ends_with("grep..._"));
         assert!(segment.content.chars().count() <= 2_000);

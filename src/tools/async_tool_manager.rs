@@ -475,6 +475,7 @@ impl AsyncToolRunManager {
                         mentioned_bot: false,
                         invoke: true,
                         content,
+                        kind: crate::channels::InboundMessageKind::Text,
                     };
                     if let Err(err) = tx.send(msg).await {
                         tracing::warn!(

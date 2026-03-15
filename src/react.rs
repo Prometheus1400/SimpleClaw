@@ -459,10 +459,16 @@ mod tests {
             })
         };
 
-        let response =
-            generate_provider_response(&provider, "system", &[], &[], Some(on_text_delta.as_ref()), None)
-                .await
-                .expect("streaming response should succeed");
+        let response = generate_provider_response(
+            &provider,
+            "system",
+            &[],
+            &[],
+            Some(on_text_delta.as_ref()),
+            None,
+        )
+        .await
+        .expect("streaming response should succeed");
 
         assert_eq!(response.output_text.as_deref(), Some("hello"));
         assert_eq!(response.tool_calls.len(), 1);

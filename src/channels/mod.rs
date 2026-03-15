@@ -1,7 +1,7 @@
 mod discord;
+pub(crate) mod discord_stream;
 pub(crate) mod policy;
 mod types;
-pub(crate) mod discord_stream;
 
 use async_trait::async_trait;
 use std::future::pending;
@@ -11,7 +11,9 @@ use crate::error::FrameworkError;
 
 use crate::gateway::ChannelCommand;
 pub use discord::DiscordChannel;
-pub use types::{ApprovalResolution, ChannelInbound, InboundMessage};
+pub use types::{
+    ApprovalResolution, ChannelInbound, InboundMessage, InboundMessageKind, OutboundVoiceMessage,
+};
 
 #[async_trait]
 pub trait ChannelStream: Send + Sync {
@@ -38,13 +40,34 @@ pub trait Channel: Send + Sync {
         false
     }
 
-    async fn begin_stream(&self, _channel_id: &str) -> Result<Box<dyn ChannelStream>, FrameworkError> {
+    async fn begin_stream(
+        &self,
+        _channel_id: &str,
+    ) -> Result<Box<dyn ChannelStream>, FrameworkError> {
         Err(FrameworkError::Tool(
             "channel does not support streaming messages".to_owned(),
         ))
     }
 
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<(), FrameworkError>;
+    async fn send_message_with_attachment(
+        &self,
+        channel_id: &str,
+        content: &str,
+        _attachment_bytes: Vec<u8>,
+        _attachment_filename: String,
+    ) -> Result<(), FrameworkError> {
+        self.send_message(channel_id, content).await
+    }
+    async fn send_voice_message(
+        &self,
+        channel_id: &str,
+        _voice_message: OutboundVoiceMessage,
+    ) -> Result<(), FrameworkError> {
+        Err(FrameworkError::Tool(format!(
+            "channel does not support native voice messages: {channel_id}"
+        )))
+    }
     async fn send_approval_request(
         &self,
         channel_id: &str,

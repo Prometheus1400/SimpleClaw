@@ -19,6 +19,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[cfg(feature = "audio")]
+    Audio {
+        #[command(subcommand)]
+        action: AudioAction,
+    },
     System {
         #[command(subcommand)]
         action: SystemAction,
@@ -68,6 +73,30 @@ pub enum AgentAction {
         memory: MemoryMode,
         #[arg(long, value_parser = parse_limit)]
         limit: usize,
+    },
+}
+
+#[cfg(feature = "audio")]
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum AudioAction {
+    Status,
+    List,
+    Install {
+        #[command(subcommand)]
+        target: AudioInstallTarget,
+    },
+}
+
+#[cfg(feature = "audio")]
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum AudioInstallTarget {
+    Whisper {
+        #[arg(long)]
+        force: bool,
+    },
+    Piper {
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -127,6 +156,8 @@ mod tests {
     use clap::Parser;
 
     use super::{AgentAction, AuthAction, AuthProvider, Cli, Command, MemoryMode};
+    #[cfg(feature = "audio")]
+    use super::{AudioAction, AudioInstallTarget};
 
     #[test]
     fn parses_agent_memory_short() {
@@ -295,5 +326,57 @@ mod tests {
             }
             _ => panic!("expected auth logout command"),
         }
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn parses_audio_status() {
+        let cli = Cli::parse_from(["simpleclaw", "audio", "status"]);
+
+        match cli.command {
+            Some(Command::Audio {
+                action: AudioAction::Status,
+            }) => {}
+            _ => panic!("expected audio status command"),
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn parses_audio_install_whisper_force() {
+        let cli = Cli::parse_from(["simpleclaw", "audio", "install", "whisper", "--force"]);
+
+        match cli.command {
+            Some(Command::Audio {
+                action:
+                    AudioAction::Install {
+                        target: AudioInstallTarget::Whisper { force },
+                    },
+            }) => assert!(force),
+            _ => panic!("expected audio whisper install command"),
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn parses_audio_install_piper() {
+        let cli = Cli::parse_from(["simpleclaw", "audio", "install", "piper"]);
+
+        match cli.command {
+            Some(Command::Audio {
+                action:
+                    AudioAction::Install {
+                        target: AudioInstallTarget::Piper { force },
+                    },
+            }) => assert!(!force),
+            _ => panic!("expected audio piper install command"),
+        }
+    }
+
+    #[cfg(not(feature = "audio"))]
+    #[test]
+    fn rejects_audio_command_without_feature() {
+        let result = Cli::try_parse_from(["simpleclaw", "audio", "status"]);
+        assert!(result.is_err());
     }
 }

@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval};
 use tracing::{debug, warn};
 
-use crate::channels::InboundMessage;
+use crate::channels::{InboundMessage, InboundMessageKind};
 use crate::config::GatewayChannelKind;
 use crate::sandbox::{DefaultHostSandbox, HostSandbox, RunHostCommandRequest, SandboxPolicy};
 use crate::telemetry::next_trace_id;
@@ -118,6 +118,7 @@ async fn run_tick(
             mentioned_bot: false,
             invoke: true,
             content: String::new(),
+            kind: InboundMessageKind::Text,
         };
         let trace_id = inbound.trace_id.clone();
         let inbound = InboundMessage {

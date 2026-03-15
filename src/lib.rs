@@ -4,6 +4,7 @@
 
 mod agent;
 pub mod approval;
+mod audio;
 mod auth;
 mod channels;
 mod cli;
@@ -46,6 +47,8 @@ pub async fn run() -> color_eyre::Result<()> {
     init_tracing(&cli)?;
 
     match &cli.command {
+        #[cfg(feature = "audio")]
+        Some(Command::Audio { action }) => audio::cli::handle_action(action, &cli).await?,
         Some(Command::System {
             action: SystemAction::Run,
         }) => run::run_service().await?,

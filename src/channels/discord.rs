@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use reqwest::multipart::{Form, Part};
+use serde_json::json;
 use serenity::all::{
-    ButtonStyle, Command, CommandInteraction, ComponentInteraction, CreateActionRow, CreateButton,
-    CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    EditInteractionResponse, Interaction,
+    ButtonStyle, Command, CommandInteraction, ComponentInteraction, CreateActionRow,
+    CreateAttachment, CreateButton, CreateCommand, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, Interaction,
 };
 use serenity::builder::EditMessage;
 use serenity::http::Http;
@@ -18,13 +20,20 @@ use tokio::time::{Duration, sleep, timeout};
 use tracing::{Instrument, info_span};
 
 use crate::approval::{ApprovalDecision, ApprovalRegistry, PendingApprovalRequest};
-use crate::channels::{ApprovalResolution, Channel, ChannelInbound};
+use crate::audio::Transcriber;
+use crate::channels::{
+    ApprovalResolution, Channel, ChannelInbound, InboundMessageKind, OutboundVoiceMessage,
+};
 use crate::config::ChannelConfig;
 use crate::error::FrameworkError;
 use crate::gateway::{ChannelCommand, ChannelCommandKind, CommandResponse};
 
+const VOICE_TRANSCRIPTION_UNAVAILABLE_PLACEHOLDER: &str = "[Voice message received, but transcription is unavailable. Reply in text and ask the user to retry later if needed.]";
+
 pub struct DiscordChannel {
+    api_client: reqwest::Client,
     http: Arc<Http>,
+    token: String,
     inbound_rx: Mutex<mpsc::Receiver<ChannelInbound>>,
     approval_rx: Mutex<mpsc::Receiver<ApprovalResolution>>,
     command_rx: Mutex<mpsc::Receiver<ChannelCommand>>,
@@ -34,6 +43,7 @@ impl DiscordChannel {
     pub async fn from_config(
         config: &ChannelConfig,
         approval_registry: Arc<ApprovalRegistry>,
+        transcriber: Option<Arc<dyn Transcriber>>,
     ) -> Result<Self, FrameworkError> {
         let token = match config.token.clone() {
             Some(token)
@@ -68,6 +78,8 @@ impl DiscordChannel {
                 command_tx,
                 approval_registry,
                 bot_user_id: Arc::new(RwLock::new(None)),
+                http_client: reqwest::Client::new(),
+                transcriber,
             })
             .await
             .map_err(|e| {
@@ -88,7 +100,9 @@ impl DiscordChannel {
         .instrument(discord_span));
 
         Ok(Self {
+            api_client: reqwest::Client::new(),
             http,
+            token,
             inbound_rx: Mutex::new(inbound_rx),
             approval_rx: Mutex::new(approval_rx),
             command_rx: Mutex::new(command_rx),
@@ -102,6 +116,8 @@ struct DiscordHandler {
     command_tx: mpsc::Sender<ChannelCommand>,
     approval_registry: Arc<ApprovalRegistry>,
     bot_user_id: Arc<RwLock<Option<u64>>>,
+    http_client: reqwest::Client,
+    transcriber: Option<Arc<dyn Transcriber>>,
 }
 
 #[async_trait]
@@ -131,8 +147,43 @@ impl EventHandler for DiscordHandler {
     }
 
     async fn message(&self, _ctx: Context, msg: DiscordMessage) {
-        if msg.author.bot || msg.content.trim().is_empty() {
+        if msg.author.bot {
             return;
+        }
+
+        let inbound_kind = message_kind(&msg);
+        let transcription_outcome = match self.transcribe_audio_attachments(&msg).await {
+            Ok(Some(content)) => InboundTranscriptionOutcome::Transcript(content),
+            Ok(None) => InboundTranscriptionOutcome::Unavailable,
+            Err(err) => {
+                tracing::warn!(
+                    status = "degraded",
+                    error_kind = "audio_transcription",
+                    error = %err,
+                    message_id = %msg.id.get(),
+                    "discord audio transcription failed"
+                );
+                InboundTranscriptionOutcome::Unavailable
+            }
+        };
+        let Some(content) =
+            compose_inbound_content(&msg.content, inbound_kind, &transcription_outcome)
+        else {
+            return;
+        };
+        if inbound_kind == InboundMessageKind::Voice
+            && matches!(
+                transcription_outcome,
+                InboundTranscriptionOutcome::Unavailable
+            )
+            && msg.content.trim().is_empty()
+        {
+            tracing::warn!(
+                status = "degraded",
+                error_kind = "voice_transcription_unavailable",
+                message_id = %msg.id.get(),
+                "discord voice message routed with fallback placeholder"
+            );
         }
 
         let guild_id = msg.guild_id.map(|id| id.get());
@@ -151,7 +202,8 @@ impl EventHandler for DiscordHandler {
             user_id: msg.author.id.get().to_string(),
             username: message_username(&msg),
             mentioned_bot,
-            content: msg.content,
+            content,
+            kind: inbound_kind,
         };
 
         tracing::debug!(status = "received", "discord inbound received");
@@ -189,7 +241,10 @@ impl Channel for DiscordChannel {
         true
     }
 
-    async fn begin_stream(&self, channel_id: &str) -> Result<Box<dyn crate::channels::ChannelStream>, FrameworkError> {
+    async fn begin_stream(
+        &self,
+        channel_id: &str,
+    ) -> Result<Box<dyn crate::channels::ChannelStream>, FrameworkError> {
         let parsed = parse_channel_id(channel_id)?;
         Ok(Box::new(super::discord_stream::DiscordChannelStream::new(
             Arc::clone(&self.http),
@@ -206,6 +261,77 @@ impl Channel for DiscordChannel {
             .await
             .map_err(|e| FrameworkError::Config(format!("discord send failed: {e}")))?;
         tracing::debug!(status = "completed", "discord send");
+        Ok(())
+    }
+
+    async fn send_message_with_attachment(
+        &self,
+        channel_id: &str,
+        content: &str,
+        attachment_bytes: Vec<u8>,
+        attachment_filename: String,
+    ) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        let mut message = CreateMessage::new().add_file(CreateAttachment::bytes(
+            attachment_bytes,
+            attachment_filename,
+        ));
+        if !content.is_empty() {
+            message = message.content(content);
+        }
+        channel_id
+            .send_message(&self.http, message)
+            .await
+            .map_err(|e| FrameworkError::Config(format!("discord attachment send failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn send_voice_message(
+        &self,
+        channel_id: &str,
+        voice_message: OutboundVoiceMessage,
+    ) -> Result<(), FrameworkError> {
+        let channel_id = parse_channel_id(channel_id)?;
+        let endpoint = format!(
+            "https://discord.com/api/v10/channels/{}/messages",
+            channel_id.get()
+        );
+        let payload = json!({
+            "flags": serenity::model::channel::MessageFlags::IS_VOICE_MESSAGE.bits(),
+            "attachments": [{
+                "id": "0",
+                "filename": voice_message.attachment_filename,
+                "duration_secs": voice_message.duration_secs,
+                "waveform": voice_message.waveform,
+            }]
+        });
+        let audio_part = Part::bytes(voice_message.audio_bytes)
+            .file_name("voice-message.ogg")
+            .mime_str("audio/ogg")
+            .map_err(|err| {
+                FrameworkError::Tool(format!(
+                    "failed to prepare discord voice message mime metadata: {err}"
+                ))
+            })?;
+        let form = Form::new()
+            .text("payload_json", payload.to_string())
+            .part("files[0]", audio_part);
+        let response = self
+            .api_client
+            .post(endpoint)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bot {}", self.token),
+            )
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| {
+                FrameworkError::Tool(format!("discord voice message send failed: {err}"))
+            })?;
+        response.error_for_status().map_err(|err| {
+            FrameworkError::Tool(format!("discord voice message send failed: {err}"))
+        })?;
         Ok(())
     }
 
@@ -352,6 +478,52 @@ impl Channel for DiscordChannel {
 }
 
 impl DiscordHandler {
+    async fn transcribe_audio_attachments(
+        &self,
+        msg: &DiscordMessage,
+    ) -> Result<Option<String>, FrameworkError> {
+        let Some(transcriber) = self.transcriber.as_ref() else {
+            return Ok(None);
+        };
+
+        let mut transcripts = Vec::new();
+        for attachment in msg.attachments.iter().filter(is_audio_attachment) {
+            let response = self
+                .http_client
+                .get(&attachment.url)
+                .send()
+                .await
+                .map_err(|err| {
+                    FrameworkError::Tool(format!(
+                        "failed to download discord attachment '{}': {err}",
+                        attachment.filename
+                    ))
+                })?;
+            let response = response.error_for_status().map_err(|err| {
+                FrameworkError::Tool(format!(
+                    "discord attachment download failed for '{}': {err}",
+                    attachment.filename
+                ))
+            })?;
+            let bytes = response.bytes().await.map_err(|err| {
+                FrameworkError::Tool(format!(
+                    "failed to read discord attachment '{}': {err}",
+                    attachment.filename
+                ))
+            })?;
+            let transcript = transcriber
+                .transcribe(bytes.as_ref(), &attachment.filename)
+                .await?;
+            transcripts.push(transcript);
+        }
+
+        if transcripts.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(transcripts.join("\n\n")))
+        }
+    }
+
     async fn handle_slash_command(&self, ctx: &Context, command: CommandInteraction) {
         let Some(kind) = slash_command_kind(&command.data.name) else {
             return;
@@ -509,6 +681,69 @@ impl DiscordHandler {
                 }
             }
         }
+    }
+}
+
+enum InboundTranscriptionOutcome {
+    Transcript(String),
+    Unavailable,
+}
+
+fn compose_inbound_content(
+    text: &str,
+    inbound_kind: InboundMessageKind,
+    transcription: &InboundTranscriptionOutcome,
+) -> Option<String> {
+    let text = text.trim();
+    let transcription = match transcription {
+        InboundTranscriptionOutcome::Transcript(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then_some(value)
+        }
+        InboundTranscriptionOutcome::Unavailable => None,
+    };
+    match (text.is_empty(), transcription) {
+        (true, None) if inbound_kind == InboundMessageKind::Voice => {
+            Some(VOICE_TRANSCRIPTION_UNAVAILABLE_PLACEHOLDER.to_owned())
+        }
+        (true, None) => None,
+        (false, None) => Some(text.to_owned()),
+        (true, Some(transcription)) => Some(transcription.to_owned()),
+        (false, Some(transcription)) => Some(format!("{text}\n\n{transcription}")),
+    }
+}
+
+fn message_kind(msg: &DiscordMessage) -> InboundMessageKind {
+    if msg
+        .flags
+        .unwrap_or_default()
+        .contains(serenity::model::channel::MessageFlags::IS_VOICE_MESSAGE)
+    {
+        InboundMessageKind::Voice
+    } else {
+        InboundMessageKind::Text
+    }
+}
+
+fn is_audio_attachment(attachment: &&serenity::model::channel::Attachment) -> bool {
+    attachment
+        .content_type
+        .as_deref()
+        .map(|content_type| content_type.starts_with("audio/"))
+        .unwrap_or(false)
+        || has_audio_extension(&attachment.filename)
+}
+
+fn has_audio_extension(filename: &str) -> bool {
+    let Some(extension) = std::path::Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+    else {
+        return false;
+    };
+    match extension.to_ascii_lowercase().as_str() {
+        "ogg" | "mp3" | "wav" | "m4a" | "webm" => true,
+        _ => false,
     }
 }
 
@@ -868,7 +1103,11 @@ fn message_username(msg: &DiscordMessage) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{collect_bot_reaction_types, parse_reaction_type};
+    use super::{
+        InboundTranscriptionOutcome, VOICE_TRANSCRIPTION_UNAVAILABLE_PLACEHOLDER,
+        collect_bot_reaction_types, compose_inbound_content, parse_reaction_type,
+    };
+    use crate::channels::InboundMessageKind;
     use serenity::model::channel::MessageReaction;
     use serenity::model::channel::ReactionType;
     use serenity::model::id::EmojiId;
@@ -917,5 +1156,52 @@ mod tests {
                 name: Some("party".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn compose_inbound_content_routes_voice_transcript() {
+        let content = compose_inbound_content(
+            "",
+            InboundMessageKind::Voice,
+            &InboundTranscriptionOutcome::Transcript("hello there".to_owned()),
+        );
+
+        assert_eq!(content.as_deref(), Some("hello there"));
+    }
+
+    #[test]
+    fn compose_inbound_content_routes_voice_placeholder_when_transcription_unavailable() {
+        let content = compose_inbound_content(
+            "",
+            InboundMessageKind::Voice,
+            &InboundTranscriptionOutcome::Unavailable,
+        );
+
+        assert_eq!(
+            content.as_deref(),
+            Some(VOICE_TRANSCRIPTION_UNAVAILABLE_PLACEHOLDER)
+        );
+    }
+
+    #[test]
+    fn compose_inbound_content_preserves_text_when_transcription_unavailable() {
+        let content = compose_inbound_content(
+            "hello",
+            InboundMessageKind::Text,
+            &InboundTranscriptionOutcome::Unavailable,
+        );
+
+        assert_eq!(content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn compose_inbound_content_drops_empty_non_voice_without_transcript() {
+        let content = compose_inbound_content(
+            "",
+            InboundMessageKind::Text,
+            &InboundTranscriptionOutcome::Unavailable,
+        );
+
+        assert!(content.is_none());
     }
 }

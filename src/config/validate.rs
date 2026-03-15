@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
+use crate::audio::AudioConfig;
 use crate::error::FrameworkError;
 use crate::secrets::Secret;
 
@@ -254,6 +255,35 @@ pub(super) fn validate_gateway_config(gateway: &GatewayConfig) -> Result<(), Fra
         return Err(FrameworkError::Config(
             "gateway.channels must include at least one enabled channel".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_audio_config(audio: &AudioConfig) -> Result<(), FrameworkError> {
+    if audio.transcription.enabled {
+        validate_nonempty_path(
+            "audio.transcription.model_path",
+            &audio.transcription.model_path,
+        )?;
+        validate_nonempty_path(
+            "audio.transcription.ffmpeg_binary",
+            &audio.transcription.ffmpeg_binary,
+        )?;
+    }
+
+    if audio.tts.mode.is_enabled() {
+        validate_nonempty_path("audio.tts.piper_binary", &audio.tts.piper_binary)?;
+        validate_nonempty_path("audio.tts.piper_model", &audio.tts.piper_model)?;
+    }
+
+    Ok(())
+}
+
+fn validate_nonempty_path(field_path: &str, path: &std::path::Path) -> Result<(), FrameworkError> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+        return Err(FrameworkError::Config(format!(
+            "{field_path} must be non-empty when enabled"
+        )));
     }
     Ok(())
 }

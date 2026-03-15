@@ -8,7 +8,7 @@ use tracing::{Instrument, info_span};
 
 use crate::agent::AgentDirectory;
 use crate::approval::{ApprovalRegistry, PendingApprovalRequest};
-use crate::channels::{ApprovalResolution, Channel, InboundMessage};
+use crate::channels::{ApprovalResolution, Channel, InboundMessage, OutboundVoiceMessage};
 use crate::config::{ChannelOutputMode, GatewayChannelKind, RoutingConfig};
 use crate::error::FrameworkError;
 use crate::run::session::SessionWorkerCoordinator;
@@ -271,6 +271,35 @@ impl Gateway {
         channel.send_message(&inbound.channel_id, content).await
     }
 
+    pub async fn send_message_with_attachment(
+        &self,
+        inbound: &InboundMessage,
+        content: &str,
+        attachment_bytes: Vec<u8>,
+        attachment_filename: String,
+    ) -> Result<(), FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel
+            .send_message_with_attachment(
+                &inbound.channel_id,
+                content,
+                attachment_bytes,
+                attachment_filename,
+            )
+            .await
+    }
+
+    pub async fn send_voice_message(
+        &self,
+        inbound: &InboundMessage,
+        voice_message: OutboundVoiceMessage,
+    ) -> Result<(), FrameworkError> {
+        let channel = transport::channel_for_source(&self.channels, inbound.source_channel)?;
+        channel
+            .send_voice_message(&inbound.channel_id, voice_message)
+            .await
+    }
+
     pub async fn send_approval_request(
         &self,
         inbound: &InboundMessage,
@@ -373,6 +402,7 @@ impl Gateway {
             username: "system".to_owned(),
             mentioned_bot: true,
             content: format!("/{}", cmd.kind.as_str()),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         let (agent_id, _) = router::resolve_route(cmd.source, &inbound, &self.inbound_policy)?;
         let session_key =
@@ -559,6 +589,7 @@ mod tests {
             username: "kaleb".to_owned(),
             mentioned_bot: false,
             content: "hello".to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         let channel: Arc<dyn Channel> = Arc::new(SingleInboundChannel {
             inbound: Mutex::new(Some(inbound)),
@@ -592,6 +623,7 @@ mod tests {
             username: "kaleb".to_owned(),
             mentioned_bot: false,
             content: "hello".to_owned(),
+            kind: crate::channels::InboundMessageKind::Text,
         };
         struct LimitedChannel;
 

@@ -11,6 +11,7 @@ use crate::agent::{
     AgentDirectory, AgentRuntime, AgentRuntimeConfig, load_system_prompt_for_persona,
 };
 use crate::approval::ApprovalRegistry;
+use crate::audio::{Synthesizer, Transcriber, TtsMode};
 use crate::channels::{Channel, DiscordChannel, InboundMessage};
 use crate::config::{AgentEntryConfig, ChannelOutputMode, GatewayChannelKind, LoadedConfig};
 use crate::gateway::Gateway;
@@ -47,6 +48,7 @@ pub(crate) trait ChannelFactory: Send + Sync {
         &self,
         loaded: &LoadedConfig,
         approval_registry: Arc<ApprovalRegistry>,
+        transcriber: Option<Arc<dyn Transcriber>>,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>>;
 }
 
@@ -146,6 +148,7 @@ impl ChannelFactory for DefaultChannelFactory {
         &self,
         loaded: &LoadedConfig,
         approval_registry: Arc<ApprovalRegistry>,
+        transcriber: Option<Arc<dyn Transcriber>>,
     ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn Channel>>> {
         let mut channels: HashMap<GatewayChannelKind, Arc<dyn Channel>> = HashMap::new();
         for (kind, config) in &loaded.global.gateway.channels {
@@ -154,9 +157,13 @@ impl ChannelFactory for DefaultChannelFactory {
             }
             let channel: Arc<dyn Channel> = match kind {
                 GatewayChannelKind::Discord => Arc::new(
-                    DiscordChannel::from_config(config, Arc::clone(&approval_registry))
-                        .await
-                        .wrap_err("failed to initialize discord channel")?,
+                    DiscordChannel::from_config(
+                        config,
+                        Arc::clone(&approval_registry),
+                        transcriber.clone(),
+                    )
+                    .await
+                    .wrap_err("failed to initialize discord channel")?,
                 ),
             };
             channels.insert(*kind, channel);
@@ -207,6 +214,9 @@ pub(crate) struct RuntimeState {
     pub runtimes: HashMap<String, AgentRuntime>,
     pub cron_store: Arc<std::sync::Mutex<CronStore>>,
     pub safe_error_reply: String,
+    pub synthesizer: Option<Arc<dyn Synthesizer>>,
+    pub ffmpeg_binary: PathBuf,
+    pub default_tts_mode: TtsMode,
     pub session_coordinator: SessionWorkerCoordinator<InboundMessage>,
 }
 
@@ -332,10 +342,16 @@ pub(crate) async fn assemble_runtime_state(
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::channel::<InboundMessage>(1_024);
     let session_coordinator = SessionWorkerCoordinator::new(std::time::Duration::from_secs(300));
+    let transcriber = build_transcriber(loaded)
+        .await
+        .wrap_err("failed to initialize audio transcriber")?;
+    let synthesizer = build_synthesizer(loaded)
+        .await
+        .wrap_err("failed to initialize audio synthesizer")?;
 
     let channels = deps
         .channel_factory
-        .create_channels(loaded, Arc::clone(&approval_registry))
+        .create_channels(loaded, Arc::clone(&approval_registry), transcriber)
         .await?;
     let output_modes = loaded
         .global
@@ -365,10 +381,68 @@ pub(crate) async fn assemble_runtime_state(
             runtimes,
             cron_store,
             safe_error_reply: loaded.global.execution.defaults.safe_error_reply.clone(),
+            synthesizer,
+            ffmpeg_binary: loaded.global.audio.transcription.ffmpeg_binary.clone(),
+            default_tts_mode: loaded.global.audio.tts.mode,
             session_coordinator,
         },
         gateway_rx,
     ))
+}
+
+#[cfg(feature = "audio")]
+async fn build_transcriber(
+    loaded: &LoadedConfig,
+) -> color_eyre::Result<Option<Arc<dyn Transcriber>>> {
+    if !loaded.global.audio.transcription.enabled {
+        return Ok(None);
+    }
+
+    let transcriber = crate::audio::WhisperTranscriber::new(
+        loaded.global.audio.transcription.model_path.clone(),
+        loaded.global.audio.transcription.language.clone(),
+        loaded.global.audio.transcription.ffmpeg_binary.clone(),
+    )?;
+    Ok(Some(Arc::new(transcriber)))
+}
+
+#[cfg(not(feature = "audio"))]
+async fn build_transcriber(
+    loaded: &LoadedConfig,
+) -> color_eyre::Result<Option<Arc<dyn Transcriber>>> {
+    if loaded.global.audio.transcription.enabled {
+        return Err(color_eyre::eyre::eyre!(
+            "audio transcription is configured but the 'audio' feature is not enabled"
+        ));
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "audio")]
+async fn build_synthesizer(
+    loaded: &LoadedConfig,
+) -> color_eyre::Result<Option<Arc<dyn Synthesizer>>> {
+    if !loaded.global.audio.tts.mode.is_enabled() {
+        return Ok(None);
+    }
+
+    let synthesizer = crate::audio::PiperSynthesizer::new(
+        loaded.global.audio.tts.piper_binary.clone(),
+        loaded.global.audio.tts.piper_model.clone(),
+    )?;
+    Ok(Some(Arc::new(synthesizer)))
+}
+
+#[cfg(not(feature = "audio"))]
+async fn build_synthesizer(
+    loaded: &LoadedConfig,
+) -> color_eyre::Result<Option<Arc<dyn Synthesizer>>> {
+    if loaded.global.audio.tts.mode.is_enabled() {
+        return Err(color_eyre::eyre::eyre!(
+            "audio TTS is configured but the 'audio' feature is not enabled"
+        ));
+    }
+    Ok(None)
 }
 
 pub(crate) fn start_runtime_services(state: &RuntimeState) -> RuntimeServices {
@@ -573,6 +647,7 @@ mod tests {
             &self,
             _loaded: &LoadedConfig,
             _approval_registry: Arc<crate::approval::ApprovalRegistry>,
+            _transcriber: Option<Arc<dyn crate::audio::Transcriber>>,
         ) -> color_eyre::Result<HashMap<GatewayChannelKind, Arc<dyn crate::channels::Channel>>>
         {
             Ok(HashMap::new())
@@ -607,6 +682,9 @@ mod tests {
         let base_dir = temp_dir("composition_app");
         AppPaths {
             base_dir: base_dir.clone(),
+            bin_dir: base_dir.join("bin"),
+            models_dir: base_dir.join("models"),
+            venvs_dir: base_dir.join("venvs"),
             config_path: base_dir.join("config.yaml"),
             secrets_path: base_dir.join("secrets.yaml"),
             db_path: base_dir.join("db/short.db"),

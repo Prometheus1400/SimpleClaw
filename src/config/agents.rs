@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio::TtsMode;
+
 use super::defaults::{default_agent_id, default_agents_list};
 use super::execution::AgentExecutionOverrides;
 use super::tools::ToolsConfig;
@@ -42,6 +44,8 @@ pub struct AgentInnerConfig {
     pub model: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
+    pub tts_mode: Option<TtsMode>,
     #[serde(default)]
     pub execution: AgentExecutionOverrides,
     #[serde(default)]

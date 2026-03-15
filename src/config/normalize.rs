@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::audio::AudioConfig;
+
 use super::agents::AgentEntryConfig;
 use super::agents::AgentsConfig;
 
@@ -21,6 +23,14 @@ pub(super) fn normalize_agent_directory_paths(agents: &mut AgentsConfig) {
 pub(super) fn normalize_workspace_path(path: &Path) -> PathBuf {
     let expanded = expand_env_vars(&path.to_string_lossy());
     expand_home_dir(&expanded).unwrap_or_else(|| PathBuf::from(expanded))
+}
+
+pub(super) fn normalize_audio_paths(audio: &mut AudioConfig) {
+    audio.transcription.model_path = normalize_workspace_path(&audio.transcription.model_path);
+    audio.transcription.ffmpeg_binary =
+        normalize_workspace_path(&audio.transcription.ffmpeg_binary);
+    audio.tts.piper_binary = normalize_workspace_path(&audio.tts.piper_binary);
+    audio.tts.piper_model = normalize_workspace_path(&audio.tts.piper_model);
 }
 
 pub(super) fn expand_home_dir(value: &str) -> Option<PathBuf> {

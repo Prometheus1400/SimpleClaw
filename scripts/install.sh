@@ -9,13 +9,15 @@ MAIN_TARGET_DIR="${MAIN_TARGET_DIR:-$ROOT_DIR/target/install-main}"
 WASM_TARGET_DIR="${WASM_TARGET_DIR:-$ROOT_DIR/target/install-wasm}"
 BUILD_PROFILE="release"
 CARGO_PROFILE_ARGS=(--release)
+AUDIO_ENABLED=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--debug]
+Usage: $0 [--debug] [--audio]
 
 Options:
   --debug   Build and install debug artifacts instead of release.
+  --audio   Build the main binary with --features audio.
   -h, --help
 EOF
 }
@@ -25,6 +27,10 @@ while (($# > 0)); do
     --debug)
       BUILD_PROFILE="debug"
       CARGO_PROFILE_ARGS=()
+      shift
+      ;;
+    --audio)
+      AUDIO_ENABLED=1
       shift
       ;;
     -h|--help)
@@ -44,13 +50,19 @@ echo "  prefix: ${PREFIX}"
 echo "  bin dir: ${BIN_DIR}"
 echo "  wasm dir: ${WASM_DIR}"
 echo "  profile: ${BUILD_PROFILE}"
+echo "  audio: ${AUDIO_ENABLED}"
 
 mkdir -p "${BIN_DIR}" "${WASM_DIR}" "${MAIN_TARGET_DIR}" "${WASM_TARGET_DIR}"
 
 echo "Building main binary..."
+MAIN_BUILD_ARGS=()
+if [[ "${AUDIO_ENABLED}" == "1" ]]; then
+  MAIN_BUILD_ARGS+=(--features audio)
+fi
 cargo build \
   --manifest-path "${ROOT_DIR}/Cargo.toml" \
   --package simpleclaw \
+  "${MAIN_BUILD_ARGS[@]}" \
   "${CARGO_PROFILE_ARGS[@]}" \
   --locked \
   --target-dir "${MAIN_TARGET_DIR}"
