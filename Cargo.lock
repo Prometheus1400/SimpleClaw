@@ -3724,7 +3724,7 @@ dependencies = [
 [[package]]
 name = "sandbox-runtime"
 version = "0.1.1"
-source = "git+https://github.com/Prometheus1400/sandbox-runtime-rs?rev=412b8ec019756341ca51d3f2e8de938caab81e9a#412b8ec019756341ca51d3f2e8de938caab81e9a"
+source = "git+https://github.com/Prometheus1400/sandbox-runtime-rs?rev=638a43b3c9f748762047de1bb71d2b2f2f80415b#638a43b3c9f748762047de1bb71d2b2f2f80415b"
 dependencies = [
  "base64 0.22.1",
  "bytes",
