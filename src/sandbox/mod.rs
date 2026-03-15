@@ -6,8 +6,10 @@ mod wasm;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
+
+use sandbox_runtime::{SandboxError, SandboxedChild, SandboxedCommand};
+use tracing::warn;
 
 use crate::error::FrameworkError;
 
@@ -69,85 +71,68 @@ pub(crate) struct HostRunResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// Whether the sandbox violation monitor detected seatbelt denials.
+    pub sandbox_violated: bool,
 }
 
-/// Prepared host command plus sandbox manager state for later cleanup.
+/// Prepared host command ready for spawning.
 pub(crate) struct PreparedHostCommand {
-    wrapped_command: String,
-    normalized_workspace_root: PathBuf,
-    manager: Arc<sandbox_runtime::SandboxManager>,
+    command: SandboxedCommand,
 }
 
-/// Cleanup handle for a sandboxed host process.
-pub(crate) struct HostSandboxCleanup {
-    manager: Arc<sandbox_runtime::SandboxManager>,
-}
-
-/// Spawned sandboxed host process plus its cleanup handle.
+/// Spawned sandboxed host process.
 pub(crate) struct SpawnedHostCommand {
-    child: std::process::Child,
-    cleanup: HostSandboxCleanup,
+    child: SandboxedChild,
 }
 
 impl PreparedHostCommand {
-    /// Returns the wrapped shell command.
-    pub(crate) fn wrapped_command(&self) -> &str {
-        &self.wrapped_command
-    }
-
-    /// Returns the normalized workspace root to execute from.
-    pub(crate) fn normalized_workspace_root(&self) -> &std::path::Path {
-        &self.normalized_workspace_root
-    }
-
-    /// Resets the sandbox manager and frees associated runtime state.
-    pub(crate) async fn cleanup(self) {
-        self.manager.reset().await;
-    }
-
     /// Spawns the prepared command with caller-provided stdio handles.
-    pub(crate) fn spawn(
-        self,
+    pub(crate) async fn spawn(
+        mut self,
         env: &BTreeMap<String, String>,
         stdout: std::process::Stdio,
         stderr: std::process::Stdio,
     ) -> Result<SpawnedHostCommand, FrameworkError> {
-        let child = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(&self.wrapped_command)
+        let child = self
+            .command
             .envs(env)
-            .current_dir(&self.normalized_workspace_root)
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
+            .await
             .map_err(|e| {
                 FrameworkError::Tool(format!("exec failed to start sandbox runtime: {e}"))
             })?;
-        Ok(SpawnedHostCommand {
-            child,
-            cleanup: HostSandboxCleanup {
-                manager: self.manager,
-            },
-        })
-    }
-}
-
-impl HostSandboxCleanup {
-    /// Resets the sandbox manager and frees associated runtime state.
-    pub(crate) async fn cleanup(self) {
-        self.manager.reset().await;
+        Ok(SpawnedHostCommand { child })
     }
 }
 
 impl SpawnedHostCommand {
     /// Returns the child process id, if available.
-    pub(crate) fn pid(&self) -> u32 {
-        self.child.id()
+    ///
+    /// `SandboxedChild` does not expose PID; returns `None` for now.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        None
     }
 
-    /// Consumes the spawned command into its owned parts.
-    pub(crate) fn into_parts(self) -> (std::process::Child, HostSandboxCleanup) {
-        (self.child, self.cleanup)
+    /// Waits for the sandboxed process to exit, returning its exit code.
+    ///
+    /// Sandbox violations are logged but treated as a normal (non-zero) exit.
+    pub(crate) async fn wait(mut self) -> Option<i32> {
+        match self.child.wait().await {
+            Ok(status) => status.code(),
+            Err(SandboxError::ExecutionViolation(err)) => {
+                warn!(
+                    violations = err.violations.len(),
+                    "sandbox.host: process exited with sandbox violations"
+                );
+                err.status.and_then(|s| s.code())
+            }
+            Err(e) => {
+                warn!(error = %e, "sandbox.host: error waiting for sandboxed process");
+                None
+            }
+        }
     }
 }
 

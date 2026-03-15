@@ -60,4 +60,4 @@ tar = "0.4"
 hound = { version = "3.5", optional = true }
 
 [patch.crates-io]
-sandbox-runtime = { git = "https://github.com/Prometheus1400/sandbox-runtime-rs", rev = "8f1703f9c339ff98bd89a3c5dd27603321c43049" }
+sandbox-runtime = { git = "https://github.com/Prometheus1400/sandbox-runtime-rs", rev = "412b8ec019756341ca51d3f2e8de938caab81e9a" }

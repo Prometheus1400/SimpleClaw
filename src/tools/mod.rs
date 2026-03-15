@@ -1395,6 +1395,30 @@ mod tests {
         }
     }
 
+    struct ViolatingHostSandbox;
+
+    #[async_trait]
+    impl HostSandbox for ViolatingHostSandbox {
+        async fn run(
+            &self,
+            _request: RunHostCommandRequest,
+        ) -> Result<HostRunResult, FrameworkError> {
+            Ok(HostRunResult {
+                exit_code: 1,
+                sandbox_violated: true,
+                stderr: "sandbox denial".to_owned(),
+                stdout: String::new(),
+            })
+        }
+
+        async fn prepare_spawn(
+            &self,
+            _request: SpawnHostCommandRequest,
+        ) -> Result<PreparedHostCommand, FrameworkError> {
+            panic!("prepare_spawn should not be called in this test");
+        }
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2087,6 +2111,73 @@ mod tests {
             panic!("expected completed tool output");
         };
         assert!(output.output.contains("hello-from-approval"));
+        let sent = channel.sent_messages.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Approval required."));
+    }
+
+    #[tokio::test]
+    async fn exec_runtime_violation_requests_approval_before_unsandboxed_retry() {
+        let workspace = unique_temp_dir("exec_runtime_violation");
+        let approvals = Arc::new(ApprovalRegistry::new());
+        let channel = Arc::new(CaptureChannel::default());
+        let gateway = test_gateway(channel.clone());
+        let ctx = test_tool_env(
+            workspace,
+            gateway,
+            Arc::clone(&approvals),
+            BTreeMap::new(),
+        );
+        let registry = default_factory()
+            .build_registry(&only_exec_enabled(), &[])
+            .expect("tool registry should build");
+        let entry = registry
+            .get("exec")
+            .expect("exec tool should exist")
+            .clone();
+        let executor = DefaultToolExecutor::with_runtimes(
+            Arc::new(StubWasmSandbox {
+                calls: AtomicUsize::new(0),
+                stderr: String::new(),
+            }),
+            Arc::new(ViolatingHostSandbox),
+        );
+
+        let approvals_task = {
+            let approvals = Arc::clone(&approvals);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(request) = approvals.pending_requests().await.into_iter().next() {
+                        let _ = approvals
+                            .resolve(
+                                &request.approval_id,
+                                &request.requesting_user_id,
+                                ApprovalDecision::Approved,
+                            )
+                            .await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("approval request was never created");
+            })
+        };
+
+        let outcome = executor
+            .execute(
+                &entry,
+                &ctx,
+                r#"{"command":"echo hello"}"#,
+                "sess-1",
+            )
+            .await
+            .expect("approval should allow unsandboxed direct retry");
+        approvals_task.await.expect("approval task should finish");
+
+        let ToolExecutionOutcome::Completed(output) = outcome else {
+            panic!("expected completed tool output");
+        };
+        assert!(output.output.contains("hello"));
         let sent = channel.sent_messages.lock().await.clone();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].contains("Approval required."));

@@ -234,10 +234,12 @@ impl AsyncToolRunManager {
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stdout log: {e}")))?;
         let stderr_file = File::create(&stderr_path)
             .map_err(|e| FrameworkError::Tool(format!("exec failed to create stderr log: {e}")))?;
-        let spawned = prepared.spawn(env, Stdio::from(stdout_file), Stdio::from(stderr_file))?;
+        let spawned = prepared
+            .spawn(env, Stdio::from(stdout_file), Stdio::from(stderr_file))
+            .await?;
 
         let started_at = Utc::now();
-        let pid = Some(spawned.pid());
+        let pid = spawned.pid();
         let handle = CompletionHandle::HostSandboxed(spawned);
         let entry = AsyncToolRunEntry {
             tool_name: tool_name.to_owned(),
@@ -438,13 +440,7 @@ impl AsyncToolRunManager {
                         pm.completion_content_for_process(&run_id, exit_code).await
                     }
                     CompletionHandle::HostSandboxed(spawned) => {
-                        let (mut child, cleanup) = spawned.into_parts();
-                        let status = tokio::task::spawn_blocking(move || child.wait())
-                            .await
-                            .ok()
-                            .and_then(|r| r.ok());
-                        let exit_code = status.and_then(|s| s.code());
-                        cleanup.cleanup().await;
+                        let exit_code = spawned.wait().await;
                         pm.mark_process_completed(&run_id, exit_code).await;
                         pm.completion_content_for_process(&run_id, exit_code).await
                     }

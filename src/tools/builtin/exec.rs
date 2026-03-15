@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::config::ExecToolConfig;
-use crate::error::{FrameworkError, SandboxCapability};
+use crate::error::{FrameworkError, SandboxCapability, SandboxPermissionDenied};
 use crate::sandbox::{HostSandbox, RunHostCommandRequest, SandboxPolicy, SpawnHostCommandRequest};
 use crate::tools::{Tool, ToolExecEnv, ToolExecutionKind, ToolExecutionOutcome, ToolRunOutput};
 
@@ -206,7 +206,7 @@ impl ExecTool {
         let command = plan.command.clone();
         let output = match runtime
             .run(RunHostCommandRequest {
-                command,
+                command: command.clone(),
                 workspace_root: plan.workdir,
                 policy: self.sandbox_policy(),
                 env: plan.env,
@@ -220,6 +220,17 @@ impl ExecTool {
             Ok(output) => output,
             Err(err) => return Err(err),
         };
+        if output.exit_code != 0 && output.sandbox_violated {
+            return Err(FrameworkError::sandbox_permission_denied(
+                SandboxPermissionDenied {
+                    tool_name: "exec".to_owned(),
+                    execution_kind: "host_sandbox".to_owned(),
+                    capability: SandboxCapability::Write,
+                    target: command,
+                    diagnostic: output.stderr,
+                },
+            ));
+        }
         Ok(ToolExecutionOutcome::Completed(ToolRunOutput::plain(
             command_output_to_json(output.exit_code, &output.stdout, &output.stderr).to_string(),
         )))
