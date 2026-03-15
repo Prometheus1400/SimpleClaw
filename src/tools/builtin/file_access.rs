@@ -1,4 +1,6 @@
-use sandbox_common::{normalize_absolute_path, persona_relative_path_allowed};
+use sandbox_common::{
+    EXTRA_ROOT_PREFIX, normalize_absolute_path, persona_relative_path_allowed,
+};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +61,54 @@ pub(crate) fn classify_wasm_tool_error(
     ))
 }
 
+fn all_extra_paths(sandbox: &ToolSandboxConfig) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = sandbox
+        .extra_readable_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    for path in &sandbox.extra_writable_paths {
+        let p = PathBuf::from(path);
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    roots
+}
+
+fn remap_guest_path_to_host(
+    host_path: &Path,
+    workspace_root: &Path,
+    persona_root: &Path,
+    sandbox: &ToolSandboxConfig,
+) -> Option<PathBuf> {
+    let path_str = host_path.to_str()?;
+
+    let ws_prefix = workspace_guest_mount_path();
+    if let Some(rest) = path_str.strip_prefix(ws_prefix) {
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        return Some(workspace_root.join(rest));
+    }
+
+    let persona_prefix = persona_guest_mount_path();
+    if let Some(rest) = path_str.strip_prefix(persona_prefix) {
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        return Some(persona_root.join(rest));
+    }
+
+    if let Some(rest) = path_str.strip_prefix(EXTRA_ROOT_PREFIX) {
+        let slash_pos = rest.find('/')?;
+        let index_str = &rest[..slash_pos];
+        let index: usize = index_str.parse().ok()?;
+        let extra_roots = all_extra_paths(sandbox);
+        let root = extra_roots.get(index)?;
+        let remainder = &rest[slash_pos + 1..];
+        return Some(root.join(remainder));
+    }
+
+    None
+}
+
 pub(crate) fn classify_file_tool_access(
     host_path: &Path,
     workspace_root: &Path,
@@ -66,6 +116,9 @@ pub(crate) fn classify_file_tool_access(
     sandbox: &ToolSandboxConfig,
     capability: SandboxCapability,
 ) -> Result<FileToolRoute, FrameworkError> {
+    let host_path =
+        &remap_guest_path_to_host(host_path, workspace_root, persona_root, sandbox)
+            .unwrap_or_else(|| host_path.to_path_buf());
     let workspace_absolute = normalize_workspace_root(workspace_root)?;
     let normalized_workspace = normalize_absolute_path(&workspace_absolute);
     let normalized_path = normalize_absolute_path(host_path);
@@ -514,6 +567,74 @@ mod tests {
                 if guest_path == "/__extra/0/docs/file.txt"
                     && preopened_dirs.len() == 1
                     && preopened_dirs[0].guest_path == "/__extra/0"
+        ));
+    }
+
+    #[test]
+    fn guest_workspace_path_roundtrips_to_sandboxed() {
+        let workspace = Path::new("/tmp/ws");
+        let persona = Path::new("/tmp/persona");
+        let guest_input = Path::new("/workspace/src/main.rs");
+
+        let route = classify_file_tool_access(
+            guest_input,
+            workspace,
+            persona,
+            &ToolSandboxConfig::default(),
+            SandboxCapability::Read,
+        )
+        .expect("guest workspace path should roundtrip");
+        assert!(matches!(
+            route,
+            FileToolRoute::Sandboxed { guest_path, .. }
+                if guest_path == "/workspace/src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn guest_persona_path_roundtrips_to_sandboxed() {
+        let workspace = Path::new("/tmp/ws");
+        let persona = Path::new("/tmp/persona");
+        let guest_input = Path::new("/persona/AGENT.md");
+
+        let route = classify_file_tool_access(
+            guest_input,
+            workspace,
+            persona,
+            &ToolSandboxConfig::default(),
+            SandboxCapability::Read,
+        )
+        .expect("guest persona path should roundtrip");
+        assert!(matches!(
+            route,
+            FileToolRoute::Sandboxed { guest_path, .. }
+                if guest_path == "/persona/AGENT.md"
+        ));
+    }
+
+    #[test]
+    fn guest_extra_path_roundtrips_to_sandboxed() {
+        let workspace = Path::new("/tmp/ws");
+        let persona = Path::new("/tmp/persona");
+        let extra_root = Path::new("/tmp/extra_docs");
+        let guest_input = Path::new("/__extra/0/docs/file.txt");
+        let sandbox = ToolSandboxConfig {
+            extra_readable_paths: vec![extra_root.display().to_string()],
+            ..ToolSandboxConfig::default()
+        };
+
+        let route = classify_file_tool_access(
+            guest_input,
+            workspace,
+            persona,
+            &sandbox,
+            SandboxCapability::Read,
+        )
+        .expect("guest extra path should roundtrip");
+        assert!(matches!(
+            route,
+            FileToolRoute::Sandboxed { guest_path, .. }
+                if guest_path == "/__extra/0/docs/file.txt"
         ));
     }
 }

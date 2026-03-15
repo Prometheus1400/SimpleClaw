@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 const PREVIEW_CHARS: usize = 1_000;
 pub const WORKSPACE_ROOT: &str = "/workspace";
 pub const PERSONA_ROOT: &str = "/persona";
+pub const EXTRA_ROOT_PREFIX: &str = "/__extra/";
 const PROMPT_FILES: &[&str] = &["IDENTITY.md", "AGENT.md", "USER.md", "MEMORY.md", "SOUL.md"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +67,17 @@ pub fn resolve_guest_path(raw_path: &str) -> Result<PathBuf, String> {
 
     if normalized.starts_with(Path::new(PERSONA_ROOT)) && guest_persona_path_allowed(&normalized) {
         return Ok(normalized);
+    }
+
+    if let Some(rest) = normalized
+        .to_str()
+        .and_then(|s| s.strip_prefix(EXTRA_ROOT_PREFIX))
+    {
+        let index_end = rest.find('/').unwrap_or(rest.len());
+        let index_str = &rest[..index_end];
+        if !index_str.is_empty() && index_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(normalized);
+        }
     }
 
     Err(format!(
@@ -401,6 +413,34 @@ mod tests {
         )));
         assert!(!persona_relative_path_allowed(Path::new("notes.txt")));
         assert!(!persona_relative_path_allowed(Path::new("nested/AGENT.md")));
+    }
+
+    #[test]
+    fn resolve_guest_path_allows_extra_with_numeric_index() {
+        let resolved =
+            resolve_guest_path("/__extra/0/docs/file.txt").expect("extra path should resolve");
+        assert_eq!(resolved, Path::new("/__extra/0/docs/file.txt"));
+    }
+
+    #[test]
+    fn resolve_guest_path_allows_extra_with_higher_index() {
+        let resolved =
+            resolve_guest_path("/__extra/2/nested/path.rs").expect("extra path should resolve");
+        assert_eq!(resolved, Path::new("/__extra/2/nested/path.rs"));
+    }
+
+    #[test]
+    fn resolve_guest_path_denies_extra_with_non_numeric_index() {
+        let err = resolve_guest_path("/__extra/notanum/file.txt")
+            .expect_err("non-numeric index should be denied");
+        assert!(err.contains("path denied by sandbox"));
+    }
+
+    #[test]
+    fn resolve_guest_path_denies_extra_prefix_lookalike() {
+        let err = resolve_guest_path("/__extrafoo/0/file.txt")
+            .expect_err("lookalike prefix should be denied");
+        assert!(err.contains("path denied by sandbox"));
     }
 
     #[test]

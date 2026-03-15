@@ -702,9 +702,11 @@ impl ToolAuthorizer for DefaultToolAuthorizer {
         if ctx.is_owner() {
             return Ok(());
         }
-        Err(FrameworkError::Tool(
-            "permission denied: this tool is restricted to the owner".to_owned(),
-        ))
+        Err(FrameworkError::Tool(format!(
+            "permission denied: tool '{}' is restricted to the persona owner (caller='{}'). Only the persona owner can invoke this tool.",
+            entry.tool.name(),
+            ctx.user_id,
+        )))
     }
 }
 
