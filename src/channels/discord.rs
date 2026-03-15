@@ -90,11 +90,26 @@ impl DiscordChannel {
 
         let discord_span = info_span!("channel.discord");
         tokio::spawn(async move {
+            tracing::info!(status = "connecting", "discord gateway connecting");
             loop {
-                if let Err(err) = client.start_autosharded().await {
-                    tracing::error!(status = "retrying", error_kind = "gateway_exit", error = %err, "discord gateway exited");
-                    sleep(Duration::from_secs(5)).await;
+                match client.start_autosharded().await {
+                    Ok(()) => {
+                        tracing::warn!(
+                            status = "disconnected",
+                            error_kind = "gateway_clean_exit",
+                            "discord gateway closed cleanly; reconnecting"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            status = "retrying",
+                            error_kind = "gateway_exit",
+                            error = %err,
+                            "discord gateway exited"
+                        );
+                    }
                 }
+                sleep(Duration::from_secs(5)).await;
             }
         }
         .instrument(discord_span));
@@ -123,6 +138,11 @@ struct DiscordHandler {
 #[async_trait]
 impl EventHandler for DiscordHandler {
     async fn ready(&self, ctx: Context, ready: serenity::model::gateway::Ready) {
+        tracing::info!(
+            bot_user = %ready.user.name,
+            guild_count = ready.guilds.len(),
+            "discord bot connected and ready"
+        );
         let mut bot_user_id = self.bot_user_id.write().await;
         *bot_user_id = Some(ready.user.id.get());
 

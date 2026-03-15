@@ -171,12 +171,43 @@ fn summarize_gemini_error_body(body: &str) -> String {
     preview_text(trimmed, ERROR_BODY_PREVIEW_CHARS)
 }
 
+fn strip_unsupported_schema_fields(mut value: Value) -> Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("additionalProperties");
+
+        if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
+            let keys: Vec<String> = props.keys().cloned().collect();
+            for key in keys {
+                if let Some(v) = props.remove(&key) {
+                    props.insert(key, strip_unsupported_schema_fields(v));
+                }
+            }
+        }
+
+        if let Some(items) = obj.remove("items") {
+            obj.insert("items".to_string(), strip_unsupported_schema_fields(items));
+        }
+
+        for keyword in &["anyOf", "oneOf", "allOf"] {
+            if let Some(arr) = obj.remove(*keyword) {
+                if let Value::Array(entries) = arr {
+                    let cleaned: Vec<Value> =
+                        entries.into_iter().map(strip_unsupported_schema_fields).collect();
+                    obj.insert(keyword.to_string(), Value::Array(cleaned));
+                }
+            }
+        }
+    }
+    value
+}
+
 fn build_request_body(system_prompt: &str, history: &[Message], tools: &[ToolDefinition]) -> Value {
     let function_declarations: Vec<Value> = tools
         .iter()
         .map(|tool| {
             let schema: Value = serde_json::from_str(&tool.input_schema_json)
                 .unwrap_or_else(|_| json!({ "type": "object" }));
+            let schema = strip_unsupported_schema_fields(schema);
             json!({
                 "name": tool.name,
                 "description": tool.description,

@@ -236,6 +236,11 @@ impl Gateway {
             }
         }
 
+        tracing::info!(
+            listener_count = tasks.len(),
+            channel_count = self.channels.len(),
+            "gateway listeners started"
+        );
         GatewayListeners { tasks }
     }
 
